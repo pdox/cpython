@@ -217,19 +217,19 @@ The :mod:`signal` module defines the following functions:
    :func:`sigpending`.
 
 
-.. function:: pthread_kill(thread_id, signalnum)
+.. function:: pthread_kill(thread_ident, signalnum)
 
-   Send the signal *signalnum* to the thread *thread_id*, another thread in the
-   same process as the caller.  The target thread can be executing any code
-   (Python or not).  However, if the target thread is executing the Python
-   interpreter, the Python signal handlers will be :ref:`executed by the main
-   thread <signals-and-threads>`.  Therefore, the only point of sending a
-   signal to a particular Python thread would be to force a running system call
-   to fail with :exc:`InterruptedError`.
+   Send the signal *signalnum* to the thread identified by *thread_ident*,
+   another thread in the same process as the caller.  The target thread can be
+   executing any code (Python or not).  However, if the target thread is
+   executing the Python interpreter, the Python signal handlers will be
+   :ref:`executed by the main thread <signals-and-threads>`.  Therefore, the
+   only point of sending a signal to a particular Python thread would be to
+   force a running system call to fail with :exc:`InterruptedError`.
 
    Use :func:`threading.get_ident()` or the :attr:`~threading.Thread.ident`
    attribute of :class:`threading.Thread` objects to get a suitable value
-   for *thread_id*.
+   for *thread_ident*.
 
    If *signalnum* is 0, then no signal is sent, but error checking is still
    performed; this can be used to check if the target thread is still running.

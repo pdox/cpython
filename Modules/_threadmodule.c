@@ -12,6 +12,118 @@ static PyObject *str_dict;
 
 _Py_IDENTIFIER(stderr);
 
+/* Opaque Thread Id objects. These are private to _threadmodule.c */
+typedef struct {
+    PyObject_HEAD
+    unsigned long thread_id;
+    char valid;
+} PyThreadIdObject;
+
+static void
+tid_dealloc(PyThreadIdObject *self)
+{
+    PyObject_Del(self);
+}
+
+static PyObject *
+tid_repr(PyThreadIdObject *self)
+{
+    return PyUnicode_FromFormat("<%s%s object for 0x%lx at %p>",
+        self->valid ? "" : "invalidated ", Py_TYPE(self)->tp_name, self->thread_id, self);
+}
+
+static PyObject *
+tid_getattro(PyThreadIdObject *self, PyObject *nameobj) {
+    const char *name = "";
+    PyObject *ret = NULL;
+    if (PyUnicode_Check(nameobj)) {
+        name = PyUnicode_AsUTF8(nameobj);
+        if (name == NULL)
+            return NULL;
+    }
+
+    if (strcmp(name, "raw") == 0) {
+        ret = PyLong_FromUnsignedLong(self->thread_id);
+    } else if (strcmp(name, "valid") == 0) {
+        ret = PyBool_FromLong(self->valid);
+    } else {
+        ret = PyObject_GenericGetAttr((PyObject *)self, nameobj);
+    }
+    return ret;
+}
+
+PyTypeObject PyThreadId_Type = {
+    PyVarObject_HEAD_INIT(&PyType_Type, 0)
+    "_thread.thread_ident",             /*tp_name*/
+    sizeof(PyThreadIdObject),           /*tp_size*/
+    0,                                  /*tp_itemsize*/
+    /* methods */
+    (destructor)tid_dealloc,            /*tp_dealloc*/
+    0,                                  /*tp_print*/
+    0,                                  /*tp_getattr*/
+    0,                                  /*tp_setattr*/
+    0,                                  /*tp_reserved*/
+    (reprfunc)tid_repr,                 /*tp_repr*/
+    0,                                  /*tp_as_number*/
+    0,                                  /*tp_as_sequence*/
+    0,                                  /*tp_as_mapping*/
+    0,                                  /*tp_hash*/
+    0,                                  /*tp_call*/
+    0,                                  /*tp_str*/
+    (getattrofunc)tid_getattro,         /*tp_getattro*/
+    0,                                  /*tp_setattro*/
+    0,                                  /*tp_as_buffer*/
+    Py_TPFLAGS_DEFAULT,                 /*tp_flags*/
+    0,                                  /*tp_doc*/
+    0,                                  /*tp_traverse*/
+    0,                                  /*tp_clear*/
+    0,                                  /*tp_richcompare*/
+    0,                                  /*tp_weaklistoffset*/
+    0,                                  /*tp_iter*/
+    0,                                  /*tp_iternext*/
+    0,                                  /*tp_methods*/
+};
+
+unsigned long
+PyThreadId_Raw(PyObject *self)
+{
+    assert(self != NULL);
+    assert(Py_TYPE(self) != &PyThreadId_Type);
+    return ((PyThreadIdObject*)self)->thread_id;
+}
+
+int
+PyThreadId_IsValid(PyObject *self)
+{
+    assert(self != NULL);
+    assert(Py_Type(self) == &PyThreadId_Type);
+    return ((PyThreadIdObject*)self)->valid;
+}
+
+void
+PyThreadId_Invalidate(PyObject *self) {
+    assert(self != NULL);
+    assert(Py_Type(self) == &PyThreadId_Type);
+    ((PyThreadIdObject*)self)->valid = 0;
+}
+
+
+/* This is called once per thread to produce a unique thread_id
+ * opaque object, and stored as tstate->ident.
+ *
+ */
+static PyThreadIdObject *
+newtidobject(unsigned long thread_id, char valid)
+{
+    PyThreadIdObject *self;
+    self = PyObject_New(PyThreadIdObject, &PyThreadId_Type);
+    if (self == NULL)
+        return NULL;
+    self->thread_id = thread_id;
+    self->valid = valid;
+    return self;
+}
+
 /* Lock objects */
 
 typedef struct {
@@ -983,7 +1095,6 @@ t_bootstrap(void *boot_raw)
     PyObject *res;
 
     tstate = boot->tstate;
-    tstate->thread_id = PyThread_get_thread_ident();
     _PyThreadState_Init(tstate);
     PyEval_AcquireThread(tstate);
     tstate->interp->num_threads++;
@@ -1023,8 +1134,9 @@ static PyObject *
 thread_PyThread_start_new_thread(PyObject *self, PyObject *fargs)
 {
     PyObject *func, *args, *keyw = NULL;
+    PyObject *ident;
     struct bootstate *boot;
-    unsigned long ident;
+    unsigned long thread_id;
 
     if (!PyArg_UnpackTuple(fargs, "start_new_thread", 2, 3,
                            &func, &args, &keyw))
@@ -1060,8 +1172,8 @@ thread_PyThread_start_new_thread(PyObject *self, PyObject *fargs)
     Py_INCREF(args);
     Py_XINCREF(keyw);
     PyEval_InitThreads(); /* Start the interpreter's thread-awareness */
-    ident = PyThread_start_new_thread(t_bootstrap, (void*) boot);
-    if (ident == PYTHREAD_INVALID_THREAD_ID) {
+    thread_id = PyThread_start_new_thread(t_bootstrap, (void*) boot);
+    if (thread_id == PYTHREAD_INVALID_THREAD_ID) {
         PyErr_SetString(ThreadError, "can't start new thread");
         Py_DECREF(func);
         Py_DECREF(args);
@@ -1070,7 +1182,9 @@ thread_PyThread_start_new_thread(PyObject *self, PyObject *fargs)
         PyMem_DEL(boot);
         return NULL;
     }
-    return PyLong_FromUnsignedLong(ident);
+    ident = boot->tstate->ident = (PyObject*)newtidobject(thread_id, 1);
+    Py_INCREF(ident);
+    return ident;
 }
 
 PyDoc_STRVAR(start_new_doc,
@@ -1130,18 +1244,28 @@ information about locks.");
 static PyObject *
 thread_get_ident(PyObject *self)
 {
-    unsigned long ident = PyThread_get_thread_ident();
-    if (ident == PYTHREAD_INVALID_THREAD_ID) {
-        PyErr_SetString(ThreadError, "no current thread ident");
-        return NULL;
+    PyThreadState *tstate = PyThreadState_Get();
+    PyObject *ident = tstate->ident;
+    if (ident == NULL) {
+        /* This happens in the main thread */
+        unsigned long thread_id = PyThread_get_thread_ident();
+        if (thread_id == PYTHREAD_INVALID_THREAD_ID) {
+            PyErr_SetString(ThreadError, "no current thread ident");
+            return NULL;
+        }
+        ident = tstate->ident = (PyObject*)newtidobject(thread_id, 1);
+        if (ident == NULL) {
+            return NULL;
+        }
     }
-    return PyLong_FromUnsignedLong(ident);
+    Py_INCREF(ident);
+    return ident;
 }
 
 PyDoc_STRVAR(get_ident_doc,
-"get_ident() -> integer\n\
+"get_ident() -> _thread.thread_id\n\
 \n\
-Return a non-zero integer that uniquely identifies the current thread\n\
+Return an opaque object that uniquely identifies the current thread\n\
 amongst other threads that exist simultaneously.\n\
 This may be used to identify per-thread resources.\n\
 Even though on some platforms threads identities may appear to be\n\

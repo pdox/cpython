@@ -160,7 +160,12 @@ typedef struct _ts {
     int gilstate_counter;
 
     PyObject *async_exc; /* Asynchronous exception to raise */
-    unsigned long thread_id; /* Thread id where this tstate was created */
+
+    /* ident object for this thread. This is an opaque reference to the
+     * underlying OS thread_id, which gets invalidated before the thread
+     * exits. The ident object for a thread must not change once set.
+     */
+    PyObject *ident;
 
     int trash_delete_nesting;
     PyObject *trash_delete_later;
@@ -251,7 +256,7 @@ PyAPI_FUNC(PyThreadState *) _PyThreadState_UncheckedGet(void);
 
 PyAPI_FUNC(PyThreadState *) PyThreadState_Swap(PyThreadState *);
 PyAPI_FUNC(PyObject *) PyThreadState_GetDict(void);
-PyAPI_FUNC(int) PyThreadState_SetAsyncExc(unsigned long, PyObject *);
+PyAPI_FUNC(int) PyThreadState_SetAsyncExc(PyObject *, PyObject *);
 
 
 /* Variable and macro for in-line access to current thread state */

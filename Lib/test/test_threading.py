@@ -183,7 +183,7 @@ class ThreadTests(BaseTestCase):
         ctypes = import_module("ctypes")
 
         set_async_exc = ctypes.pythonapi.PyThreadState_SetAsyncExc
-        set_async_exc.argtypes = (ctypes.c_ulong, ctypes.py_object)
+        set_async_exc.argtypes = (ctypes.py_object, ctypes.py_object)
 
         class AsyncExc(Exception):
             pass
@@ -192,9 +192,6 @@ class ThreadTests(BaseTestCase):
 
         # First check it works when setting the exception from the same thread.
         tid = threading.get_ident()
-        self.assertIsInstance(tid, int)
-        self.assertGreater(tid, 0)
-
         try:
             result = set_async_exc(tid, exception)
             # The exception is async, so we might have to keep the VM busy until
@@ -242,7 +239,7 @@ class ThreadTests(BaseTestCase):
         # Try a thread id that doesn't make sense.
         if verbose:
             print("    trying nonsensical thread id")
-        result = set_async_exc(-1, exception)
+        result = set_async_exc(None, exception)
         self.assertEqual(result, 0)  # no thread states modified
 
         # Now raise an exception in the worker thread.

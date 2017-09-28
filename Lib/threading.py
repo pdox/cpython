@@ -823,7 +823,7 @@ class Thread:
         if self._daemonic:
             status += " daemon"
         if self._ident is not None:
-            status += " %s" % self._ident
+            status += " %s" % self._ident.raw
         return "<%s(%s, %s)>" % (self.__class__.__name__, self._name, status)
 
     def start(self):

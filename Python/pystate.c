@@ -3,6 +3,7 @@
 
 #include "Python.h"
 #include "internal/pystate.h"
+#include "../Modules/_threadmodule.h"
 
 #define GET_TSTATE() \
     ((PyThreadState*)_Py_atomic_load_relaxed(&_PyThreadState_Current))
@@ -244,7 +245,7 @@ new_threadstate(PyInterpreterState *interp, int init)
         tstate->use_tracing = 0;
         tstate->gilstate_counter = 0;
         tstate->async_exc = NULL;
-        tstate->thread_id = PyThread_get_thread_ident();
+        tstate->ident = NULL;
 
         tstate->dict = NULL;
 
@@ -435,6 +436,11 @@ PyThreadState_Clear(PyThreadState *tstate)
     Py_CLEAR(tstate->dict);
     Py_CLEAR(tstate->async_exc);
 
+    if (tstate->ident) {
+        PyThreadId_Invalidate(tstate->ident);
+        Py_CLEAR(tstate->ident);
+    }
+
     Py_CLEAR(tstate->curexc_type);
     Py_CLEAR(tstate->curexc_value);
     Py_CLEAR(tstate->curexc_traceback);
@@ -623,7 +629,7 @@ PyThreadState_GetDict(void)
    existing async exception.  This raises no exceptions. */
 
 int
-PyThreadState_SetAsyncExc(unsigned long id, PyObject *exc)
+PyThreadState_SetAsyncExc(PyObject *ident, PyObject *exc)
 {
     PyInterpreterState *interp = GET_INTERP_STATE();
     PyThreadState *p;
@@ -636,7 +642,7 @@ PyThreadState_SetAsyncExc(unsigned long id, PyObject *exc)
      */
     HEAD_LOCK();
     for (p = interp->tstate_head; p != NULL; p = p->next) {
-        if (p->thread_id == id) {
+        if (p->ident == ident) {
             /* Tricky:  we need to decref the current value
              * (if any) in p->async_exc, but that can in turn
              * allow arbitrary Python code to run, including
@@ -713,16 +719,14 @@ _PyThread_CurrentFrames(void)
     for (i = _PyRuntime.interpreters.head; i != NULL; i = i->next) {
         PyThreadState *t;
         for (t = i->tstate_head; t != NULL; t = t->next) {
-            PyObject *id;
             int stat;
             struct _frame *frame = t->frame;
             if (frame == NULL)
                 continue;
-            id = PyLong_FromUnsignedLong(t->thread_id);
-            if (id == NULL)
-                goto Fail;
-            stat = PyDict_SetItem(result, id, (PyObject *)frame);
-            Py_DECREF(id);
+            PyObject *ident = t->ident;
+            if (ident == NULL)
+                continue;
+            stat = PyDict_SetItem(result, ident, (PyObject *)frame);
             if (stat < 0)
                 goto Fail;
         }

@@ -1,0 +1,1 @@
+Replace integer thread_id's with opaque type _thread.thread_ident

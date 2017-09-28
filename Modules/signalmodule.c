@@ -11,6 +11,8 @@
 #include "socketmodule.h"   /* needed for SOCKET_T */
 #endif
 
+#include "_threadmodule.h"
+
 #ifdef MS_WINDOWS
 #include <windows.h>
 #ifdef HAVE_PROCESS_H
@@ -1101,7 +1103,7 @@ signal_sigtimedwait_impl(PyObject *module, PyObject *sigset,
 /*[clinic input]
 signal.pthread_kill
 
-    thread_id:  unsigned_long(bitwise=True)
+    thread_id:  object(subclass_of='&PyThreadId_Type')
     signalnum:  int
     /
 
@@ -1109,13 +1111,18 @@ Send a signal to a thread.
 [clinic start generated code]*/
 
 static PyObject *
-signal_pthread_kill_impl(PyObject *module, unsigned long thread_id,
+signal_pthread_kill_impl(PyObject *module, PyObject *thread_id,
                          int signalnum)
-/*[clinic end generated code: output=7629919b791bc27f input=1d901f2c7bb544ff]*/
+/*[clinic end generated code: output=3255bcf1f10e6e4d input=3a045bdd0ca35940]*/
 {
     int err;
-
-    err = pthread_kill((pthread_t)thread_id, signalnum);
+    unsigned long thread_id_raw;
+    if (!PyThreadId_IsValid(thread_id)) {
+        PyErr_SetString(PyExc_ValueError, "thread_id has been invalidated");
+        return NULL;
+    }
+    thread_id_raw = PyThreadId_Raw(thread_id);
+    err = pthread_kill((pthread_t)thread_id_raw, signalnum);
     if (err != 0) {
         errno = err;
         PyErr_SetFromErrno(PyExc_OSError);

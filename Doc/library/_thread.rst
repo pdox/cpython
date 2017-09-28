@@ -79,10 +79,9 @@ This module defines the following constants and functions:
 
 .. function:: get_ident()
 
-   Return the 'thread identifier' of the current thread.  This is a nonzero
-   integer.  Its value has no direct meaning; it is intended as a magic cookie to
-   be used e.g. to index a dictionary of thread-specific data.  Thread identifiers
-   may be recycled when a thread exits and another thread is created.
+   Return the 'thread identifier' of the current thread.  This is an opaque
+   object.  Its value has no direct meaning; it is intended as a magic cookie to
+   be used e.g. to index a dictionary of thread-specific data.
 
 
 .. function:: stack_size([size])

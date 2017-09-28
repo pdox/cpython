@@ -8,6 +8,8 @@
 #include "frameobject.h"
 #include "structmember.h"
 #include "osdefs.h"
+#include "../Modules/_threadmodule.h"
+
 #ifdef HAVE_FCNTL_H
 #include <fcntl.h>
 #endif
@@ -731,9 +733,10 @@ write_thread_id(int fd, PyThreadState *tstate, int is_current)
         PUTS(fd, "Current thread 0x");
     else
         PUTS(fd, "Thread 0x");
-    _Py_DumpHexadecimal(fd,
-                        tstate->thread_id,
-                        sizeof(unsigned long) * 2);
+    PyObject *ident = tstate->ident;
+    unsigned long thread_id =
+        ident ? PyThreadId_Raw(ident) : PYTHREAD_INVALID_THREAD_ID;
+    _Py_DumpHexadecimal(fd, thread_id, sizeof(unsigned long) * 2);
     PUTS(fd, " (most recent call first):\n");
 }
 

@@ -289,7 +289,7 @@ class LogRecord(object):
         self.msecs = (ct - int(ct)) * 1000
         self.relativeCreated = (self.created - _startTime) * 1000
         if logThreads:
-            self.thread = threading.get_ident()
+            self.thread = threading.get_ident().raw
             self.threadName = threading.current_thread().name
         else: # pragma: no cover
             self.thread = None

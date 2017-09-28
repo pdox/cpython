@@ -2646,7 +2646,7 @@ unicode_fromformat_arg(_PyUnicodeWriter *writer,
     longlongflag = 0;
     size_tflag = 0;
     if (*f == 'l') {
-        if (f[1] == 'd' || f[1] == 'u' || f[1] == 'i') {
+        if (f[1] == 'd' || f[1] == 'u' || f[1] == 'i' || f[1] == 'x') {
             longflag = 1;
             ++f;
         }
@@ -2703,7 +2703,10 @@ unicode_fromformat_arg(_PyUnicodeWriter *writer,
                         va_arg(*vargs, unsigned int));
         }
         else if (*f == 'x') {
-            len = sprintf(buffer, "%x", va_arg(*vargs, int));
+            if (longflag)
+                len = sprintf(buffer, "%lx", va_arg(*vargs, unsigned long));
+            else
+                len = sprintf(buffer, "%x", va_arg(*vargs, unsigned int));
         }
         else {
             if (longflag)
