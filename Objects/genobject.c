@@ -182,13 +182,14 @@ gen_send_ex(PyGenObject *gen, PyObject *arg, int exc, int closing)
 
     /* Generators always return to their most recent caller, not
      * necessarily their creator. */
-    Py_XINCREF(tstate->frame);
-    assert(f->f_back == NULL);
-    f->f_back = tstate->frame;
+
+    _PyFrame_Activate(tstate, f);
 
     gen->gi_running = 1;
     result = PyEval_EvalFrameEx(f, exc);
     gen->gi_running = 0;
+
+    _PyFrame_Deactivate(tstate, f);
 
     /* Don't keep the reference to f_back any longer than necessary.  It
      * may keep a chain of frames alive or it could create a reference

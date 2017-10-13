@@ -70,6 +70,9 @@ typedef struct _is {
     /* Used in Python/thread.c. */
     size_t pythread_stacksize;
 
+    /* Default object stack size for a thread */
+    size_t object_stacksize;
+
     PyObject *codec_search_path;
     PyObject *codec_search_cache;
     PyObject *codec_error_registry;
@@ -130,7 +133,13 @@ typedef struct _ts {
     struct _ts *next;
     PyInterpreterState *interp;
 
-    struct _frame *frame;
+    PyObject **stack_start; /* First entry on stack */
+    PyObject **stack_top; /* First free entry on stack */
+    PyObject **stack_end; /* One entry after the last valid stack entry */
+
+    struct _stackframe **frame_stack;
+    int frame_depth;
+
     int recursion_depth;
     char overflowed; /* The stack has overflowed. Allow 50 more calls
                         to handle the runtime error. */

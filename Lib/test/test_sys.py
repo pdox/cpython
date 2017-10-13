@@ -897,13 +897,14 @@ class SizeofTest(unittest.TestCase):
         # code
         def check_code_size(a, expected_size):
             self.assertGreaterEqual(sys.getsizeof(a), expected_size)
-        check_code_size(get_cell().__code__, size('6i13P'))
-        check_code_size(get_cell.__code__, size('6i13P'))
+        py_code_object_size = size('6i12P')
+        check_code_size(get_cell().__code__, py_code_object_size)
+        check_code_size(get_cell.__code__, py_code_object_size)
         def get_cell2(x):
             def inner():
                 return x
             return inner
-        check_code_size(get_cell2.__code__, size('6i13P') + calcsize('n'))
+        check_code_size(get_cell2.__code__, py_code_object_size + calcsize('n'))
         # complex
         check(complex(0,1), size('2d'))
         # method_descriptor (descriptor object)
@@ -971,7 +972,7 @@ class SizeofTest(unittest.TestCase):
         nfrees = len(x.f_code.co_freevars)
         extras = x.f_code.co_stacksize + x.f_code.co_nlocals +\
                   ncells + nfrees - 1
-        check(x, vsize('8P2c4P3ic' + CO_MAXBLOCKS*'3i' + 'P' + extras*'P'))
+        check(x, size('8Pn2P2c4P3i2c' + CO_MAXBLOCKS*'3i' + 'P' + extras*'P'))
         # function
         def func(): pass
         check(func, size('12P'))

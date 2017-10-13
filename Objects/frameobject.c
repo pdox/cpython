@@ -416,7 +416,7 @@ static void _Py_HOT_FUNCTION
 frame_dealloc(PyFrameObject *f)
 {
     PyObject **p, **valuestack;
-    PyCodeObject *co;
+    PyCodeObject *co = f->f_code;
 
     if (_PyObject_GC_IS_TRACKED(f))
         _PyObject_GC_UNTRACK(f);
@@ -433,6 +433,14 @@ frame_dealloc(PyFrameObject *f)
             Py_XDECREF(*p);
     }
 
+    if (f->f_allocated) {
+        PyObject_FREE(f->f_localsplus);
+    } else {
+        assert(f->f_localsplus + f->f_width == f->f_tstate->stack_top);
+        f->f_tstate->stack_top -= f->f_width;
+        assert(f->f_tstate->stack_top >= f->f_tstate->stack_start);
+    }
+
     Py_XDECREF(f->f_back);
     Py_DECREF(f->f_builtins);
     Py_DECREF(f->f_globals);
@@ -442,10 +450,7 @@ frame_dealloc(PyFrameObject *f)
     Py_CLEAR(f->f_exc_value);
     Py_CLEAR(f->f_exc_traceback);
 
-    co = f->f_code;
-    if (co->co_zombieframe == NULL)
-        co->co_zombieframe = f;
-    else if (numfree < PyFrame_MAXFREELIST) {
+    if (numfree < PyFrame_MAXFREELIST) {
         ++numfree;
         f->f_back = free_list;
         free_list = f;
@@ -542,15 +547,8 @@ PyDoc_STRVAR(clear__doc__,
 static PyObject *
 frame_sizeof(PyFrameObject *f)
 {
-    Py_ssize_t res, extras, ncells, nfrees;
-
-    ncells = PyTuple_GET_SIZE(f->f_code->co_cellvars);
-    nfrees = PyTuple_GET_SIZE(f->f_code->co_freevars);
-    extras = f->f_code->co_stacksize + f->f_code->co_nlocals +
-             ncells + nfrees;
-    /* subtract one as it is already included in PyFrameObject */
-    res = sizeof(PyFrameObject) + (extras-1) * sizeof(PyObject *);
-
+    Py_ssize_t res;
+    res = sizeof(PyFrameObject) + f->f_width * sizeof(PyObject *);
     return PyLong_FromSsize_t(res);
 }
 
@@ -569,7 +567,7 @@ PyTypeObject PyFrame_Type = {
     PyVarObject_HEAD_INIT(&PyType_Type, 0)
     "frame",
     sizeof(PyFrameObject),
-    sizeof(PyObject *),
+    0,                                          /* tp_itemsize */
     (destructor)frame_dealloc,                  /* tp_dealloc */
     0,                                          /* tp_print */
     0,                                          /* tp_getattr */
@@ -610,14 +608,111 @@ int _PyFrame_Init()
     return 1;
 }
 
+int
+_PyFrame_EnsureHeap(PyThreadState *tstate, PyFrameObject *f) {
+    /* Move the frame's stack to the heap, if not already there.
+       This should happen rarely, only when we leave a non-generator
+       frame and the frame's reference count is > 1, requiring
+       us to keep the frame stack alive on the heap.
+    */
+    assert(tstate == f->f_tstate);
+    if (f->f_allocated)
+        return 0;
+
+    /* This can only work if f is at the top of the thread's stack */
+    assert(f->f_localsplus + f->f_width == tstate->stack_top);
+    PyObject **stack = (PyObject**)PyObject_MALLOC(f->f_width * sizeof(PyObject*));
+    if (stack == NULL) {
+        PyErr_NoMemory();
+        return -1;
+    }
+    memcpy(stack, f->f_localsplus, f->f_width * sizeof(PyObject*));
+    Py_ssize_t valuestack_offset = f->f_valuestack - f->f_localsplus;
+    PyObject **new_stacktop;
+    if (f->f_stacktop == NULL) {
+        new_stacktop = NULL;
+     } else {
+        Py_ssize_t stacktop_offset = f->f_stacktop - f->f_localsplus;
+        new_stacktop = stack + stacktop_offset;
+     }
+
+    f->f_localsplus = stack;
+    f->f_valuestack = stack + valuestack_offset;
+    f->f_stacktop = new_stacktop;
+    f->f_allocated = 1;
+    tstate->stack_top -= f->f_width;
+    assert(tstate->stack_top >= tstate->stack_start);
+    return 0;
+}
+
+void
+_PyFrame_Activate(PyThreadState *tstate, PyFrameObject *f)
+{
+    /* Activate a frame.
+       The only frames which are explicitly activated through
+       this function are heap-allocated ones, such as generators.
+       Thread stack frames are activated at creation time, by
+       _PyFrame_New_NoTrack.
+     */
+    assert(f->f_allocated);
+    assert(f->f_tstate == NULL);
+    assert(f->f_back == NULL);
+    Py_XINCREF(tstate->frame);
+    f->f_back = tstate->frame;
+    Py_INCREF(f);
+    tstate->frame = f;
+    f->f_tstate = tstate;
+}
+
+void
+_PyFrame_Deactivate(PyThreadState *tstate, PyFrameObject *f)
+{
+    /* Deactivate a frame after evaluation completes. This
+       function should always be paired with _PyFrame_New_NoTrack.
+       This consumes a reference to f.
+     */
+    assert(f->f_tstate == tstate);
+    assert(tstate->frame == f);
+    tstate->frame = f->f_back;
+
+    if (Py_REFCNT(f) > 1) {
+        if (_PyFrame_EnsureHeap(tstate, f)) {
+            /* This is fatal. We can't leave the frame in a bad state because
+               another reference is being held, we can't leave the frame's
+               locals on the thread stack because it needs to be deactivated,
+               and we're out of memory to allocate on the heap.
+             */
+            Py_FatalError("Out of memory in _PyFrame_Deactivate");
+        }
+        f->f_tstate = NULL;
+        Py_DECREF(f);
+        if (!_PyObject_GC_IS_TRACKED(f)) {
+            _PyObject_GC_TRACK(f);
+        }
+    }
+    else {
+        /* decref'ing the frame can cause __del__ methods to get invoked,
+           which can call back into Python.  While we're done with the
+           current Python frame (f), the associated C stack is still in use,
+           so recursion_depth must be boosted for the duration.
+        */
+        ++tstate->recursion_depth;
+        Py_DECREF(f);
+        --tstate->recursion_depth;
+    }
+}
+
 PyFrameObject* _Py_HOT_FUNCTION
 _PyFrame_New_NoTrack(PyThreadState *tstate, PyCodeObject *code,
                      PyObject *globals, PyObject *locals)
 {
+    /* This function should always be paired with _PyFrame_Deactivate */
     PyFrameObject *back = tstate->frame;
     PyFrameObject *f;
     PyObject *builtins;
-    Py_ssize_t i;
+    Py_ssize_t width, slots, ncells, nfrees;
+    int allocated_stack;
+    PyObject **stack;
 
 #ifdef Py_DEBUG
     if (code == NULL || globals == NULL || !PyDict_Check(globals) ||
@@ -626,6 +721,28 @@ _PyFrame_New_NoTrack(PyThreadState *tstate, PyCodeObject *code,
         return NULL;
     }
 #endif
+
+    ncells = PyTuple_GET_SIZE(code->co_cellvars);
+    nfrees = PyTuple_GET_SIZE(code->co_freevars);
+    slots = code->co_nlocals + ncells + nfrees;
+    width = code->co_stacksize + slots;
+    if (code->co_flags & (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR)) {
+        allocated_stack = 1;
+        stack = (PyObject**)PyObject_MALLOC(width * sizeof(PyObject*));
+        if (stack == NULL) {
+            PyErr_NoMemory();
+            return NULL;
+        }
+    } else {
+        allocated_stack = 0;
+        stack = tstate->stack_top;
+        if (stack + width > tstate->stack_end) {
+            PyErr_StackOverflow();
+            return NULL;
+        }
+        tstate->stack_top += width;
+    }
+
     if (back == NULL || back->f_globals != globals) {
         builtins = _PyDict_GetItemId(globals, &PyId___builtins__);
         if (builtins) {
@@ -641,7 +758,7 @@ _PyFrame_New_NoTrack(PyThreadState *tstate, PyCodeObject *code,
             if (builtins == NULL ||
                 PyDict_SetItemString(
                     builtins, "None", Py_None) < 0)
-                return NULL;
+                goto early_fail;
         }
         else
             Py_INCREF(builtins);
@@ -654,53 +771,45 @@ _PyFrame_New_NoTrack(PyThreadState *tstate, PyCodeObject *code,
         assert(builtins != NULL);
         Py_INCREF(builtins);
     }
-    if (code->co_zombieframe != NULL) {
-        f = code->co_zombieframe;
-        code->co_zombieframe = NULL;
-        _Py_NewReference((PyObject *)f);
-        assert(f->f_code == code);
+
+    if (free_list == NULL) {
+        f = PyObject_GC_New(PyFrameObject, &PyFrame_Type);
+        if (f == NULL) {
+            Py_DECREF(builtins);
+            goto early_fail;
+        }
     }
     else {
-        Py_ssize_t extras, ncells, nfrees;
-        ncells = PyTuple_GET_SIZE(code->co_cellvars);
-        nfrees = PyTuple_GET_SIZE(code->co_freevars);
-        extras = code->co_stacksize + code->co_nlocals + ncells +
-            nfrees;
-        if (free_list == NULL) {
-            f = PyObject_GC_NewVar(PyFrameObject, &PyFrame_Type,
-            extras);
-            if (f == NULL) {
-                Py_DECREF(builtins);
-                return NULL;
-            }
-        }
-        else {
-            assert(numfree > 0);
-            --numfree;
-            f = free_list;
-            free_list = free_list->f_back;
-            if (Py_SIZE(f) < extras) {
-                PyFrameObject *new_f = PyObject_GC_Resize(PyFrameObject, f, extras);
-                if (new_f == NULL) {
-                    PyObject_GC_Del(f);
-                    Py_DECREF(builtins);
-                    return NULL;
-                }
-                f = new_f;
-            }
-            _Py_NewReference((PyObject *)f);
-        }
-
-        f->f_code = code;
-        extras = code->co_nlocals + ncells + nfrees;
-        f->f_valuestack = f->f_localsplus + extras;
-        for (i=0; i<extras; i++)
-            f->f_localsplus[i] = NULL;
-        f->f_locals = NULL;
-        f->f_trace = NULL;
-        f->f_exc_type = f->f_exc_value = f->f_exc_traceback = NULL;
+        assert(numfree > 0);
+        --numfree;
+        f = free_list;
+        free_list = free_list->f_back;
+        _Py_NewReference((PyObject *)f);
     }
-    f->f_stacktop = f->f_valuestack;
+
+    /* tstate owns the reference to f, return is borrowed. */
+    f->f_tstate = tstate;
+    tstate->frame = f;
+
+    f->f_code = code;
+    f->f_localsplus = stack;
+    f->f_valuestack = f->f_stacktop = stack + slots;
+    f->f_width = width;
+    f->f_allocated = allocated_stack;
+    memset(f->f_localsplus, 0, slots * sizeof(PyObject*));
+
+    f->f_lasti = -1;
+    f->f_lineno = code->co_firstlineno;
+    f->f_iblock = 0;
+    f->f_executing = 0;
+    f->f_gen = NULL;
+    f->f_trace_opcodes = 0;
+    f->f_trace_lines = 1;
+
+    f->f_locals = NULL;
+    f->f_trace = NULL;
+    f->f_exc_type = f->f_exc_value = f->f_exc_traceback = NULL;
+
     f->f_builtins = builtins;
     Py_XINCREF(back);
     f->f_back = back;
@@ -726,24 +835,27 @@ _PyFrame_New_NoTrack(PyThreadState *tstate, PyCodeObject *code,
         f->f_locals = locals;
     }
 
-    f->f_lasti = -1;
-    f->f_lineno = code->co_firstlineno;
-    f->f_iblock = 0;
-    f->f_executing = 0;
-    f->f_gen = NULL;
-    f->f_trace_opcodes = 0;
-    f->f_trace_lines = 1;
-
     return f;
+
+  early_fail:
+    if (allocated_stack) {
+        PyObject_FREE(stack);
+    } else {
+        tstate->stack_top -= width;
+    }
+    return NULL;
 }
+
 
 PyFrameObject*
 PyFrame_New(PyThreadState *tstate, PyCodeObject *code,
             PyObject *globals, PyObject *locals)
 {
     PyFrameObject *f = _PyFrame_New_NoTrack(tstate, code, globals, locals);
-    if (f)
-        _PyObject_GC_TRACK(f);
+    if (f) {
+        Py_INCREF(f);
+        _PyFrame_Deactivate(tstate, f);
+    }
     return f;
 }
 

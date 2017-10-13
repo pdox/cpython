@@ -281,16 +281,7 @@ function_code_fastcall(PyCodeObject *co, PyObject **args, Py_ssize_t nargs,
         fastlocals[i] = *args++;
     }
     result = PyEval_EvalFrameEx(f,0);
-
-    if (Py_REFCNT(f) > 1) {
-        Py_DECREF(f);
-        _PyObject_GC_TRACK(f);
-    }
-    else {
-        ++tstate->recursion_depth;
-        Py_DECREF(f);
-        --tstate->recursion_depth;
-    }
+    _PyFrame_Deactivate(tstate, f);
     return result;
 }
 

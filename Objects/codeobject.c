@@ -195,7 +195,6 @@ PyCode_New(int argcount, int kwonlyargcount,
     co->co_firstlineno = firstlineno;
     Py_INCREF(lnotab);
     co->co_lnotab = lnotab;
-    co->co_zombieframe = NULL;
     co->co_weakreflist = NULL;
     co->co_extra = NULL;
     return co;
@@ -433,8 +432,6 @@ code_dealloc(PyCodeObject *co)
     Py_XDECREF(co->co_lnotab);
     if (co->co_cell2arg != NULL)
         PyMem_FREE(co->co_cell2arg);
-    if (co->co_zombieframe != NULL)
-        PyObject_GC_Del(co->co_zombieframe);
     if (co->co_weakreflist != NULL)
         PyObject_ClearWeakRefs((PyObject*)co);
     PyObject_DEL(co);

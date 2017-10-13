@@ -239,6 +239,7 @@ PyAPI_DATA(PyObject *) PyExc_ResourceWarning;
 
 PyAPI_FUNC(int) PyErr_BadArgument(void);
 PyAPI_FUNC(PyObject *) PyErr_NoMemory(void);
+PyAPI_FUNC(PyObject *) PyErr_StackOverflow(void);
 PyAPI_FUNC(PyObject *) PyErr_SetFromErrno(PyObject *);
 PyAPI_FUNC(PyObject *) PyErr_SetFromErrnoWithFilenameObject(
     PyObject *, PyObject *);

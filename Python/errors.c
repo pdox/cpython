@@ -455,6 +455,13 @@ PyErr_NoMemory(void)
 }
 
 PyObject *
+PyErr_StackOverflow(void)
+{
+    PyErr_SetString(PyExc_RuntimeError, "thread stack overflow");
+    return NULL;
+}
+
+PyObject *
 PyErr_SetFromErrnoWithFilenameObject(PyObject *exc, PyObject *filenameObject)
 {
     return PyErr_SetFromErrnoWithFilenameObjects(exc, filenameObject, NULL);
