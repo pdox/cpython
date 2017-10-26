@@ -106,7 +106,9 @@ PyInterpreterState_New(void)
         interp->check_interval = 100;
         interp->num_threads = 0;
         interp->pythread_stacksize = 0;
-        interp->stacksize = 65536; /* TODO: Make adjustable */
+        /* TODO: Make adjustable */
+        interp->stacksize = 65536;
+        interp->stacksize_safety = 1024;
         interp->codec_search_path = NULL;
         interp->codec_search_cache = NULL;
         interp->codec_error_registry = NULL;
@@ -236,8 +238,8 @@ threadstate_getframe(PyThreadState *self)
 static PyThreadState *
 new_threadstate(PyInterpreterState *interp, int init)
 {
-    Py_ssize_t stack_slots = interp->object_stacksize;
-    Py_ssize_t total_size = sizeof(PyThreadState) + stack_slots * sizeof(PyObject*);
+    Py_ssize_t total_slots = interp->stacksize + interp->stacksize_safety;
+    Py_ssize_t total_size = sizeof(PyThreadState) + total_slots * sizeof(PyObject*);
     PyThreadState *tstate = (PyThreadState *)PyMem_RawMalloc(total_size);
 
     if (tstate == NULL)
@@ -252,7 +254,9 @@ new_threadstate(PyInterpreterState *interp, int init)
         tstate->frame = NULL;
         tstate->stack_start = (PyObject**)(tstate + 1);
         tstate->stack_top = tstate->stack_start;
-        tstate->stack_end = tstate->stack_start + stack_slots;
+        tstate->stack_limit = tstate->start_stack + interp->stacksize;
+        tstate->stack_end = tstate->stack_start + total_slots;
+        tstate->stack_overflowed = 0;
 
         tstate->recursion_depth = 0;
         tstate->overflowed = 0;

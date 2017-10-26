@@ -646,13 +646,13 @@ _PyFrame_EnsureHeap(PyThreadState *tstate, PyFrameObject *f) {
 }
 
 void
-_PyFrame_Activate(PyThreadState *tstate, PyFrameObject *f)
+_PyFrame_Resume(PyThreadState *tstate, PyFrameObject *f)
 {
-    /* Activate a frame.
-       The only frames which are explicitly activated through
-       this function are heap-allocated ones, such as generators.
-       Thread stack frames are activated at creation time, by
-       _PyFrame_New_NoTrack.
+    /* Resume a frame.
+       The only frames which are resumed are heap-allocated
+       ones, such as generators. Stack frames are activated
+       at creation time, by _PyFrame_Enter.
+       This function should always be paired with _PyFrame_Leave.
      */
     assert(f->f_allocated);
     assert(f->f_tstate == NULL);
@@ -665,7 +665,7 @@ _PyFrame_Activate(PyThreadState *tstate, PyFrameObject *f)
 }
 
 void
-_PyFrame_Deactivate(PyThreadState *tstate, PyFrameObject *f)
+_PyFrame_Leave(PyThreadState *tstate, PyFrameObject *f)
 {
     /* Deactivate a frame after evaluation completes. This
        function should always be paired with _PyFrame_New_NoTrack.
@@ -703,10 +703,10 @@ _PyFrame_Deactivate(PyThreadState *tstate, PyFrameObject *f)
 }
 
 PyFrameObject* _Py_HOT_FUNCTION
-_PyFrame_New_NoTrack(PyThreadState *tstate, PyCodeObject *code,
-                     PyObject *globals, PyObject *locals)
+_PyFrame_Enter(PyThreadState *tstate, PyCodeObject *code,
+               PyObject *globals, PyObject *locals)
 {
-    /* This function should always be paired with _PyFrame_Deactivate */
+    /* This function should always be paired with _PyFrame_Leave */
     PyFrameObject *back = tstate->frame;
     PyFrameObject *f;
     PyObject *builtins;
@@ -735,11 +735,18 @@ _PyFrame_New_NoTrack(PyThreadState *tstate, PyCodeObject *code,
         }
     } else {
         allocated_stack = 0;
-        stack = tstate->stack_top;
-        if (stack + width > tstate->stack_end) {
-            PyErr_StackOverflow();
-            return NULL;
+        if (tstate->stack_overflow) {
+            if (tstate->stack_top + width > tstate->stack_end) {
+                Py_FatalError("Cannot recover from object stack overflow.");
+            }
+        } else {
+            if (tstate->stack_top + width > tstate->stack_limit) {
+                tstate->stack_overflow = 1;
+                PyErr_StackOverflow();
+                return NULL;
+            }
         }
+        stack = tstate->stack_top;
         tstate->stack_top += width;
     }
 
@@ -796,7 +803,7 @@ _PyFrame_New_NoTrack(PyThreadState *tstate, PyCodeObject *code,
     f->f_valuestack = f->f_stacktop = stack + slots;
     f->f_width = width;
     f->f_allocated = allocated_stack;
-    memset(f->f_localsplus, 0, slots * sizeof(PyObject*));
+    //memset(f->f_localsplus, 0, slots * sizeof(PyObject*));
 
     f->f_lasti = -1;
     f->f_lineno = code->co_firstlineno;
