@@ -571,8 +571,6 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
     int instr_ub = -1, instr_lb = 0, instr_prev = -1;
 
     const _Py_CODEUNIT *first_instr;
-    PyObject *names;
-    PyObject *consts;
 
 #ifdef LLTRACE
     _Py_IDENTIFIER(__ltrace__);
@@ -683,11 +681,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
 
 /* Tuple access macros */
 
-#ifndef Py_DEBUG
-#define GETITEM(v, i) PyTuple_GET_ITEM((PyTupleObject *)(v), (i))
-#else
-#define GETITEM(v, i) PyTuple_GetItem((v), (i))
-#endif
+#define GETITEM(v, i) PyTupleInline_GET_ITEM((v), (i))
 
 /* Code access macros */
 
@@ -873,15 +867,12 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
         dtrace_function_entry(f);
 
     co = f->f_code;
-    names = co->co_names;
-    consts = co->co_consts;
     fastlocals = f->f_localsplus;
     freevars = f->f_localsplus + co->co_nlocals;
-    assert(PyBytes_Check(co->co_code));
-    assert(PyBytes_GET_SIZE(co->co_code) <= INT_MAX);
-    assert(PyBytes_GET_SIZE(co->co_code) % sizeof(_Py_CODEUNIT) == 0);
-    assert(_Py_IS_ALIGNED(PyBytes_AS_STRING(co->co_code), sizeof(_Py_CODEUNIT)));
-    first_instr = (_Py_CODEUNIT *) PyBytes_AS_STRING(co->co_code);
+    assert(PyBytesInline_GET_SIZE(co->co_code) <= INT_MAX);
+    assert(PyBytesInline_GET_SIZE(co->co_code) % sizeof(_Py_CODEUNIT) == 0);
+    assert(_Py_IS_ALIGNED(PyBytesInline_AS_STRING(co->co_code), sizeof(_Py_CODEUNIT)));
+    first_instr = (_Py_CODEUNIT *) PyBytesInline_AS_STRING(co->co_code);
     /*
        f->f_lasti refers to the index of the last instruction,
        unless it's -1 in which case next_instr should be first_instr.
@@ -1067,7 +1058,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
             if (value == NULL) {
                 format_exc_check_arg(PyExc_UnboundLocalError,
                                      UNBOUNDLOCAL_ERROR_MSG,
-                                     PyTuple_GetItem(co->co_varnames, oparg));
+                                     PyTupleInline_GET_ITEM(co->co_varnames, oparg));
                 goto error;
             }
             Py_INCREF(value);
@@ -1077,7 +1068,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
 
         PREDICTED(LOAD_CONST);
         TARGET(LOAD_CONST) {
-            PyObject *value = GETITEM(consts, oparg);
+            PyObject *value = GETITEM(co->co_consts, oparg);
             Py_INCREF(value);
             PUSH(value);
             FAST_DISPATCH();
@@ -1577,7 +1568,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
             _Py_IDENTIFIER(__annotations__);
             PyObject *ann_dict;
             PyObject *ann = POP();
-            PyObject *name = GETITEM(names, oparg);
+            PyObject *name = GETITEM(co->co_names, oparg);
             int err;
             if (f->f_locals == NULL) {
                 PyErr_Format(PyExc_SystemError,
@@ -1962,7 +1953,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
         }
 
         TARGET(STORE_NAME) {
-            PyObject *name = GETITEM(names, oparg);
+            PyObject *name = GETITEM(co->co_names, oparg);
             PyObject *v = POP();
             PyObject *ns = f->f_locals;
             int err;
@@ -1983,7 +1974,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
         }
 
         TARGET(DELETE_NAME) {
-            PyObject *name = GETITEM(names, oparg);
+            PyObject *name = GETITEM(co->co_names, oparg);
             PyObject *ns = f->f_locals;
             int err;
             if (ns == NULL) {
@@ -2048,7 +2039,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
         }
 
         TARGET(STORE_ATTR) {
-            PyObject *name = GETITEM(names, oparg);
+            PyObject *name = GETITEM(co->co_names, oparg);
             PyObject *owner = TOP();
             PyObject *v = SECOND();
             int err;
@@ -2062,7 +2053,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
         }
 
         TARGET(DELETE_ATTR) {
-            PyObject *name = GETITEM(names, oparg);
+            PyObject *name = GETITEM(co->co_names, oparg);
             PyObject *owner = POP();
             int err;
             err = PyObject_SetAttr(owner, name, (PyObject *)NULL);
@@ -2073,7 +2064,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
         }
 
         TARGET(STORE_GLOBAL) {
-            PyObject *name = GETITEM(names, oparg);
+            PyObject *name = GETITEM(co->co_names, oparg);
             PyObject *v = POP();
             int err;
             err = PyDict_SetItem(f->f_globals, name, v);
@@ -2084,7 +2075,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
         }
 
         TARGET(DELETE_GLOBAL) {
-            PyObject *name = GETITEM(names, oparg);
+            PyObject *name = GETITEM(co->co_names, oparg);
             int err;
             err = PyDict_DelItem(f->f_globals, name);
             if (err != 0) {
@@ -2096,7 +2087,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
         }
 
         TARGET(LOAD_NAME) {
-            PyObject *name = GETITEM(names, oparg);
+            PyObject *name = GETITEM(co->co_names, oparg);
             PyObject *locals = f->f_locals;
             PyObject *v;
             if (locals == NULL) {
@@ -2147,7 +2138,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
         }
 
         TARGET(LOAD_GLOBAL) {
-            PyObject *name = GETITEM(names, oparg);
+            PyObject *name = GETITEM(co->co_names, oparg);
             PyObject *v;
             if (PyDict_CheckExact(f->f_globals)
                 && PyDict_CheckExact(f->f_builtins))
@@ -2200,7 +2191,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
             format_exc_check_arg(
                 PyExc_UnboundLocalError,
                 UNBOUNDLOCAL_ERROR_MSG,
-                PyTuple_GetItem(co->co_varnames, oparg)
+                PyTupleInline_GET_ITEM(co->co_varnames, oparg)
                 );
             goto error;
         }
@@ -2228,10 +2219,10 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
             PyObject *name, *value, *locals = f->f_locals;
             Py_ssize_t idx;
             assert(locals);
-            assert(oparg >= PyTuple_GET_SIZE(co->co_cellvars));
-            idx = oparg - PyTuple_GET_SIZE(co->co_cellvars);
-            assert(idx >= 0 && idx < PyTuple_GET_SIZE(co->co_freevars));
-            name = PyTuple_GET_ITEM(co->co_freevars, idx);
+            assert(oparg >= PyTupleInline_GET_SIZE(co->co_cellvars));
+            idx = oparg - PyTupleInline_GET_SIZE(co->co_cellvars);
+            assert(idx >= 0 && idx < PyTupleInline_GET_SIZE(co->co_freevars));
+            name = PyTupleInline_GET_ITEM(co->co_freevars, idx);
             if (PyDict_CheckExact(locals)) {
                 value = PyDict_GetItem(locals, name);
                 Py_XINCREF(value);
@@ -2609,7 +2600,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
         }
 
         TARGET(LOAD_ATTR) {
-            PyObject *name = GETITEM(names, oparg);
+            PyObject *name = GETITEM(co->co_names, oparg);
             PyObject *owner = TOP();
             PyObject *res = PyObject_GetAttr(owner, name);
             Py_DECREF(owner);
@@ -2634,7 +2625,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
         }
 
         TARGET(IMPORT_NAME) {
-            PyObject *name = GETITEM(names, oparg);
+            PyObject *name = GETITEM(co->co_names, oparg);
             PyObject *fromlist = POP();
             PyObject *level = TOP();
             PyObject *res;
@@ -2671,7 +2662,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
         }
 
         TARGET(IMPORT_FROM) {
-            PyObject *name = GETITEM(names, oparg);
+            PyObject *name = GETITEM(co->co_names, oparg);
             PyObject *from = TOP();
             PyObject *res;
             res = import_from(from, name);
@@ -3074,7 +3065,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
 
         TARGET(LOAD_METHOD) {
             /* Designed to work in tamdem with CALL_METHOD. */
-            PyObject *name = GETITEM(names, oparg);
+            PyObject *name = GETITEM(co->co_names, oparg);
             PyObject *obj = TOP();
             PyObject *meth = NULL;
 
@@ -3627,7 +3618,7 @@ missing_arguments(PyCodeObject *co, Py_ssize_t missing, Py_ssize_t defcount,
     }
     for (i = start; i < end; i++) {
         if (GETLOCAL(i) == NULL) {
-            PyObject *raw = PyTuple_GET_ITEM(co->co_varnames, i);
+            PyObject *raw = PyTupleInline_GET_ITEM(co->co_varnames, i);
             PyObject *name = PyObject_Repr(raw);
             if (name == NULL) {
                 Py_DECREF(missing_names);
@@ -3781,7 +3772,6 @@ _PyEval_EvalCodeWithName(PyObject *_co, PyObject *globals, PyObject *locals,
     /* Handle keyword arguments passed as two strided arrays */
     kwcount *= kwstep;
     for (i = 0; i < kwcount; i += kwstep) {
-        PyObject **co_varnames;
         PyObject *keyword = kwnames[i];
         PyObject *value = kwargs[i];
         Py_ssize_t j;
@@ -3795,9 +3785,8 @@ _PyEval_EvalCodeWithName(PyObject *_co, PyObject *globals, PyObject *locals,
 
         /* Speed hack: do raw pointer compares. As names are
            normally interned this should almost always hit. */
-        co_varnames = ((PyTupleObject *)(co->co_varnames))->ob_item;
         for (j = 0; j < total_args; j++) {
-            PyObject *name = co_varnames[j];
+            PyObject *name = PyTupleInline_GET_ITEM(co->co_varnames, j);
             if (name == keyword) {
                 goto kw_found;
             }
@@ -3805,7 +3794,7 @@ _PyEval_EvalCodeWithName(PyObject *_co, PyObject *globals, PyObject *locals,
 
         /* Slow fallback, just in case */
         for (j = 0; j < total_args; j++) {
-            PyObject *name = co_varnames[j];
+            PyObject *name = PyTupleInline_GET_ITEM(co->co_varnames, j);
             int cmp = PyObject_RichCompareBool( keyword, name, Py_EQ);
             if (cmp > 0) {
                 goto kw_found;
@@ -3878,7 +3867,7 @@ _PyEval_EvalCodeWithName(PyObject *_co, PyObject *globals, PyObject *locals,
             PyObject *name;
             if (GETLOCAL(i) != NULL)
                 continue;
-            name = PyTuple_GET_ITEM(co->co_varnames, i);
+            name = PyTupleInline_GET_ITEM(co->co_varnames, i);
             if (kwdefs != NULL) {
                 PyObject *def = PyDict_GetItem(kwdefs, name);
                 if (def) {
@@ -3897,7 +3886,7 @@ _PyEval_EvalCodeWithName(PyObject *_co, PyObject *globals, PyObject *locals,
 
     /* Allocate and initialize storage for cell vars, and copy free
        vars into frame. */
-    for (i = 0; i < PyTuple_GET_SIZE(co->co_cellvars); ++i) {
+    for (i = 0; i < PyTupleInline_GET_SIZE(co->co_cellvars); ++i) {
         PyObject *c;
         Py_ssize_t arg;
         /* Possibly account for the cell variable being an argument. */
@@ -3916,10 +3905,10 @@ _PyEval_EvalCodeWithName(PyObject *_co, PyObject *globals, PyObject *locals,
     }
 
     /* Copy closure variables to free variables */
-    for (i = 0; i < PyTuple_GET_SIZE(co->co_freevars); ++i) {
+    for (i = 0; i < PyTupleInline_GET_SIZE(co->co_freevars); ++i) {
         PyObject *o = PyTuple_GET_ITEM(closure, i);
         Py_INCREF(o);
-        freevars[PyTuple_GET_SIZE(co->co_cellvars) + i] = o;
+        freevars[PyTupleInline_GET_SIZE(co->co_cellvars) + i] = o;
     }
 
     /* Handle generator/coroutine/asynchronous generator */
@@ -4964,16 +4953,16 @@ format_exc_unbound(PyCodeObject *co, int oparg)
     /* Don't stomp existing exception */
     if (PyErr_Occurred())
         return;
-    if (oparg < PyTuple_GET_SIZE(co->co_cellvars)) {
-        name = PyTuple_GET_ITEM(co->co_cellvars,
+    if (oparg < PyTupleInline_GET_SIZE(co->co_cellvars)) {
+        name = PyTupleInline_GET_ITEM(co->co_cellvars,
                                 oparg);
         format_exc_check_arg(
             PyExc_UnboundLocalError,
             UNBOUNDLOCAL_ERROR_MSG,
             name);
     } else {
-        name = PyTuple_GET_ITEM(co->co_freevars, oparg -
-                                PyTuple_GET_SIZE(co->co_cellvars));
+        name = PyTupleInline_GET_ITEM(co->co_freevars, oparg -
+                                PyTupleInline_GET_SIZE(co->co_cellvars));
         format_exc_check_arg(PyExc_NameError,
                              UNBOUNDFREE_ERROR_MSG, name);
     }
@@ -5014,8 +5003,7 @@ unicode_concatenate(PyObject *v, PyObject *w,
         }
         case STORE_NAME:
         {
-            PyObject *names = f->f_code->co_names;
-            PyObject *name = GETITEM(names, oparg);
+            PyObject *name = GETITEM(f->f_code->co_names, oparg);
             PyObject *locals = f->f_locals;
             if (PyDict_CheckExact(locals) &&
                 PyDict_GetItem(locals, name) == v) {

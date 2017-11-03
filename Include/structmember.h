@@ -54,6 +54,8 @@ typedef struct PyMemberDef {
 
 #define T_PYSSIZET      19      /* Py_ssize_t */
 #define T_NONE          20      /* Value is always None */
+#define T_TUPLE_INLINE  21      /* PyTupleInline */
+#define T_BYTES_INLINE  22      /* PyBytesInline */
 
 
 /* Flags */

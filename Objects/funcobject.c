@@ -11,7 +11,8 @@ PyObject *
 PyFunction_NewWithQualName(PyObject *code, PyObject *globals, PyObject *qualname)
 {
     PyFunctionObject *op;
-    PyObject *doc, *consts, *module;
+    PyObject *doc, *module;
+    PyTupleInline *consts;
     static PyObject *__name__ = NULL;
 
     if (__name__ == NULL) {
@@ -35,9 +36,9 @@ PyFunction_NewWithQualName(PyObject *code, PyObject *globals, PyObject *qualname
     op->func_kwdefaults = NULL; /* No keyword only defaults */
     op->func_closure = NULL;
 
-    consts = ((PyCodeObject *)code)->co_consts;
-    if (PyTuple_Size(consts) >= 1) {
-        doc = PyTuple_GetItem(consts, 0);
+    consts = &((PyCodeObject *)code)->co_consts;
+    if (PyTupleInline_GET_SIZE(*consts) >= 1) {
+        doc = PyTupleInline_GET_ITEM(*consts, 0);
         if (!PyUnicode_Check(doc))
             doc = Py_None;
     }
@@ -470,7 +471,7 @@ func_new_impl(PyTypeObject *type, PyCodeObject *code, PyObject *globals,
                         "arg 4 (defaults) must be None or tuple");
         return NULL;
     }
-    nfree = PyTuple_GET_SIZE(code->co_freevars);
+    nfree = PyTupleInline_GET_SIZE(code->co_freevars);
     if (!PyTuple_Check(closure)) {
         if (nfree && closure == Py_None) {
             PyErr_SetString(PyExc_TypeError,

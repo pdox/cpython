@@ -102,8 +102,9 @@ PyCode_New(int argcount, int kwonlyargcount,
            PyObject *lnotab)
 {
     PyCodeObject *co;
-    Py_ssize_t *cell2arg = NULL;
     Py_ssize_t i, n_cellvars;
+    Py_ssize_t slots, cell2arg_offset, code_offset, total_extra;
+    char *ptr;
 
     /* Check argument types */
     if (argcount < 0 || kwonlyargcount < 0 || nlocals < 0 ||
@@ -130,64 +131,42 @@ PyCode_New(int argcount, int kwonlyargcount,
     intern_strings(freevars);
     intern_strings(cellvars);
     intern_string_constants(consts);
-    /* Create mapping between cells and arguments if needed. */
-    if (n_cellvars) {
-        Py_ssize_t total_args = argcount + kwonlyargcount +
-            ((flags & CO_VARARGS) != 0) + ((flags & CO_VARKEYWORDS) != 0);
-        bool used_cell2arg = false;
-        cell2arg = PyMem_NEW(Py_ssize_t, n_cellvars);
-        if (cell2arg == NULL) {
-            PyErr_NoMemory();
-            return NULL;
-        }
-        /* Find cells which are also arguments. */
-        for (i = 0; i < n_cellvars; i++) {
-            Py_ssize_t j;
-            PyObject *cell = PyTuple_GET_ITEM(cellvars, i);
-            cell2arg[i] = CO_CELL_NOT_AN_ARG;
-            for (j = 0; j < total_args; j++) {
-                PyObject *arg = PyTuple_GET_ITEM(varnames, j);
-                int cmp = PyUnicode_Compare(cell, arg);
-                if (cmp == -1 && PyErr_Occurred()) {
-                    PyMem_FREE(cell2arg);
-                    return NULL;
-                }
-                if (cmp == 0) {
-                    cell2arg[i] = j;
-                    used_cell2arg = true;
-                    break;
-                }
-            }
-        }
-        if (!used_cell2arg) {
-            PyMem_FREE(cell2arg);
-            cell2arg = NULL;
-        }
-    }
-    co = PyObject_NEW(PyCodeObject, &PyCode_Type);
+
+    slots = (
+        PyTuple_GET_SIZE(consts) +
+        PyTuple_GET_SIZE(names) +
+        PyTuple_GET_SIZE(varnames) +
+        PyTuple_GET_SIZE(freevars) +
+        PyTuple_GET_SIZE(cellvars));
+    cell2arg_offset = slots * sizeof(PyObject*);
+    code_offset = cell2arg_offset + n_cellvars * sizeof(Py_ssize_t);
+    total_extra = code_offset + PyBytes_GET_SIZE(code);
+
+    co = PyObject_NEW_VAR(PyCodeObject, &PyCode_Type, total_extra);
     if (co == NULL) {
-        if (cell2arg)
-            PyMem_FREE(cell2arg);
         return NULL;
     }
+
     co->co_argcount = argcount;
     co->co_kwonlyargcount = kwonlyargcount;
     co->co_nlocals = nlocals;
     co->co_stacksize = stacksize;
     co->co_flags = flags;
-    Py_INCREF(code);
-    co->co_code = code;
-    Py_INCREF(consts);
-    co->co_consts = consts;
-    Py_INCREF(names);
-    co->co_names = names;
-    Py_INCREF(varnames);
-    co->co_varnames = varnames;
-    Py_INCREF(freevars);
-    co->co_freevars = freevars;
-    Py_INCREF(cellvars);
-    co->co_cellvars = cellvars;
-    co->co_cell2arg = cell2arg;
+
+    /* Fill the data area */
+    ptr = &co->data[0];
+    ptr += PyTupleInline_InitFromTuple(&co->co_consts, ptr, consts);
+    ptr += PyTupleInline_InitFromTuple(&co->co_names, ptr, names);
+    ptr += PyTupleInline_InitFromTuple(&co->co_varnames, ptr, varnames);
+    ptr += PyTupleInline_InitFromTuple(&co->co_freevars, ptr, freevars);
+    ptr += PyTupleInline_InitFromTuple(&co->co_cellvars, ptr, cellvars);
+    // Skip co_cell2arg
+    assert(ptr == &co->data[cell2arg_offset]);
+    ptr += n_cellvars * sizeof(Py_ssize_t);
+    ptr += PyBytesInline_InitFromBytes(&co->co_code, ptr, code);
+    assert(ptr == &co->data[total_extra]);
+    co->co_cell2arg = NULL;
+
     Py_INCREF(filename);
     co->co_filename = filename;
     Py_INCREF(name);
@@ -198,6 +177,37 @@ PyCode_New(int argcount, int kwonlyargcount,
     co->co_zombieframe = NULL;
     co->co_weakreflist = NULL;
     co->co_extra = NULL;
+
+    /* Create mapping between cells and arguments if needed. */
+    if (n_cellvars) {
+        Py_ssize_t total_args = argcount + kwonlyargcount +
+            ((flags & CO_VARARGS) != 0) + ((flags & CO_VARKEYWORDS) != 0);
+        Py_ssize_t *cell2arg = (Py_ssize_t*)&co->data[cell2arg_offset];
+        bool used_cell2arg = false;
+
+        /* Find cells which are also arguments. */
+        for (i = 0; i < n_cellvars; i++) {
+            Py_ssize_t j;
+            PyObject *cell = PyTuple_GET_ITEM(cellvars, i);
+            cell2arg[i] = CO_CELL_NOT_AN_ARG;
+            for (j = 0; j < total_args; j++) {
+                PyObject *arg = PyTuple_GET_ITEM(varnames, j);
+                int cmp = PyUnicode_Compare(cell, arg);
+                if (cmp == -1 && PyErr_Occurred()) {
+                    Py_DECREF(co);
+                    return NULL;
+                }
+                if (cmp == 0) {
+                    cell2arg[i] = j;
+                    used_cell2arg = true;
+                    break;
+                }
+            }
+        }
+        if (used_cell2arg) {
+            co->co_cell2arg = cell2arg;
+        }
+    }
     return co;
 }
 
@@ -257,12 +267,12 @@ static PyMemberDef code_memberlist[] = {
     {"co_nlocals",      T_INT,          OFF(co_nlocals),        READONLY},
     {"co_stacksize",T_INT,              OFF(co_stacksize),      READONLY},
     {"co_flags",        T_INT,          OFF(co_flags),          READONLY},
-    {"co_code",         T_OBJECT,       OFF(co_code),           READONLY},
-    {"co_consts",       T_OBJECT,       OFF(co_consts),         READONLY},
-    {"co_names",        T_OBJECT,       OFF(co_names),          READONLY},
-    {"co_varnames",     T_OBJECT,       OFF(co_varnames),       READONLY},
-    {"co_freevars",     T_OBJECT,       OFF(co_freevars),       READONLY},
-    {"co_cellvars",     T_OBJECT,       OFF(co_cellvars),       READONLY},
+    {"co_code",         T_BYTES_INLINE, OFF(co_code),           READONLY},
+    {"co_consts",       T_TUPLE_INLINE, OFF(co_consts),         READONLY},
+    {"co_names",        T_TUPLE_INLINE, OFF(co_names),          READONLY},
+    {"co_varnames",     T_TUPLE_INLINE, OFF(co_varnames),       READONLY},
+    {"co_freevars",     T_TUPLE_INLINE, OFF(co_freevars),       READONLY},
+    {"co_cellvars",     T_TUPLE_INLINE, OFF(co_cellvars),       READONLY},
     {"co_filename",     T_OBJECT,       OFF(co_filename),       READONLY},
     {"co_name",         T_OBJECT,       OFF(co_name),           READONLY},
     {"co_firstlineno", T_INT,           OFF(co_firstlineno),    READONLY},
@@ -422,17 +432,9 @@ code_dealloc(PyCodeObject *co)
         PyMem_Free(co_extra);
     }
 
-    Py_XDECREF(co->co_code);
-    Py_XDECREF(co->co_consts);
-    Py_XDECREF(co->co_names);
-    Py_XDECREF(co->co_varnames);
-    Py_XDECREF(co->co_freevars);
-    Py_XDECREF(co->co_cellvars);
     Py_XDECREF(co->co_filename);
     Py_XDECREF(co->co_name);
     Py_XDECREF(co->co_lnotab);
-    if (co->co_cell2arg != NULL)
-        PyMem_FREE(co->co_cell2arg);
     if (co->co_zombieframe != NULL)
         PyObject_GC_Del(co->co_zombieframe);
     if (co->co_weakreflist != NULL)
@@ -445,10 +447,14 @@ code_sizeof(PyCodeObject *co, void *unused)
 {
     Py_ssize_t res = _PyObject_SIZE(Py_TYPE(co));
     _PyCodeObjectExtra *co_extra = (_PyCodeObjectExtra*) co->co_extra;
+    res += PyTupleInline_GET_SIZE(co->co_consts) * sizeof(PyObject*);
+    res += PyTupleInline_GET_SIZE(co->co_names) * sizeof(PyObject*);
+    res += PyTupleInline_GET_SIZE(co->co_varnames) * sizeof(PyObject*);
+    res += PyTupleInline_GET_SIZE(co->co_freevars) * sizeof(PyObject*);
+    res += PyTupleInline_GET_SIZE(co->co_cellvars) * sizeof(PyObject*);
+    res += PyBytesInline_GET_SIZE(co->co_code);
 
-    if (co->co_cell2arg != NULL && co->co_cellvars != NULL) {
-        res += PyTuple_GET_SIZE(co->co_cellvars) * sizeof(Py_ssize_t);
-    }
+    res += PyTupleInline_GET_SIZE(co->co_cellvars) * sizeof(Py_ssize_t);
     if (co_extra != NULL) {
         res += sizeof(_PyCodeObjectExtra) +
                (co_extra->ce_size-1) * sizeof(co_extra->ce_extras[0]);
@@ -604,6 +610,7 @@ code_richcompare(PyObject *self, PyObject *other, int op)
     PyCodeObject *co, *cp;
     int eq;
     PyObject *consts1, *consts2;
+    PyObject *tmp1, *tmp2;
     PyObject *res;
 
     if ((op != Py_EQ && op != Py_NE) ||
@@ -627,14 +634,20 @@ code_richcompare(PyObject *self, PyObject *other, int op)
     if (!eq) goto unequal;
     eq = co->co_firstlineno == cp->co_firstlineno;
     if (!eq) goto unequal;
-    eq = PyObject_RichCompareBool(co->co_code, cp->co_code, Py_EQ);
+
+    eq = PyBytesInline_RichCompareBool(co->co_code, cp->co_code, Py_EQ);
     if (eq <= 0) goto unequal;
 
     /* compare constants */
-    consts1 = _PyCode_ConstantKey(co->co_consts);
+    tmp1 = PyTuple_FromInline(co->co_consts);
+    consts1 = _PyCode_ConstantKey(tmp1);
+    Py_DECREF(tmp1);
     if (!consts1)
         return NULL;
-    consts2 = _PyCode_ConstantKey(cp->co_consts);
+
+    tmp2 = PyTuple_FromInline(cp->co_consts);
+    consts2 = _PyCode_ConstantKey(tmp2);
+    Py_DECREF(tmp2);
     if (!consts2) {
         Py_DECREF(consts1);
         return NULL;
@@ -644,13 +657,13 @@ code_richcompare(PyObject *self, PyObject *other, int op)
     Py_DECREF(consts2);
     if (eq <= 0) goto unequal;
 
-    eq = PyObject_RichCompareBool(co->co_names, cp->co_names, Py_EQ);
+    eq = PyTupleInline_RichCompareBool(co->co_names, cp->co_names, Py_EQ);
     if (eq <= 0) goto unequal;
-    eq = PyObject_RichCompareBool(co->co_varnames, cp->co_varnames, Py_EQ);
+    eq = PyTupleInline_RichCompareBool(co->co_varnames, cp->co_varnames, Py_EQ);
     if (eq <= 0) goto unequal;
-    eq = PyObject_RichCompareBool(co->co_freevars, cp->co_freevars, Py_EQ);
+    eq = PyTupleInline_RichCompareBool(co->co_freevars, cp->co_freevars, Py_EQ);
     if (eq <= 0) goto unequal;
-    eq = PyObject_RichCompareBool(co->co_cellvars, cp->co_cellvars, Py_EQ);
+    eq = PyTupleInline_RichCompareBool(co->co_cellvars, cp->co_cellvars, Py_EQ);
     if (eq <= 0) goto unequal;
 
     if (op == Py_EQ)
@@ -678,17 +691,17 @@ code_hash(PyCodeObject *co)
     Py_hash_t h, h0, h1, h2, h3, h4, h5, h6;
     h0 = PyObject_Hash(co->co_name);
     if (h0 == -1) return -1;
-    h1 = PyObject_Hash(co->co_code);
+    h1 = PyBytesInline_Hash(co->co_code);
     if (h1 == -1) return -1;
-    h2 = PyObject_Hash(co->co_consts);
+    h2 = PyTupleInline_Hash(co->co_consts);
     if (h2 == -1) return -1;
-    h3 = PyObject_Hash(co->co_names);
+    h3 = PyTupleInline_Hash(co->co_names);
     if (h3 == -1) return -1;
-    h4 = PyObject_Hash(co->co_varnames);
+    h4 = PyTupleInline_Hash(co->co_varnames);
     if (h4 == -1) return -1;
-    h5 = PyObject_Hash(co->co_freevars);
+    h5 = PyTupleInline_Hash(co->co_freevars);
     if (h5 == -1) return -1;
-    h6 = PyObject_Hash(co->co_cellvars);
+    h6 = PyTupleInline_Hash(co->co_cellvars);
     if (h6 == -1) return -1;
     h = h0 ^ h1 ^ h2 ^ h3 ^ h4 ^ h5 ^ h6 ^
         co->co_argcount ^ co->co_kwonlyargcount ^
@@ -708,7 +721,7 @@ PyTypeObject PyCode_Type = {
     PyVarObject_HEAD_INIT(&PyType_Type, 0)
     "code",
     sizeof(PyCodeObject),
-    0,
+    1,
     (destructor)code_dealloc,           /* tp_dealloc */
     0,                                  /* tp_print */
     0,                                  /* tp_getattr */

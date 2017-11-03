@@ -1544,7 +1544,7 @@ compiler_make_closure(struct compiler *c, PyCodeObject *co, Py_ssize_t flags, Py
             /* Bypass com_addop_varname because it will generate
                LOAD_DEREF but LOAD_CLOSURE is needed.
             */
-            PyObject *name = PyTuple_GET_ITEM(co->co_freevars, i);
+            PyObject *name = PyTupleInline_GET_ITEM(co->co_freevars, i);
             int arg, reftype;
 
             /* Special case: If a class contains a method with a
@@ -1559,6 +1559,11 @@ compiler_make_closure(struct compiler *c, PyCodeObject *co, Py_ssize_t flags, Py
             else /* (reftype == FREE) */
                 arg = compiler_lookup_arg(c->u->u_freevars, name);
             if (arg == -1) {
+                PyObject *freevars = PyTuple_FromInline(co->co_freevars);
+                if (freevars == NULL) {
+                    freevars = Py_None;
+                    Py_INCREF(Py_None);
+                }
                 fprintf(stderr,
                     "lookup %s in %s %d %d\n"
                     "freevars of %s: %s\n",
@@ -1566,7 +1571,8 @@ compiler_make_closure(struct compiler *c, PyCodeObject *co, Py_ssize_t flags, Py
                     PyUnicode_AsUTF8(c->u->u_name),
                     reftype, arg,
                     PyUnicode_AsUTF8(co->co_name),
-                    PyUnicode_AsUTF8(PyObject_Repr(co->co_freevars)));
+                    PyUnicode_AsUTF8(PyObject_Repr(freevars)));
+                Py_DECREF(freevars);
                 Py_FatalError("compiler_make_closure()");
             }
             ADDOP_I(c, LOAD_CLOSURE, arg);

@@ -410,7 +410,8 @@ OBJECT_OBJS=	\
 		Objects/typeobject.o \
 		Objects/unicodeobject.o \
 		Objects/unicodectype.o \
-		Objects/weakrefobject.o
+		Objects/weakrefobject.o \
+                Objects/inlineobjects.o
 
 ##########################################################################
 # objects that get linked into the Python library

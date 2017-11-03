@@ -338,6 +338,30 @@ w_object(PyObject *v, WFILE *p)
 }
 
 static void
+w_bytes_inline(PyBytesInline *bi, WFILE *p)
+{
+    PyObject *b = PyBytes_FromInline(*bi);
+    if (b == NULL) {
+        p->error = WFERR_NOMEMORY;
+        return;
+    }
+    w_object(b, p);
+    Py_DECREF(b);
+}
+
+static void
+w_tuple_inline(PyTupleInline *ti, WFILE *p)
+{
+    PyObject *t = PyTuple_FromInline(*ti);
+    if (t == NULL) {
+        p->error = WFERR_NOMEMORY;
+        return;
+    }
+    w_object(t, p);
+    Py_DECREF(t);
+}
+
+static void
 w_complex_object(PyObject *v, char flag, WFILE *p)
 {
     Py_ssize_t i, n;
@@ -544,12 +568,12 @@ w_complex_object(PyObject *v, char flag, WFILE *p)
         w_long(co->co_nlocals, p);
         w_long(co->co_stacksize, p);
         w_long(co->co_flags, p);
-        w_object(co->co_code, p);
-        w_object(co->co_consts, p);
-        w_object(co->co_names, p);
-        w_object(co->co_varnames, p);
-        w_object(co->co_freevars, p);
-        w_object(co->co_cellvars, p);
+        w_bytes_inline(&co->co_code, p);
+        w_tuple_inline(&co->co_consts, p);
+        w_tuple_inline(&co->co_names, p);
+        w_tuple_inline(&co->co_varnames, p);
+        w_tuple_inline(&co->co_freevars, p);
+        w_tuple_inline(&co->co_cellvars, p);
         w_object(co->co_filename, p);
         w_object(co->co_name, p);
         w_long(co->co_firstlineno, p);

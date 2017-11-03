@@ -105,6 +105,8 @@
 #include "structseq.h"
 #include "namespaceobject.h"
 
+#include "inlineobjects.h"
+
 #include "codecs.h"
 #include "pyerrors.h"
 

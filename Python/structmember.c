@@ -84,6 +84,13 @@ PyMember_GetOne(const char *addr, PyMemberDef *l)
         v = Py_None;
         Py_INCREF(v);
         break;
+    case T_TUPLE_INLINE:
+        v = PyTuple_FromInline(*((PyTupleInline*)addr));
+        break;
+    case T_BYTES_INLINE:{
+        v = PyBytes_FromInline(*((PyBytesInline*)addr));
+        break;
+        }
     default:
         PyErr_SetString(PyExc_SystemError, "bad memberdescr type");
         v = NULL;
@@ -281,6 +288,41 @@ PyMember_SetOne(char *addr, PyMemberDef *l, PyObject *v)
             *(unsigned long long*)addr = value = PyLong_AsLong(v);
         if ((value == (unsigned long long)-1) && PyErr_Occurred())
             return -1;
+        break;
+        }
+    case T_TUPLE_INLINE: {
+        PyTupleInline *ti = (PyTupleInline*)addr;
+        Py_ssize_t i;
+        if (!PyTuple_Check(v)) {
+            PyErr_SetString(PyExc_TypeError,
+                            "attribute value type must be tuple");
+            return -1;
+        }
+        if (PyTuple_GET_SIZE(v) != ti->ti_length) {
+            PyErr_Format(PyExc_TypeError,
+                         "attribute must be tuple of length %zd", ti->ti_length);
+            return -1;
+        }
+        for (i = 0; i < ti->ti_length; i++) {
+            PyObject *k = PyTuple_GET_ITEM(v, i);
+            Py_INCREF(k);
+            Py_SETREF(ti->ti_item[i], k);
+        }
+        break;
+        }
+    case T_BYTES_INLINE: {
+        PyBytesInline *bi = (PyBytesInline*)addr;
+        if (!PyBytes_Check(v)) {
+            PyErr_SetString(PyExc_TypeError,
+                            "attribute value type must be bytes");
+            return -1;
+        }
+        if (PyBytes_GET_SIZE(v) != bi->bi_length) {
+            PyErr_Format(PyExc_TypeError,
+                         "attribute must be bytes of length %zd", bi->bi_length);
+            return -1;
+        }
+        PyBytesInline_SetFromBytes(bi, v);
         break;
         }
     default:
