@@ -197,6 +197,7 @@ PyCode_New(int argcount, int kwonlyargcount,
     co->co_lnotab = lnotab;
     co->co_zombieframe = NULL;
     co->co_weakreflist = NULL;
+    memset(&co->co_runtime, 0, sizeof(co->co_runtime));
     co->co_extra = NULL;
     return co;
 }
@@ -437,6 +438,10 @@ code_dealloc(PyCodeObject *co)
         PyObject_GC_Del(co->co_zombieframe);
     if (co->co_weakreflist != NULL)
         PyObject_ClearWeakRefs((PyObject*)co);
+    if (co->co_runtime.rt_globals_subscription != NULL)
+        _PyDict_Unsubscribe(co->co_runtime.rt_globals_subscription);
+    if (co->co_runtime.rt_builtins_subscription != NULL)
+        _PyDict_Unsubscribe(co->co_runtime.rt_builtins_subscription);
     PyObject_DEL(co);
 }
 
@@ -879,5 +884,35 @@ _PyCode_SetExtra(PyObject *code, Py_ssize_t index, void *extra)
     }
 
     co_extra->ce_extras[index] = extra;
+    return 0;
+}
+
+int
+_PyCode_GetDictSubscriptions(
+        PyCodeObject *co, PyObject *globals, PyObject *builtins,
+        PyDictSubscription **globals_subscription,
+        PyDictSubscription **builtins_subscription) {
+
+    if (co->co_runtime.rt_globals_subscription == NULL) {
+        *globals_subscription = co->co_runtime.rt_globals_subscription = _PyDict_Subscribe(globals, co->co_names);
+        if (co->co_runtime.rt_globals_subscription == NULL) {
+            return -1;
+        }
+    } else {
+        if (_PyDictSubscription_GetDict(co->co_runtime.rt_globals_subscription) == (PyDictObject*)globals) {
+            *globals_subscription = co->co_runtime.rt_globals_subscription;
+        }
+    }
+
+    if (co->co_runtime.rt_builtins_subscription == NULL) {
+        *builtins_subscription = co->co_runtime.rt_builtins_subscription = _PyDict_Subscribe(builtins, co->co_names);
+        if (co->co_runtime.rt_builtins_subscription == NULL) {
+            return -1;
+        }
+    } else {
+        if (_PyDictSubscription_GetDict(co->co_runtime.rt_builtins_subscription) == (PyDictObject*)builtins) {
+            *builtins_subscription = co->co_runtime.rt_builtins_subscription;
+        }
+    }
     return 0;
 }

@@ -16,11 +16,27 @@ extern "C" {
 #ifndef Py_LIMITED_API
 
 typedef struct _dictkeysobject PyDictKeysObject;
+typedef PyObject** PyDictBinding;
+
+/* Forward */
+struct _PyDictObject;
+typedef struct _PyDictObject PyDictObject;
+
+/* Subscription to a dictionary. See _PyDict_Subscribe for usage. */
+typedef struct _PyDictSubscription {
+    PyDictObject *ds_dict; /* Subscribed dictionary (borrowed reference) */
+    PyObject *ds_keys; /* Tuple of keys (strong reference) */
+    struct _PyDictSubscription *ds_prev; /* Previous PyDictSubscription */
+    struct _PyDictSubscription *ds_next; /* Next PyDictSubscription */
+
+    /* Cached bindings */
+    PyDictBinding ds_bindings[1];
+} PyDictSubscription;
 
 /* The ma_values pointer is NULL for a combined table
  * or points to an array of PyObject* for a split table
  */
-typedef struct {
+typedef struct _PyDictObject {
     PyObject_HEAD
 
     /* Number of items in the dictionary */
@@ -38,6 +54,11 @@ typedef struct {
        If ma_values is not NULL, the table is splitted:
        keys are stored in ma_keys and values are stored in ma_values */
     PyObject **ma_values;
+
+    /* This is a linked list of all PyDictSubscription's which have bindings
+       into this dictionary. When the dictionary configuration changes,
+       these are notified via dict_invalidate_bindings. */
+    PyDictSubscription *ma_subscriptions;
 } PyDictObject;
 
 typedef struct {
@@ -64,6 +85,37 @@ PyAPI_DATA(PyTypeObject) PyDictValues_Type;
 /* This excludes Values, since they are not sets. */
 # define PyDictViewSet_Check(op) \
     (PyDictKeys_Check(op) || PyDictItems_Check(op))
+
+#ifndef Py_LIMITED_API
+
+/*Global counter used to set ma_version_tag field of dictionary.
+ * It is incremented each time that a dictionary is created and each
+ * time that a dictionary is modified. */
+extern uint64_t _pydict_global_version;
+#define DICT_NEXT_VERSION() (++_pydict_global_version)
+
+
+#define _PyDictSubscription_GetDict(ds) ((ds)->ds_dict)
+
+#define _PyDictSubscription_GetItem(ds, i) \
+    ((ds)->ds_bindings[(i)] ? *((ds)->ds_bindings[(i)]) \
+                            : _PyDictSubscription_GetItemFallback(ds, i))
+
+#define _PyDictSubscription_SetItem(ds, i, val, errptr) do { \
+    if ((ds)->ds_bindings[(i)]) { \
+        Py_SETREF(*((ds)->ds_bindings[(i)]), val); \
+        ((ds)->ds_dict)->ma_version_tag = DICT_NEXT_VERSION(); \
+        *(errptr) = 0; \
+    } else { \
+        *(errptr) = _PyDictSubscription_SetItemFallback(ds, i, val); \
+    } \
+} while (0)
+
+PyAPI_FUNC(PyDictSubscription *) _PyDict_Subscribe(PyObject *dict, PyObject *keys);
+PyAPI_FUNC(void) _PyDict_Unsubscribe(PyDictSubscription *ds);
+PyAPI_FUNC(PyObject *) _PyDictSubscription_GetItemFallback(PyDictSubscription *ds, Py_ssize_t i);
+PyAPI_FUNC(int) _PyDictSubscription_SetItemFallback(PyDictSubscription *ds, Py_ssize_t i, PyObject *value);
+#endif /* Py_LIMITED_API */
 
 
 PyAPI_FUNC(PyObject *) PyDict_New(void);
@@ -100,6 +152,7 @@ PyAPI_FUNC(PyObject *) PyObject_GenericGetDict(PyObject *, void *);
 PyAPI_FUNC(int) _PyDict_Next(
     PyObject *mp, Py_ssize_t *pos, PyObject **key, PyObject **value, Py_hash_t *hash);
 PyObject *_PyDictView_New(PyObject *, PyTypeObject *);
+
 #endif
 PyAPI_FUNC(PyObject *) PyDict_Keys(PyObject *mp);
 PyAPI_FUNC(PyObject *) PyDict_Values(PyObject *mp);

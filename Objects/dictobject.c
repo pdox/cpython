@@ -238,9 +238,7 @@ static int dictresize(PyDictObject *mp, Py_ssize_t minused);
 /*Global counter used to set ma_version_tag field of dictionary.
  * It is incremented each time that a dictionary is created and each
  * time that a dictionary is modified. */
-static uint64_t pydict_global_version = 0;
-
-#define DICT_NEXT_VERSION() (++pydict_global_version)
+uint64_t _pydict_global_version = 0;
 
 /* Dictionary reuse scheme to save calls to malloc and free */
 #ifndef PyDict_MAXFREELIST
@@ -592,6 +590,7 @@ new_dict(PyDictKeysObject *keys, PyObject **values)
     mp->ma_values = values;
     mp->ma_used = 0;
     mp->ma_version_tag = DICT_NEXT_VERSION();
+    mp->ma_subscriptions = NULL;
     assert(_PyDict_CheckConsistency(mp));
     return (PyObject *)mp;
 }
@@ -1050,6 +1049,32 @@ build_indices(PyDictKeysObject *keys, PyDictKeyEntry *ep, Py_ssize_t n)
 }
 
 /*
+Internal routine which invalidates subscription bindings.
+*/
+
+static void
+invalidate_bindings(PyDictObject *dict, PyObject **slot)
+{
+    PyDictSubscription *ds;
+    Py_ssize_t i;
+    if (slot == NULL) {
+        /* Invalidate all bindings */
+        for (ds = dict->ma_subscriptions; ds != NULL; ds = ds->ds_next) {
+            memset(&ds->ds_bindings[0], 0, sizeof(PyDictBinding) * PyTuple_GET_SIZE(ds->ds_keys));
+        }
+    } else {
+        /* Invalidate one binding */
+        for (ds = dict->ma_subscriptions; ds != NULL; ds = ds->ds_next) {
+            for (i = 0; i < PyTuple_GET_SIZE(ds->ds_keys); i++) {
+                if (ds->ds_bindings[i] == slot) {
+                    ds->ds_bindings[i] = NULL;
+                }
+            }
+        }
+    }
+}
+
+/*
 Restructure the table by allocating a new table and reinserting all
 items again.  When entries have been deleted, the new table may
 actually be smaller than the old one.
@@ -1147,6 +1172,7 @@ dictresize(PyDictObject *mp, Py_ssize_t minsize)
     build_indices(mp->ma_keys, newentries, numentries);
     mp->ma_keys->dk_usable -= numentries;
     mp->ma_keys->dk_nentries = numentries;
+    invalidate_bindings(mp, NULL);
     return 0;
 }
 
@@ -1447,9 +1473,9 @@ delitem_common(PyDictObject *mp, Py_hash_t hash, Py_ssize_t ix,
     old_key = ep->me_key;
     ep->me_key = NULL;
     ep->me_value = NULL;
+    invalidate_bindings(mp, &ep->me_value);
     Py_DECREF(old_key);
     Py_DECREF(old_value);
-
     assert(_PyDict_CheckConsistency(mp));
     return 0;
 }
@@ -1578,6 +1604,7 @@ PyDict_Clear(PyObject *op)
     mp->ma_values = empty_values;
     mp->ma_used = 0;
     mp->ma_version_tag = DICT_NEXT_VERSION();
+    invalidate_bindings(mp, NULL);
     /* ...then clear the keys and values */
     if (oldvalues != NULL) {
         n = oldkeys->dk_nentries;
@@ -1718,6 +1745,7 @@ _PyDict_Pop_KnownHash(PyObject *dict, PyObject *key, Py_hash_t hash, PyObject *d
     old_key = ep->me_key;
     ep->me_key = NULL;
     ep->me_value = NULL;
+    invalidate_bindings(mp, &ep->me_value);
     Py_DECREF(old_key);
 
     assert(_PyDict_CheckConsistency(mp));
@@ -1841,11 +1869,19 @@ dict_dealloc(PyDictObject *mp)
 {
     PyObject **values = mp->ma_values;
     PyDictKeysObject *keys = mp->ma_keys;
+    PyDictSubscription *ds, *dsnext;
     Py_ssize_t i, n;
 
     /* bpo-31095: UnTrack is needed before calling any callbacks */
     PyObject_GC_UnTrack(mp);
     Py_TRASHCAN_SAFE_BEGIN(mp)
+    /* Clear ds_dict, ds_prev, ds_next of all subscriptions */
+    for (ds = mp->ma_subscriptions; ds != NULL; ds = dsnext) {
+        dsnext = ds->ds_next;
+        ds->ds_dict = NULL;
+        ds->ds_prev = NULL;
+        ds->ds_next = NULL;
+    }
     if (values != NULL) {
         if (values != empty_values) {
             for (i = 0, n = mp->ma_keys->dk_nentries; i < n; i++) {
@@ -2491,6 +2527,7 @@ PyDict_Copy(PyObject *o)
         split_copy->ma_values = newvalues;
         split_copy->ma_keys = mp->ma_keys;
         split_copy->ma_used = mp->ma_used;
+        split_copy->ma_subscriptions = NULL;
         DK_INCREF(mp->ma_keys);
         for (i = 0, n = size; i < n; i++) {
             PyObject *value = mp->ma_values[i];
@@ -2863,6 +2900,7 @@ dict_popitem(PyDictObject *mp)
     PyTuple_SET_ITEM(res, 1, ep->me_value);
     ep->me_key = NULL;
     ep->me_value = NULL;
+    invalidate_bindings(mp, &ep->me_value);
     /* We can't dk_usable++ since there is DKIX_DUMMY in indices */
     mp->ma_keys->dk_nentries = i;
     mp->ma_used--;
@@ -3079,6 +3117,7 @@ dict_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
 
     d->ma_used = 0;
     d->ma_version_tag = DICT_NEXT_VERSION();
+    d->ma_subscriptions = NULL;
     d->ma_keys = new_keys_object(PyDict_MINSIZE);
     if (d->ma_keys == NULL) {
         Py_DECREF(self);
@@ -4285,4 +4324,118 @@ void
 _PyDictKeys_DecRef(PyDictKeysObject *keys)
 {
     DK_DECREF(keys);
+}
+
+/*
+ * Subscribe to a tuple of keys for this dictionary.
+ *
+ * A subscription permits fast load and stores to a given tuple of
+ * keys, by index.
+ *
+ * The subscription structure is owned by the caller, and must
+ * always be released with _PyDict_Unsubscribe.
+ *
+ * Subscriptions do not hold a strong reference to the dictionary object.
+ * If the subscriber wishes to continue to use the subscription to the
+ * dictionary, it must also hold a strong reference to the dictionary.
+ *
+ * If the dictionary object is deallocated while a subscription exists,
+ * the subscription object still exists, but is no longer valid to use.
+ * However, it must still be released with _PyDict_Unsubscribe.
+ */
+PyDictSubscription *
+_PyDict_Subscribe(PyObject *dict, PyObject *keys)
+{
+    PyDictSubscription *ds;
+    Py_ssize_t extra;
+    assert(PyDict_CheckExact(dict));
+    assert(PyTuple_CheckExact(keys));
+    extra = PyTuple_GET_SIZE(keys) * sizeof(PyDictBinding);
+    ds = PyObject_MALLOC(sizeof(PyDictSubscription) + extra);
+    if (ds == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    ds->ds_dict = (PyDictObject*)dict; /* borrowed */
+    Py_INCREF(keys);
+    ds->ds_keys = keys;
+    ds->ds_prev = NULL;
+    ds->ds_next = ds->ds_dict->ma_subscriptions;
+    if (ds->ds_next)
+        ds->ds_next->ds_prev = ds;
+    memset(&ds->ds_bindings[0], 0, extra);
+    ds->ds_dict->ma_subscriptions = ds;
+    return ds;
+}
+
+void
+_PyDict_Unsubscribe(PyDictSubscription *ds)
+{
+    if (ds->ds_dict) {
+        /* Dictionary is still alive. Unlink ourselves. */
+        if (ds->ds_prev)
+            ds->ds_prev->ds_next = ds->ds_next;
+        else {
+            assert(ds->ds_dict->ma_subscriptions == ds);
+            ds->ds_dict->ma_subscriptions = ds->ds_next;
+        }
+        if (ds->ds_next)
+            ds->ds_next->ds_prev = ds->ds_prev;
+    }
+    Py_DECREF(ds->ds_keys);
+    PyObject_FREE(ds);
+}
+
+PyObject *
+_PyDictSubscription_GetItemFallback(PyDictSubscription *ds, Py_ssize_t i)
+{
+    Py_ssize_t ix;
+    PyObject *key;
+    Py_hash_t hash;
+    PyObject *value;
+    PyDictKeyEntry *ep0;
+    PyObject **slot;
+
+    assert(ds->ds_dict);
+    assert(i >= 0 && i < PyTuple_GET_SIZE(ds->ds_keys));
+
+    key = PyTuple_GET_ITEM(ds->ds_keys, i);
+    if (!PyUnicode_CheckExact(key) ||
+        (hash = ((PyASCIIObject *) key)->hash) == -1)
+    {
+        hash = PyObject_Hash(key);
+        if (hash == -1)
+            return NULL;
+    }
+
+    ix = ds->ds_dict->ma_keys->dk_lookup(ds->ds_dict, key, hash, &value);
+    if (ix == DKIX_ERROR)
+        return NULL;
+    if (ix == DKIX_EMPTY)
+        return NULL;
+    if (_PyDict_HasSplitTable(ds->ds_dict)) {
+        slot = &ds->ds_dict->ma_values[ix];
+    } else {
+        ep0 = DK_ENTRIES(ds->ds_dict->ma_keys);
+        slot = &ep0[ix].me_value;
+    }
+    ds->ds_bindings[i] = slot;
+    return *slot;
+}
+
+int
+_PyDictSubscription_SetItemFallback(PyDictSubscription *ds, Py_ssize_t i, PyObject *value)
+{
+    int ret;
+    PyObject *key;
+
+    assert(ds->ds_dict);
+    assert(i >= 0 && i < PyTuple_GET_SIZE(ds->ds_keys));
+
+    key = PyTuple_GET_ITEM(ds->ds_keys, i);
+
+    /* Could fetch ix here and set the binding. */
+    ret = PyDict_SetItem((PyObject*)ds->ds_dict, key, value);
+    Py_DECREF(value);
+    return ret;
 }

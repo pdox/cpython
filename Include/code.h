@@ -17,6 +17,18 @@ typedef uint16_t _Py_CODEUNIT;
 #  define _Py_OPARG(word) ((word) >> 8)
 #endif
 
+/* Runtime cache, for performance optimization.*/
+typedef struct PyRuntime {
+    /* Subscriptions to the globals and builtins dictionary first used for
+       this code object. In the common case, code always executes using
+       the same globals dict, and so the hit rate will be 1.
+       Once these are set, they cannot change, because executing frames
+       borrow the reference.
+     */
+    PyDictSubscription *rt_globals_subscription;
+    PyDictSubscription *rt_builtins_subscription;
+} PyRuntime;
+
 /* Bytecode object */
 typedef struct {
     PyObject_HEAD
@@ -44,6 +56,7 @@ typedef struct {
 				   Objects/lnotab_notes.txt for details. */
     void *co_zombieframe;     /* for optimization only (see frameobject.c) */
     PyObject *co_weakreflist;   /* to support weakrefs to code objects */
+    PyRuntime co_runtime;       /* Runtime cache */
     /* Scratch space for extra data relating to the code object.
        Type is a void* to keep the format private in codeobject.c to force
        people to go through the proper APIs. */
@@ -136,6 +149,12 @@ PyAPI_FUNC(int) _PyCode_CheckLineNumber(PyCodeObject* co,
  * depending on the type and the value. The type is the first item to not
  * compare bytes and str which can raise a BytesWarning exception. */
 PyAPI_FUNC(PyObject*) _PyCode_ConstantKey(PyObject *obj);
+
+PyAPI_FUNC(int) _PyCode_GetDictSubscriptions(
+    PyCodeObject *co, PyObject *globals, PyObject *builtins,
+    PyDictSubscription **globals_subscription,
+    PyDictSubscription **builtins_subscription);
+
 #endif
 
 PyAPI_FUNC(PyObject*) PyCode_Optimize(PyObject *code, PyObject* consts,

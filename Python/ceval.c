@@ -558,6 +558,8 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
     enum why_code why; /* Reason for block stack unwind */
     PyObject **fastlocals, **freevars;
     PyObject *retval = NULL;            /* Return value */
+    PyDictSubscription *globals_subscription = NULL;
+    PyDictSubscription *builtins_subscription = NULL;
     PyThreadState *tstate = PyThreadState_GET();
     PyCodeObject *co;
 
@@ -877,6 +879,16 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
     consts = co->co_consts;
     fastlocals = f->f_localsplus;
     freevars = f->f_localsplus + co->co_nlocals;
+
+    if (PyDict_CheckExact(f->f_globals) && PyDict_CheckExact(f->f_builtins))
+    {
+        int err = _PyCode_GetDictSubscriptions(co, f->f_globals, f->f_builtins,
+                                               &globals_subscription,
+                                               &builtins_subscription);
+        if (err != 0)
+            goto exit_eval_frame;
+    }
+
     assert(PyBytes_Check(co->co_code));
     assert(PyBytes_GET_SIZE(co->co_code) <= INT_MAX);
     assert(PyBytes_GET_SIZE(co->co_code) % sizeof(_Py_CODEUNIT) == 0);
@@ -2073,11 +2085,16 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
         }
 
         TARGET(STORE_GLOBAL) {
-            PyObject *name = GETITEM(names, oparg);
-            PyObject *v = POP();
             int err;
-            err = PyDict_SetItem(f->f_globals, name, v);
-            Py_DECREF(v);
+            PyObject *v = POP();
+            if (globals_subscription) {
+                /* This steals the reference */
+                _PyDictSubscription_SetItem(globals_subscription, oparg, v, &err);
+            } else {
+                PyObject *name = GETITEM(names, oparg);
+                err = PyDict_SetItem(f->f_globals, name, v);
+                Py_DECREF(v);
+            }
             if (err != 0)
                 goto error;
             DISPATCH();
@@ -2147,11 +2164,25 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
         }
 
         TARGET(LOAD_GLOBAL) {
-            PyObject *name = GETITEM(names, oparg);
             PyObject *v;
-            if (PyDict_CheckExact(f->f_globals)
-                && PyDict_CheckExact(f->f_builtins))
+            if (globals_subscription && builtins_subscription) {
+                v = _PyDictSubscription_GetItem(globals_subscription, oparg);
+                if (v == NULL)
+                    v = _PyDictSubscription_GetItem(builtins_subscription, oparg);
+                if (v == NULL) {
+                    if (!_PyErr_OCCURRED()) {
+                        PyObject *name = GETITEM(names, oparg);
+                        format_exc_check_arg(PyExc_NameError,
+                                             NAME_ERROR_MSG, name);
+                    }
+                    goto error;
+                }
+                Py_INCREF(v);
+            }
+            else if (PyDict_CheckExact(f->f_globals) &&
+                     PyDict_CheckExact(f->f_builtins))
             {
+                PyObject *name = GETITEM(names, oparg);
                 v = _PyDict_LoadGlobal((PyDictObject *)f->f_globals,
                                        (PyDictObject *)f->f_builtins,
                                        name);
@@ -2168,6 +2199,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
             }
             else {
                 /* Slow-path if globals or builtins is not a dict */
+                PyObject *name = GETITEM(names, oparg);
 
                 /* namespace 1: globals */
                 v = PyObject_GetItem(f->f_globals, name);
@@ -2178,7 +2210,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
 
                     /* namespace 2: builtins */
                     v = PyObject_GetItem(f->f_builtins, name);
-                    if (v == NULL) {
+                        if (v == NULL) {
                         if (PyErr_ExceptionMatches(PyExc_KeyError))
                             format_exc_check_arg(
                                         PyExc_NameError,
