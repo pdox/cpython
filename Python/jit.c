@@ -1,19 +1,11 @@
+/* This is required to get MAP_ANONYMOUS with std=c99 */
+#define _BSD_SOURCE
 #include <sys/mman.h>
+#include <stddef.h>
 
-/* JIT data attached to a PyCodeObject */
-typedef void* CallTarget;
-typedef void* JumpTarget;
-typedef struct _JITData {
-    CallTarget entry;
-    JumpTarget j_error;
-    JumpTarget j_dispatch_opcode;
-    JumpTarget j_fast_yield;
-    JumpTarget j_fast_block_end;
-    JumpTarget j_unwind_cleanup;
-    JumpTarget j_next_opcode;
-    JumpTarget j_ret;
-    JumpTarget jmptab[1]; // variable-size
-} JITData;
+#include "Python.h"
+#include "frameobject.h"
+#include "internal/jit.h"
 
 typedef struct _CodePage {
     struct _CodePage *prev;
@@ -27,13 +19,23 @@ typedef struct _CodePage {
 static CodePage *cp_head;
 static CodePage *cp_tail;
 
-typedef void (*PyJITTargetFunction)(EvalContext *, void *jmp_addr);
+typedef void (*PyJITTargetFunction)(EvalContext *);
 
 void _PyEval_FUNC_JIT__unknown_opcode(EvalContext *ctx) {
     assert(0);
 }
 
 #include "opcode_function_table.h"
+
+/* Special pseudo-instructions */
+#define DECLARE_SPECIAL(name)  void _PyEval_FUNC_JIT_TARGET_II_##name (EvalContext *)
+
+DECLARE_SPECIAL(NEXT_OPCODE);
+DECLARE_SPECIAL(ERROR);
+DECLARE_SPECIAL(FAST_YIELD);
+DECLARE_SPECIAL(FAST_BLOCK_END);
+DECLARE_SPECIAL(UNWIND_CLEANUP);
+DECLARE_SPECIAL(NEXT_OPCODE);
 
 static int
 _PyJIT_GrowCodePage(Py_ssize_t needed) {
@@ -123,13 +125,19 @@ insert_special_section(void *function_addr) {
     insert_call(function_addr);
 }
 
+static void _resume(EvalContext *ctx) {
+    JITData *jd = (JITData*)ctx->co->co_jit_data;
+    int idx = ctx->next_instr - ctx->first_instr;
+    set_return_address(jd->jmptab[idx]);
+}
+
 static void
 translate_bytecode(JITData *jd, PyCodeObject *co)
 {
     // This specialized to System V AMD64 ABI calling convention.
     // The function we're generating is going to look like the following:
     //
-    //   function:  # ctx is passed in as %rdi, jmp_addr in %rsi
+    //   function:  # ctx is passed in as %rdi
     //      # Preserve %r12
     //      pushq %r12
     //      # Save ctx in %r12 for quick access
@@ -198,8 +206,9 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     insert_special_section(_PyEval_FUNC_JIT_TARGET_II_NEXT_OPCODE);
 
     if (is_gen) {
-        // jmp *%rsi
-        insert_code(2, "\xff\xe6");
+        // mov %r12, %rdi
+        insert_code(3, "\x4c\x89\xe7");
+        insert_call(_resume);
     }
 
     for (i = 0; i < inst_count; i++) {
@@ -234,7 +243,7 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
         ++p;
     }
 
-    /* Dispatch opcode is weird. It wants us to run the instruction
+    /* Dispatch opcode is special. It wants us to run the instruction
        described by the values of ctx->opcode and ctx->oparg,
        and then continue at next_instr.
      */
@@ -260,23 +269,38 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     // if we returned, jump to the next instruction
     // mov %r12, %rdi
     insert_code(3, "\x4c\x89\xe7");
-    insert_call(_PyJIT_JUMP);
+    insert_call(_resume);
 
     /* Special sections */
     jd->j_error = current_code_pos();
     insert_special_section(_PyEval_FUNC_JIT_TARGET_II_ERROR);
+    // mov %r12, %rdi
+    insert_code(3, "\x4c\x89\xe7");
+    insert_call(_resume);
 
     jd->j_fast_yield = current_code_pos();
     insert_special_section(_PyEval_FUNC_JIT_TARGET_II_FAST_YIELD);
+    // mov %r12, %rdi
+    insert_code(3, "\x4c\x89\xe7");
+    insert_call(_resume);
 
     jd->j_fast_block_end = current_code_pos();
     insert_special_section(_PyEval_FUNC_JIT_TARGET_II_FAST_BLOCK_END);
+    // mov %r12, %rdi
+    insert_code(3, "\x4c\x89\xe7");
+    insert_call(_resume);
 
     jd->j_unwind_cleanup = current_code_pos();
     insert_special_section(_PyEval_FUNC_JIT_TARGET_II_UNWIND_CLEANUP);
+    // mov %r12, %rdi
+    insert_code(3, "\x4c\x89\xe7");
+    insert_call(_resume);
 
     jd->j_next_opcode = current_code_pos();
     insert_special_section(_PyEval_FUNC_JIT_TARGET_II_NEXT_OPCODE);
+    // mov %r12, %rdi
+    insert_code(3, "\x4c\x89\xe7");
+    insert_call(_resume);
 
     jd->j_ret = current_code_pos();
     // pop %r14
@@ -306,7 +330,7 @@ _PyJIT_CodeGen(PyCodeObject *co) {
     translate_bytecode(data, co);
     co->co_jit_data = data;
     return 0;
-} 
+}
 
 int _PyJIT_Execute(EvalContext *ctx) {
     JITData *jd;
@@ -318,64 +342,6 @@ int _PyJIT_Execute(EvalContext *ctx) {
     }
     jd = (JITData*)ctx->co->co_jit_data;
 
-    // TODO: Do this calculation inside the function.
-    int idx = ctx->next_instr - ctx->first_instr;
-    void *jmp_addr = jd->jmptab[idx];
-
-    ((PyJITTargetFunction)jd->entry)(ctx, jmp_addr);
+    ((PyJITTargetFunction)jd->entry)(ctx);
     return 0;
-}
-
-#define set_return_address(addr) \
-    (*(((void**)(ctx->jit_ret_addr) - 1)) = (void*)(addr))
-
-void _PyJIT_JUMP(EvalContext *ctx)
-{
-    // Someone called JUMPTO. Fix up our return location.
-    JITData *jd = (JITData*)ctx->co->co_jit_data;
-    int idx = ctx->next_instr - ctx->first_instr;
-    set_return_address(jd->jmptab[idx]);
-}
-
-void _PyJIT_GOTO_FAST_YIELD(EvalContext *ctx)
-{
-    JITData *jd = (JITData*)ctx->co->co_jit_data;
-    set_return_address(jd->j_fast_yield);
-}
-
-void _PyJIT_GOTO_ERROR(EvalContext *ctx)
-{
-    JITData *jd = (JITData*)ctx->co->co_jit_data;
-    set_return_address(jd->j_error);
-}
-
-void _PyJIT_GOTO_DISPATCH_OPCODE(EvalContext *ctx)
-{
-    JITData *jd = (JITData*)ctx->co->co_jit_data;
-    set_return_address(jd->j_dispatch_opcode);
-}
-
-
-void _PyJIT_GOTO_FAST_BLOCK_END(EvalContext *ctx)
-{
-    JITData *jd = (JITData*)ctx->co->co_jit_data;
-    set_return_address(jd->j_fast_block_end);
-}
-
-void _PyJIT_GOTO_UNWIND_CLEANUP(EvalContext *ctx)
-{
-    JITData *jd = (JITData*)ctx->co->co_jit_data;
-    set_return_address(jd->j_unwind_cleanup);
-}
-
-void _PyJIT_GOTO_NEXT_OPCODE(EvalContext *ctx)
-{
-    JITData *jd = (JITData*)ctx->co->co_jit_data;
-    set_return_address(jd->j_next_opcode);
-}
-
-void _PyJIT_GOTO_EXIT_EVAL_FRAME(EvalContext *ctx)
-{
-    JITData *jd = (JITData*)ctx->co->co_jit_data;
-    set_return_address(jd->j_ret);
 }
