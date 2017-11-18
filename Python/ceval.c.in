@@ -19,6 +19,7 @@
 #include "pydtrace.h"
 #include "setobject.h"
 #include "structmember.h"
+#include "jit.h"
 
 #include <ctype.h>
 
@@ -529,7 +530,8 @@ PyEval_EvalCode(PyObject *co, PyObject *globals, PyObject *locals)
 
 
 /* Interpreter main loop */
-
+//void carp() __attribute__((weak));
+//void carp() {}
 PyObject *
 PyEval_EvalFrame(PyFrameObject *f) {
     /* This is for backward compatibility with extension modules that
@@ -549,16 +551,19 @@ PyObject* _Py_HOT_FUNCTION
 _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
 {
 #ifdef DXPAIRS
-    int lastopcode = 0;
+    int lastopcode;
 #endif
-    PyObject **stack_pointer;  /* Next free slot in value stack */
     const _Py_CODEUNIT *next_instr;
+    PyFrameObject *f;
     int opcode;        /* Current opcode */
     int oparg;         /* Current opcode argument, if any */
+    void *jit_ret_addr; /* Used by the JIT internally. */
+
     enum why_code why; /* Reason for block stack unwind */
+    PyObject **stack_pointer;  /* Next free slot in value stack */
     PyObject **fastlocals, **freevars;
-    PyObject *retval = NULL;            /* Return value */
-    PyThreadState *tstate = PyThreadState_GET();
+    PyObject *retval;            /* Return value */
+    PyThreadState *tstate;
     PyCodeObject *co;
 
     /* when tracing we set things up so that
@@ -568,7 +573,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
        is true when the line being executed has changed.  The
        initial values are such as to make this false the first
        time it is tested. */
-    int instr_ub = -1, instr_lb = 0, instr_prev = -1;
+    int instr_ub, instr_lb, instr_prev;
 
     const _Py_CODEUNIT *first_instr;
     PyObject *names;
@@ -577,6 +582,18 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
 #ifdef LLTRACE
     _Py_IDENTIFIER(__ltrace__);
 #endif
+    EvalContext _ctx;
+    EvalContext *ctx = &_ctx;
+
+#ifdef DXPAIRS
+    ctx->lastopcode = 0;
+#endif
+    ctx->tstate = PyThreadState_GET();
+    ctx->f = f;
+    ctx->retval = NULL;
+    ctx->instr_ub = -1;
+    ctx->instr_lb = 0;
+    ctx->instr_prev = -1;
 
 /* Computed GOTOs, or
        the-optimization-commonly-but-improperly-known-as-"threaded code"
@@ -635,23 +652,16 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
 #endif
 
 #if USE_COMPUTED_GOTOS
-/* Import the static jump table */
-#include "opcode_targets.h"
-
-#define TARGET(op) \
-    TARGET_##op: \
-    case op:
-
-#define DISPATCH() \
+#define REAL_DISPATCH() \
     { \
         if (!_Py_atomic_load_relaxed(&_PyRuntime.ceval.eval_breaker)) { \
-                    FAST_DISPATCH(); \
+                    REAL_FAST_DISPATCH(); \
         } \
-        continue; \
+        goto next_opcode; \
     }
 
 #ifdef LLTRACE
-#define FAST_DISPATCH() \
+#define REAL_FAST_DISPATCH() \
     { \
         if (!lltrace && !_Py_TracingPossible && !PyDTrace_LINE_ENABLED()) { \
             f->f_lasti = INSTR_OFFSET(); \
@@ -661,7 +671,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
         goto fast_next_opcode; \
     }
 #else
-#define FAST_DISPATCH() \
+#define REAL_FAST_DISPATCH() \
     { \
         if (!_Py_TracingPossible && !PyDTrace_LINE_ENABLED()) { \
             f->f_lasti = INSTR_OFFSET(); \
@@ -673,13 +683,90 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
 #endif
 
 #else
-#define TARGET(op) \
-    case op:
-
-#define DISPATCH() continue
-#define FAST_DISPATCH() goto fast_next_opcode
+#define REAL_DISPATCH() goto next_opcode
+#define REAL_FAST_DISPATCH() goto fast_next_opcode
 #endif
 
+#define RC_DISPATCH         1
+#define RC_FAST_DISPATCH    2
+#define RC_FAST_NEXT_OPCODE 3
+#define RC_NEXT_OPCODE      4
+#define RC_FAST_YIELD       5
+#define RC_ERROR            6
+#define RC_FAST_BLOCK_END   7
+#define RC_DISPATCH_OPCODE  8
+#define RC_UNWIND_CLEANUP   9
+#define RC_EXIT_EVAL_FRAME  10
+
+#define HANDLE_RC(rc) do { \
+    int _rc = (rc); \
+    if (_rc == RC_DISPATCH) { REAL_DISPATCH(); } \
+    else if (_rc == RC_FAST_DISPATCH) { REAL_FAST_DISPATCH(); } \
+    else if (_rc == RC_FAST_NEXT_OPCODE) goto fast_next_opcode; \
+    else if (_rc == RC_NEXT_OPCODE) goto next_opcode; \
+    else if (_rc == RC_FAST_YIELD) goto fast_yield; \
+    else if (_rc == RC_ERROR) goto error; \
+    else if (_rc == RC_FAST_BLOCK_END) goto fast_block_end; \
+    else if (_rc == RC_DISPATCH_OPCODE) goto dispatch_opcode; \
+    else if (_rc == RC_UNWIND_CLEANUP) goto unwind_cleanup; \
+    else if (_rc == RC_EXIT_EVAL_FRAME) goto exit_eval_frame; \
+    else Py_UNREACHABLE(); \
+} while (0)
+
+#define TARGET(op) \
+    TARGET_##op: \
+    case op: \
+        HANDLE_RC(_PyEval_FUNC_INLINE_TARGET_##op (ctx, NULL));
+
+#define TARGET_FUNC(op) \
+    Py_LOCAL_INLINE(int) _PyEval_FUNC_INLINE_TARGET_##op (EvalContext *ctx, int *jumpev)
+
+#ifdef USE_JIT
+
+Py_LOCAL_INLINE(void) _PyJIT_HandleRC(EvalContext *ctx, int rc, int jumpev) {
+    if (jumpev)
+        _PyJIT_JUMP(ctx);
+
+    if (rc == RC_DISPATCH || rc == RC_NEXT_OPCODE) {
+        if (_Py_atomic_load_relaxed(&_PyRuntime.ceval.eval_breaker)) {
+            _PyJIT_GOTO_NEXT_OPCODE(ctx);
+        }
+        /* Fall through */
+    } else if (rc == RC_FAST_NEXT_OPCODE || rc == RC_FAST_DISPATCH) {
+        /* Fall through */
+    } else if (rc == RC_FAST_YIELD) _PyJIT_GOTO_FAST_YIELD(ctx);
+    else if (rc == RC_ERROR) _PyJIT_GOTO_ERROR(ctx);
+    else if (rc == RC_FAST_BLOCK_END) _PyJIT_GOTO_FAST_BLOCK_END(ctx);
+    else if (rc == RC_DISPATCH_OPCODE) _PyJIT_GOTO_DISPATCH_OPCODE(ctx);
+    else if (rc == RC_UNWIND_CLEANUP) _PyJIT_GOTO_UNWIND_CLEANUP(ctx);
+    else if (rc == RC_EXIT_EVAL_FRAME) _PyJIT_GOTO_EXIT_EVAL_FRAME(ctx);
+    else Py_UNREACHABLE();
+
+    /* Returns to the next instruction in the JIT function */
+    return;
+}
+
+
+#define JIT_TARGET_EXPORT(op) \
+    void _PyEval_FUNC_JIT_TARGET_##op (EvalContext *ctx) { \
+        int jumpev = 0; \
+        int rc = _PyEval_FUNC_INLINE_TARGET_##op (ctx, &jumpev); \
+        _PyJIT_HandleRC(ctx, rc, jumpev); \
+    }
+#else
+#define JIT_TARGET_EXPORT(op)
+#endif
+
+#define DISPATCH()              return RC_DISPATCH
+#define FAST_DISPATCH()         return RC_FAST_DISPATCH
+#define GOTO_FAST_YIELD()       return RC_FAST_YIELD
+#define GOTO_FAST_BLOCK_END()   return RC_FAST_BLOCK_END
+#define GOTO_ERROR()            return RC_ERROR
+#define GOTO_DISPATCH_OPCODE()  return RC_DISPATCH_OPCODE
+#define GOTO_EXIT_EVAL_FRAME()  return RC_EXIT_EVAL_FRAME
+#define GOTO_FAST_NEXT_OPCODE() return RC_FAST_NEXT_OPCODE
+#define GOTO_UNWIND_CLEANUP()   return RC_UNWIND_CLEANUP
+#define GOTO_NEXT_OPCODE()      return RC_NEXT_OPCODE
 
 /* Tuple access macros */
 
@@ -700,8 +787,9 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
         oparg = _Py_OPARG(word); \
         next_instr++; \
     } while (0)
-#define JUMPTO(x)       (next_instr = first_instr + (x) / sizeof(_Py_CODEUNIT))
-#define JUMPBY(x)       (next_instr += (x) / sizeof(_Py_CODEUNIT))
+
+#define JUMPTO(x) (jumpev ? (*jumpev = 1) : 0, next_instr = first_instr + (x) / sizeof(_Py_CODEUNIT))
+#define JUMPBY(x) (jumpev ? (*jumpev = 1) : 0, next_instr += (x) / sizeof(_Py_CODEUNIT))
 
 /* OpCode prediction macros
     Some opcodes tend to come in pairs thus making it possible to
@@ -729,6 +817,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
 
 */
 
+/*
 #if defined(DYNAMIC_EXECUTION_PROFILE) || USE_COMPUTED_GOTOS
 #define PREDICT(op)             if (0) goto PRED_##op
 #else
@@ -743,8 +832,8 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
         } \
     } while(0)
 #endif
-#define PREDICTED(op)           PRED_##op:
-
+*/
+#define PREDICT(op)  do { } while (0)
 
 /* Stack manipulation macros */
 
@@ -828,6 +917,11 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
     } while(0)
 
 /* Start of code */
+
+#if USE_COMPUTED_GOTOS
+/* Import the static jump table */
+#include "opcode_targets.h"
+#endif
 
     /* push frame */
     if (Py_EnterRecursiveCall(""))
@@ -925,7 +1019,18 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
     assert(!PyErr_Occurred());
 #endif
 
-    for (;;) {
+    //fprintf(stderr, "ENTERING %s\n", PyUnicode_AsUTF8(co->co_name));
+#if defined(USE_JIT)
+    /* Use JIT'd code if available */
+    if (!tstate->use_tracing && !_Py_TracingPossible &&
+        !PyDTrace_LINE_ENABLED()) {
+        if (_PyJIT_Execute(ctx) == 0) {
+            goto exit_eval_frame;
+        }
+    }
+#endif
+
+    next_opcode:
         assert(stack_pointer >= f->f_valuestack); /* else underflow */
         assert(STACK_LEVEL() <= co->co_stacksize);  /* else overflow */
         assert(!PyErr_Occurred());
@@ -939,6 +1044,17 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
            Py_MakePendingCalls() above. */
 
         if (_Py_atomic_load_relaxed(&_PyRuntime.ceval.eval_breaker)) {
+            /*
+            carp();
+            fprintf(stderr, "HERE WE ARE:\n");
+            fprintf(stderr, "  function = %s\n", PyUnicode_AsUTF8(f->f_code->co_name));
+            fprintf(stderr, "  first_instr = %p\n", first_instr);
+            fprintf(stderr, "  next_instr = %p\n", next_instr);
+            fprintf(stderr, "  f_lasti = %d\n", f->f_lasti);
+            fprintf(stderr, "  nextopc = %d\n", _Py_OPCODE(*next_instr));
+            fprintf(stderr, "  prevopc = %d\n", _Py_OPCODE(*(next_instr - 1)));
+            fprintf(stderr, "  nextnextopc = %d\n", _Py_OPCODE(*(next_instr + 1)));
+            */
             if (_Py_OPCODE(*next_instr) == SETUP_FINALLY ||
                 _Py_OPCODE(*next_instr) == YIELD_FROM) {
                 /* Two cases where we skip running signal handlers and other
@@ -994,6 +1110,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
                 goto error;
             }
         }
+        goto fast_next_opcode;
 
     fast_next_opcode:
         f->f_lasti = INSTR_OFFSET();
@@ -1028,6 +1145,8 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
         /* Extract opcode and argument */
 
         NEXTOPARG();
+        goto dispatch_opcode;
+
     dispatch_opcode:
 #ifdef DYNAMIC_EXECUTION_PROFILE
 #ifdef DXPAIRS
@@ -3172,15 +3291,15 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
         }
 
         TARGET(CALL_FUNCTION_KW) {
-            PyObject **sp, *res, *names;
+            PyObject **sp, *res, *kwnames;
 
-            names = POP();
-            assert(PyTuple_CheckExact(names) && PyTuple_GET_SIZE(names) <= oparg);
+            kwnames = POP();
+            assert(PyTuple_CheckExact(kwnames) && PyTuple_GET_SIZE(kwnames) <= oparg);
             sp = stack_pointer;
-            res = call_function(&sp, oparg, names);
+            res = call_function(&sp, oparg, kwnames);
             stack_pointer = sp;
             PUSH(res);
-            Py_DECREF(names);
+            Py_DECREF(kwnames);
 
             if (res == NULL) {
                 goto error;
@@ -3375,6 +3494,8 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
            or goto error. */
         Py_UNREACHABLE();
 
+    /* end of main loop */
+
 error:
 
         assert(why == WHY_NOT);
@@ -3395,6 +3516,7 @@ error:
         if (tstate->c_tracefunc != NULL)
             call_exc_trace(tstate->c_tracefunc, tstate->c_traceobj,
                            tstate, f);
+        goto fast_block_end;
 
 fast_block_end:
         assert(why != WHY_NOT);
@@ -3479,11 +3601,12 @@ fast_block_end:
         /* End the loop if we still have an error (or return) */
 
         if (why != WHY_NOT)
-            break;
+            goto unwind_cleanup;
 
         assert(!PyErr_Occurred());
+        goto next_opcode;
 
-    } /* main loop */
+unwind_cleanup:
 
     assert(why != WHY_YIELD);
     /* Pop remaining stack entries. */
@@ -3496,6 +3619,7 @@ fast_block_end:
         retval = NULL;
 
     assert((retval != NULL) ^ (PyErr_Occurred() != NULL));
+    goto fast_yield;
 
 fast_yield:
 
@@ -3529,6 +3653,7 @@ fast_yield:
             }
         }
     }
+    goto exit_eval_frame;
 
     /* pop frame */
 exit_eval_frame:
@@ -3540,6 +3665,23 @@ exit_eval_frame:
 
     return _Py_CheckFunctionResult(NULL, retval, "PyEval_EvalFrameEx");
 }
+
+// TODO(pdox): Clean this up
+#undef GETLOCAL
+#undef SETLOCAL
+#undef NEXTOPARG
+#define GETLOCAL(i)     (fastlocals[i])
+#define SETLOCAL(i, value)      do { PyObject *tmp = GETLOCAL(i); \
+                                     GETLOCAL(i) = value; \
+                                     Py_XDECREF(tmp); } while (0)
+#define NEXTOPARG()  do { \
+        _Py_CODEUNIT word = *next_instr; \
+        opcode = _Py_OPCODE(word); \
+        oparg = _Py_OPARG(word); \
+        next_instr++; \
+    } while (0)
+
+
 
 static void
 format_missing(const char *kind, PyCodeObject *co, PyObject *names)
@@ -5151,3 +5293,10 @@ maybe_dtrace_line(PyFrameObject *frame,
     }
     *instr_prev = frame->f_lasti;
 }
+
+/* TODO(pdox): To avoid having to factor out common structures, the jit
+ * code is just included here.
+ */
+#ifdef USE_JIT
+#include "jit.c"
+#endif

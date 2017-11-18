@@ -197,6 +197,7 @@ PyCode_New(int argcount, int kwonlyargcount,
     co->co_lnotab = lnotab;
     co->co_zombieframe = NULL;
     co->co_weakreflist = NULL;
+    co->co_jit_data = NULL;
     co->co_extra = NULL;
     return co;
 }

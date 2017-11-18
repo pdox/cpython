@@ -713,7 +713,7 @@ regen-importlib: Programs/_freeze_importlib
 ############################################################################
 # Regenerate all generated files
 
-regen-all: regen-opcode regen-opcode-targets regen-typeslots regen-grammar regen-ast regen-importlib
+regen-all: regen-opcode regen-opcode-targets regen-typeslots regen-grammar regen-ast regen-importlib regen-opcode-function-table
 
 ############################################################################
 # Special rules for object files
@@ -879,6 +879,14 @@ regen-opcode-targets:
 		$(srcdir)/Python/opcode_targets.h.new
 	$(UPDATE_FILE) $(srcdir)/Python/opcode_targets.h $(srcdir)/Python/opcode_targets.h.new
 
+.PHONY: regen-opcode-function-table
+regen-opcode-function-table:
+	# Regenerate Python/opcode_function_table.h from Lib/opcode.py
+	# using Python/makeopcodefunctiontable.py
+	$(PYTHON_FOR_REGEN) $(srcdir)/Python/makeopcodefunctiontable.py \
+		$(srcdir)/Python/opcode_function_table.h.new
+	$(UPDATE_FILE) $(srcdir)/Python/opcode_function_table.h $(srcdir)/Python/opcode_function_table.h.new
+
 Python/ceval.o: $(srcdir)/Python/opcode_targets.h $(srcdir)/Python/ceval_gil.h
 
 Python/frozen.o: $(srcdir)/Python/importlib.h $(srcdir)/Python/importlib_external.h
@@ -1010,7 +1018,7 @@ PYTHON_HEADERS= \
 		$(srcdir)/Include/internal/warnings.h \
 		$(DTRACE_HEADERS)
 
-$(LIBRARY_OBJS) $(MODOBJS) Programs/python.o: $(PYTHON_HEADERS)
+$(LIBRARY_OBJS) $(MODOBJS) Programs/python.o: $(PYTHON_HEADERS) Python/jit.c
 
 
 ######################################################################
