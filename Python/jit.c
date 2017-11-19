@@ -55,7 +55,7 @@ _PyJIT_GrowCodePage(Py_ssize_t needed) {
     }
     cp->prev = cp_tail;
     cp->next = NULL;
-    cp->base = mmap(NULL, alloc_size, PROT_READ|PROT_WRITE|PROT_EXEC, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+    cp->base = mmap(NULL, alloc_size, PROT_READ|PROT_WRITE|PROT_EXEC, MAP_PRIVATE|MAP_ANONYMOUS|MAP_32BIT, -1, 0);
     if (cp->base == MAP_FAILED) {
         PyMem_Free(cp);
         PyErr_SetString(PyExc_RuntimeError, "JIT mmap error");
@@ -106,12 +106,20 @@ reloc_8(int offset, int value) {
 
 Py_LOCAL_INLINE(void)
 insert_call(void *function_addr) {
-    // movabs $function_addr, %rax
-    insert_code(2, "\x48\xb8");
-    memcpy(&cp_tail->pos[0], &function_addr, 8);
-    cp_tail->pos += 8;
-    // call *%rax
-    insert_code(2, "\xff\xd0");
+    // Use a rel32 call if possible
+    ptrdiff_t rel32 = (char*)function_addr - &cp_tail->pos[5];
+    if (rel32 >= INT32_MIN && rel32 <= INT32_MAX) {
+        insert_code(1, "\xe8");
+        memcpy(&cp_tail->pos[0], &rel32, 4);
+        cp_tail->pos += 4;
+    } else {
+        // movabs $function_addr, %rax
+        insert_code(2, "\x48\xb8");
+        memcpy(&cp_tail->pos[0], &function_addr, 8);
+        cp_tail->pos += 8;
+        // call *%rax
+        insert_code(2, "\xff\xd0");
+    }
 }
 
 Py_LOCAL_INLINE(void)
