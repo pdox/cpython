@@ -37,39 +37,40 @@ typedef PyObject *(*callproc)(PyObject *, PyObject *, PyObject *);
 /* Forward declarations */
 Py_LOCAL_INLINE(PyObject *) call_function(PyObject ***, Py_ssize_t,
                                           PyObject *);
-static PyObject * do_call_core(PyObject *, PyObject *, PyObject *);
+PyObject * call_function_extern(PyObject ***, Py_ssize_t, PyObject *);
+PyObject * do_call_core(PyObject *, PyObject *, PyObject *);
 
 #ifdef LLTRACE
 static int lltrace;
 static int prtrace(PyObject *, const char *);
 #endif
-static int call_trace(Py_tracefunc, PyObject *,
+int call_trace(Py_tracefunc, PyObject *,
                       PyThreadState *, PyFrameObject *,
                       int, PyObject *);
-static int call_trace_protected(Py_tracefunc, PyObject *,
+int call_trace_protected(Py_tracefunc, PyObject *,
                                 PyThreadState *, PyFrameObject *,
                                 int, PyObject *);
-static void call_exc_trace(Py_tracefunc, PyObject *,
+void call_exc_trace(Py_tracefunc, PyObject *,
                            PyThreadState *, PyFrameObject *);
-static int maybe_call_line_trace(Py_tracefunc, PyObject *,
+int maybe_call_line_trace(Py_tracefunc, PyObject *,
                                  PyThreadState *, PyFrameObject *,
                                  int *, int *, int *);
-static void maybe_dtrace_line(PyFrameObject *, int *, int *, int *);
-static void dtrace_function_entry(PyFrameObject *);
-static void dtrace_function_return(PyFrameObject *);
+void maybe_dtrace_line(PyFrameObject *, int *, int *, int *);
+void dtrace_function_entry(PyFrameObject *);
+void dtrace_function_return(PyFrameObject *);
 
-static PyObject * cmp_outcome(int, PyObject *, PyObject *);
-static PyObject * import_name(PyFrameObject *, PyObject *, PyObject *,
+PyObject * cmp_outcome(int, PyObject *, PyObject *);
+PyObject * import_name(PyFrameObject *, PyObject *, PyObject *,
                               PyObject *);
-static PyObject * import_from(PyObject *, PyObject *);
-static int import_all_from(PyObject *, PyObject *);
-static void format_exc_check_arg(PyObject *, const char *, PyObject *);
-static void format_exc_unbound(PyCodeObject *co, int oparg);
-static PyObject * unicode_concatenate(PyObject *, PyObject *,
+PyObject * import_from(PyObject *, PyObject *);
+int import_all_from(PyObject *, PyObject *);
+void format_exc_check_arg(PyObject *, const char *, PyObject *);
+void format_exc_unbound(PyCodeObject *co, int oparg);
+PyObject * unicode_concatenate(PyObject *, PyObject *,
                                       PyFrameObject *, const _Py_CODEUNIT *);
-static PyObject * special_lookup(PyObject *, _Py_Identifier *);
-static int check_args_iterable(PyObject *func, PyObject *vararg);
-static void format_kwargs_mapping_error(PyObject *func, PyObject *kwargs);
+PyObject * special_lookup(PyObject *, _Py_Identifier *);
+int check_args_iterable(PyObject *func, PyObject *vararg);
+void format_kwargs_mapping_error(PyObject *func, PyObject *kwargs);
 
 #define NAME_ERROR_MSG \
     "name '%.200s' is not defined"
@@ -143,6 +144,7 @@ static long dxp[256];
 #include <errno.h>
 #endif
 #include "pythread.h"
+#define __REAL_CEVAL
 #include "ceval_gil.h"
 
 int
@@ -511,8 +513,8 @@ enum why_code {
         WHY_SILENCED =  0x0080  /* Exception silenced by 'with' */
 };
 
-static int do_raise(PyObject *, PyObject *);
-static int unpack_iterable(PyObject *, int, int, PyObject **);
+int do_raise(PyObject *, PyObject *);
+int unpack_iterable(PyObject *, int, int, PyObject **);
 
 #define _Py_TracingPossible _PyRuntime.ceval.tracing_possible
 
@@ -3546,7 +3548,7 @@ exit_eval_frame:
     return _Py_CheckFunctionResult(NULL, retval, "PyEval_EvalFrameEx");
 }
 
-static void
+void
 format_missing(const char *kind, PyCodeObject *co, PyObject *names)
 {
     int err;
@@ -3608,7 +3610,7 @@ format_missing(const char *kind, PyCodeObject *co, PyObject *names)
     Py_DECREF(name_str);
 }
 
-static void
+void
 missing_arguments(PyCodeObject *co, Py_ssize_t missing, Py_ssize_t defcount,
                   PyObject **fastlocals)
 {
@@ -3646,7 +3648,7 @@ missing_arguments(PyCodeObject *co, Py_ssize_t missing, Py_ssize_t defcount,
     Py_DECREF(missing_names);
 }
 
-static void
+void
 too_many_positional(PyCodeObject *co, Py_ssize_t given, Py_ssize_t defcount,
                     PyObject **fastlocals)
 {
@@ -4009,7 +4011,7 @@ PyEval_EvalCodeEx(PyObject *_co, PyObject *globals, PyObject *locals,
                                     NULL, NULL);
 }
 
-static PyObject *
+PyObject *
 special_lookup(PyObject *o, _Py_Identifier *id)
 {
     PyObject *res;
@@ -4024,7 +4026,7 @@ special_lookup(PyObject *o, _Py_Identifier *id)
 
 /* Logic for the raise statement (too complicated for inlining).
    This *consumes* a reference count to each of its arguments. */
-static int
+int
 do_raise(PyObject *exc, PyObject *cause)
 {
     PyObject *type = NULL, *value = NULL;
@@ -4128,7 +4130,7 @@ raise_error:
    with a variable target.
 */
 
-static int
+int
 unpack_iterable(PyObject *v, int argcnt, int argcntafter, PyObject **sp)
 {
     int i = 0, j = 0;
@@ -4213,7 +4215,7 @@ Error:
 
 
 #ifdef LLTRACE
-static int
+int
 prtrace(PyObject *v, const char *str)
 {
     printf("%s ", str);
@@ -4224,7 +4226,7 @@ prtrace(PyObject *v, const char *str)
 }
 #endif
 
-static void
+void
 call_exc_trace(Py_tracefunc func, PyObject *self,
                PyThreadState *tstate, PyFrameObject *f)
 {
@@ -4253,7 +4255,7 @@ call_exc_trace(Py_tracefunc func, PyObject *self,
     }
 }
 
-static int
+int
 call_trace_protected(Py_tracefunc func, PyObject *obj,
                      PyThreadState *tstate, PyFrameObject *frame,
                      int what, PyObject *arg)
@@ -4275,7 +4277,7 @@ call_trace_protected(Py_tracefunc func, PyObject *obj,
     }
 }
 
-static int
+int
 call_trace(Py_tracefunc func, PyObject *obj,
            PyThreadState *tstate, PyFrameObject *frame,
            int what, PyObject *arg)
@@ -4310,7 +4312,7 @@ _PyEval_CallTracing(PyObject *func, PyObject *args)
 }
 
 /* See Objects/lnotab_notes.txt for a description of how tracing works. */
-static int
+int
 maybe_call_line_trace(Py_tracefunc func, PyObject *obj,
                       PyThreadState *tstate, PyFrameObject *frame,
                       int *instr_lb, int *instr_ub, int *instr_prev)
@@ -4630,7 +4632,13 @@ call_function(PyObject ***pp_stack, Py_ssize_t oparg, PyObject *kwnames)
     return x;
 }
 
-static PyObject *
+PyObject * _Py_HOT_FUNCTION
+call_function_extern(PyObject ***pp_stack, Py_ssize_t oparg, PyObject *kwnames) {
+    return call_function(pp_stack, oparg, kwnames);
+}
+
+
+PyObject *
 do_call_core(PyObject *func, PyObject *callargs, PyObject *kwdict)
 {
     if (PyCFunction_Check(func)) {
@@ -4694,7 +4702,7 @@ _PyEval_SliceIndexNotNone(PyObject *v, Py_ssize_t *pi)
 #define CANNOT_CATCH_MSG "catching classes that do not inherit from "\
                          "BaseException is not allowed"
 
-static PyObject *
+PyObject *
 cmp_outcome(int op, PyObject *v, PyObject *w)
 {
     int res = 0;
@@ -4746,7 +4754,7 @@ cmp_outcome(int op, PyObject *v, PyObject *w)
     return v;
 }
 
-static PyObject *
+PyObject *
 import_name(PyFrameObject *f, PyObject *name, PyObject *fromlist, PyObject *level)
 {
     _Py_IDENTIFIER(__import__);
@@ -4786,7 +4794,7 @@ import_name(PyFrameObject *f, PyObject *name, PyObject *fromlist, PyObject *leve
     return res;
 }
 
-static PyObject *
+PyObject *
 import_from(PyObject *v, PyObject *name)
 {
     PyObject *x;
@@ -4856,7 +4864,7 @@ import_from(PyObject *v, PyObject *name)
     return NULL;
 }
 
-static int
+int
 import_all_from(PyObject *locals, PyObject *v)
 {
     _Py_IDENTIFIER(__all__);
@@ -4921,7 +4929,7 @@ import_all_from(PyObject *locals, PyObject *v)
     return err;
 }
 
-static int
+int
 check_args_iterable(PyObject *func, PyObject *args)
 {
     if (args->ob_type->tp_iter == NULL && !PySequence_Check(args)) {
@@ -4936,7 +4944,7 @@ check_args_iterable(PyObject *func, PyObject *args)
     return 0;
 }
 
-static void
+void
 format_kwargs_mapping_error(PyObject *func, PyObject *kwargs)
 {
     PyErr_Format(PyExc_TypeError,
@@ -4947,7 +4955,7 @@ format_kwargs_mapping_error(PyObject *func, PyObject *kwargs)
                  kwargs->ob_type->tp_name);
 }
 
-static void
+void
 format_exc_check_arg(PyObject *exc, const char *format_str, PyObject *obj)
 {
     const char *obj_str;
@@ -4962,7 +4970,7 @@ format_exc_check_arg(PyObject *exc, const char *format_str, PyObject *obj)
     PyErr_Format(exc, format_str, obj_str);
 }
 
-static void
+void
 format_exc_unbound(PyCodeObject *co, int oparg)
 {
     PyObject *name;
@@ -4984,7 +4992,7 @@ format_exc_unbound(PyCodeObject *co, int oparg)
     }
 }
 
-static PyObject *
+PyObject *
 unicode_concatenate(PyObject *v, PyObject *w,
                     PyFrameObject *f, const _Py_CODEUNIT *next_instr)
 {
@@ -5039,7 +5047,7 @@ unicode_concatenate(PyObject *v, PyObject *w,
 
 #ifdef DYNAMIC_EXECUTION_PROFILE
 
-static PyObject *
+PyObject *
 getarray(long a[256])
 {
     int i;
@@ -5095,7 +5103,7 @@ _PyEval_RequestCodeExtraIndex(freefunc free)
     return new_index;
 }
 
-static void
+void
 dtrace_function_entry(PyFrameObject *f)
 {
     const char *filename;
@@ -5109,7 +5117,7 @@ dtrace_function_entry(PyFrameObject *f)
     PyDTrace_FUNCTION_ENTRY(filename, funcname, lineno);
 }
 
-static void
+void
 dtrace_function_return(PyFrameObject *f)
 {
     const char *filename;
@@ -5124,7 +5132,7 @@ dtrace_function_return(PyFrameObject *f)
 }
 
 /* DTrace equivalent of maybe_call_line_trace. */
-static void
+void
 maybe_dtrace_line(PyFrameObject *frame,
                   int *instr_lb, int *instr_ub, int *instr_prev)
 {
@@ -5157,4 +5165,65 @@ maybe_dtrace_line(PyFrameObject *frame,
     *instr_prev = frame->f_lasti;
 }
 
-#include "ceval_jit.h"
+#include "internal/jit.h"
+
+PyObject*
+PyJIT_EvalFrame(PyFrameObject *f) {
+    int rc;
+    EvalContext _ctx;
+    EvalContext *ctx = &_ctx;
+
+#ifdef DXPAIRS
+    ctx->lastopcode = 0;
+#endif
+    ctx->tstate = PyThreadState_GET();
+    ctx->retval = NULL;
+    ctx->instr_ub = -1;
+    ctx->instr_lb = 0;
+    ctx->instr_prev = -1;
+
+    /* push frame */
+    if (Py_EnterRecursiveCall(""))
+        return NULL;
+
+    ctx->tstate->frame = f;
+    ctx->co = f->f_code;
+    ctx->names = ctx->co->co_names;
+    ctx->consts = ctx->co->co_consts;
+    ctx->fastlocals = f->f_localsplus;
+    ctx->freevars = f->f_localsplus + ctx->co->co_nlocals;
+    assert(PyBytes_Check(ctx->co->co_code));
+    assert(PyBytes_GET_SIZE(ctx->co->co_code) <= INT_MAX);
+    assert(PyBytes_GET_SIZE(ctx->co->co_code) % sizeof(_Py_CODEUNIT) == 0);
+    assert(_Py_IS_ALIGNED(PyBytes_AS_STRING(ctx->co->co_code), sizeof(_Py_CODEUNIT)));
+    ctx->first_instr = (_Py_CODEUNIT *) PyBytes_AS_STRING(ctx->co->co_code);
+    assert(f->f_lasti >= -1);
+    ctx->next_instr = ctx->first_instr;
+    if (f->f_lasti >= 0) {
+        assert(f->f_lasti % sizeof(_Py_CODEUNIT) == 0);
+        ctx->next_instr += f->f_lasti / sizeof(_Py_CODEUNIT) + 1;
+    }
+    ctx->stack_pointer = f->f_stacktop;
+    assert(ctx->stack_pointer != NULL);
+    f->f_stacktop = NULL;       /* remains NULL unless yield suspends frame */
+    f->f_executing = 1;
+    ctx->why = WHY_NOT;
+
+#ifdef Py_DEBUG
+    /* PyEval_EvalFrameEx() must not be called with an exception set,
+       because it can clear it (directly or indirectly) and so the
+       caller loses its exception */
+    assert(!PyErr_Occurred());
+#endif
+
+    rc = _PyJIT_Execute(ctx, f);
+    if (rc != 0) {
+        /* TODO: Handle gracefully */
+        abort();
+    }
+
+    Py_LeaveRecursiveCall();
+    f->f_executing = 0;
+    ctx->tstate->frame = f->f_back;
+    return _Py_CheckFunctionResult(NULL, ctx->retval, "PyEval_EvalFrameEx");
+}

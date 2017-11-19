@@ -34,7 +34,7 @@ def write_contents(f):
     targets = ['_unknown_opcode'] * 256
     for opname, op in opcode.opmap.items():
         targets[op] = "TARGET_%s" % opname
-    f.write("\n".join(["void _PyEval_FUNC_JIT_%s(EvalContext *);" % s for s in set(targets)]))
+    f.write("\n".join(["void _PyEval_FUNC_JIT_%s(void);" % s for s in set(targets)]))
     f.write("\n\n")
     f.write("static PyJITTargetFunction opcode_function_table[256] = {\n")
     f.write(",\n".join(["    &_PyEval_FUNC_JIT_%s" % s for s in targets]))

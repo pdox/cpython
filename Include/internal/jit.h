@@ -51,7 +51,7 @@ typedef struct _EvalContext {
 #define set_return_address(addr) \
     (*(((void**)(ctx->jit_ret_addr) - 1)) = (void*)(addr))
 
-int _PyJIT_Execute(EvalContext *ctx);
+int _PyJIT_Execute(EvalContext *ctx, PyFrameObject *f);
 
 #ifdef __cplusplus
 }

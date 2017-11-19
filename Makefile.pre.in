@@ -321,6 +321,7 @@ PYTHON_OBJS=	\
 		Python/ast.o \
 		Python/bltinmodule.o \
 		Python/ceval.o \
+		Python/ceval_jit.o \
 		Python/jit.o \
 		Python/compile.o \
 		Python/codecs.o \
@@ -888,7 +889,7 @@ regen-opcode-function-table:
 		$(srcdir)/Python/opcode_function_table.h.new
 	$(UPDATE_FILE) $(srcdir)/Python/opcode_function_table.h $(srcdir)/Python/opcode_function_table.h.new
 
-Python/ceval.o: $(srcdir)/Python/opcode_targets.h $(srcdir)/Python/ceval_gil.h $(srcdir)/Python/ceval_jit.h
+Python/ceval.o: $(srcdir)/Python/opcode_targets.h $(srcdir)/Python/ceval_gil.h
 
 Python/frozen.o: $(srcdir)/Python/importlib.h $(srcdir)/Python/importlib_external.h
 

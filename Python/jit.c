@@ -19,16 +19,19 @@ typedef struct _CodePage {
 static CodePage *cp_head;
 static CodePage *cp_tail;
 
-typedef void (*PyJITTargetFunction)(EvalContext *);
+typedef void (*PyJITEntryFunction)(EvalContext *ctx, PyFrameObject *f);
+typedef void (*PyJITTargetFunction)(void);
 
-void _PyEval_FUNC_JIT__unknown_opcode(EvalContext *ctx) {
+void _PyEval_FUNC_JIT_RESUME(void);
+
+void _PyEval_FUNC_JIT__unknown_opcode(void) {
     assert(0);
 }
 
 #include "opcode_function_table.h"
 
 /* Special pseudo-instructions */
-#define DECLARE_SPECIAL(name)  void _PyEval_FUNC_JIT_TARGET_II_##name (EvalContext *)
+#define DECLARE_SPECIAL(name)  void _PyEval_FUNC_JIT_TARGET_II_##name (void)
 
 DECLARE_SPECIAL(NEXT_OPCODE);
 DECLARE_SPECIAL(ERROR);
@@ -118,17 +121,8 @@ finish_code(void) {
 
 Py_LOCAL_INLINE(void)
 insert_special_section(void *function_addr) {
-    // mov %r12, %rdi
-    insert_code(3, "\x4c\x89\xe7");
-
     // call function
     insert_call(function_addr);
-}
-
-static void _resume(EvalContext *ctx) {
-    JITData *jd = (JITData*)ctx->co->co_jit_data;
-    int idx = ctx->next_instr - ctx->first_instr;
-    set_return_address(jd->jmptab[idx]);
 }
 
 static void
@@ -191,24 +185,21 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     // pushq %r14
     insert_code(2, "\x41\x56");
 
-    // movq %rdi,%r12
+    // movq %rdi, %r12
     insert_code(3, "\x49\x89\xfc");
 
-    // mov %rsp, jit_ret_addr(%rdi)
-    insert_code(4, "\x48\x89\x67\x00");
-    reloc_8(-1, offsetof(EvalContext, jit_ret_addr));
+    // movq %rsi, %r13
+    insert_code(3, "\x49\x89\xf5");
 
-    // movq f_offset(%r12), %r13
-    insert_code(5, "\x4d\x8b\x6c\x24\x00");
-    reloc_8(-1, offsetof(EvalContext, f));
+    // mov %rsp, jit_ret_addr(%r12)
+    insert_code(5, "\x49\x89\x64\x24\x00");
+    reloc_8(-1, offsetof(EvalContext, jit_ret_addr));
 
     // We have to do signal check immediately upon function entry.
     insert_special_section(_PyEval_FUNC_JIT_TARGET_II_NEXT_OPCODE);
 
     if (is_gen) {
-        // mov %r12, %rdi
-        insert_code(3, "\x4c\x89\xe7");
-        insert_call(_resume);
+        insert_call(_PyEval_FUNC_JIT_RESUME);
     }
 
     for (i = 0; i < inst_count; i++) {
@@ -234,9 +225,6 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
         reloc_32(-4, _Py_OPARG(*p));
         reloc_8(-5, offsetof(EvalContext, oparg));
 
-        // mov %r12, %rdi
-        insert_code(3, "\x4c\x89\xe7");
-
         // call 32-bit relative function
         insert_call(opcode_function_table[_Py_OPCODE(*p)]);
 
@@ -260,47 +248,32 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     // movq (%rax,%rcx,8), %rax
     insert_code(4, "\x48\x8b\x04\xc8");
 
-    // mov %r12, %rdi
-    insert_code(3, "\x4c\x89\xe7");
-
     // call *%rax
     insert_code(2, "\xff\xd0");
 
     // if we returned, jump to the next instruction
-    // mov %r12, %rdi
-    insert_code(3, "\x4c\x89\xe7");
-    insert_call(_resume);
+    insert_call(_PyEval_FUNC_JIT_RESUME);
 
     /* Special sections */
     jd->j_error = current_code_pos();
     insert_special_section(_PyEval_FUNC_JIT_TARGET_II_ERROR);
-    // mov %r12, %rdi
-    insert_code(3, "\x4c\x89\xe7");
-    insert_call(_resume);
+    insert_call(_PyEval_FUNC_JIT_RESUME);
 
     jd->j_fast_yield = current_code_pos();
     insert_special_section(_PyEval_FUNC_JIT_TARGET_II_FAST_YIELD);
-    // mov %r12, %rdi
-    insert_code(3, "\x4c\x89\xe7");
-    insert_call(_resume);
+    insert_call(_PyEval_FUNC_JIT_RESUME);
 
     jd->j_fast_block_end = current_code_pos();
     insert_special_section(_PyEval_FUNC_JIT_TARGET_II_FAST_BLOCK_END);
-    // mov %r12, %rdi
-    insert_code(3, "\x4c\x89\xe7");
-    insert_call(_resume);
+    insert_call(_PyEval_FUNC_JIT_RESUME);
 
     jd->j_unwind_cleanup = current_code_pos();
     insert_special_section(_PyEval_FUNC_JIT_TARGET_II_UNWIND_CLEANUP);
-    // mov %r12, %rdi
-    insert_code(3, "\x4c\x89\xe7");
-    insert_call(_resume);
+    insert_call(_PyEval_FUNC_JIT_RESUME);
 
     jd->j_next_opcode = current_code_pos();
     insert_special_section(_PyEval_FUNC_JIT_TARGET_II_NEXT_OPCODE);
-    // mov %r12, %rdi
-    insert_code(3, "\x4c\x89\xe7");
-    insert_call(_resume);
+    insert_call(_PyEval_FUNC_JIT_RESUME);
 
     jd->j_ret = current_code_pos();
     // pop %r14
@@ -332,7 +305,7 @@ _PyJIT_CodeGen(PyCodeObject *co) {
     return 0;
 }
 
-int _PyJIT_Execute(EvalContext *ctx) {
+int _PyJIT_Execute(EvalContext *ctx, PyFrameObject *f) {
     JITData *jd;
     if (ctx->co->co_jit_data == NULL) {
         if (_PyJIT_CodeGen(ctx->co) != 0) {
@@ -342,6 +315,6 @@ int _PyJIT_Execute(EvalContext *ctx) {
     }
     jd = (JITData*)ctx->co->co_jit_data;
 
-    ((PyJITTargetFunction)jd->entry)(ctx);
+    ((PyJITEntryFunction)jd->entry)(ctx, f);
     return 0;
 }

@@ -1,7 +1,161 @@
+/* enable more aggressive intra-module optimizations, where available */
+#define PY_LOCAL_AGGRESSIVE
+
+#include "Python.h"
+#include "internal/pystate.h"
+
+#include "code.h"
+#include "dictobject.h"
+#include "frameobject.h"
+#include "opcode.h"
+#include "pydtrace.h"
+#include "setobject.h"
+#include "structmember.h"
+#include "jit.h"
 #include "internal/jit.h"
 
+#include <ctype.h>
+
+/* Private API for the LOAD_METHOD opcode. */
+extern int _PyObject_GetMethod(PyObject *, PyObject *, PyObject **);
+
+typedef PyObject *(*callproc)(PyObject *, PyObject *, PyObject *);
+
+/* Forward declarations */
+PyObject *
+call_function_extern(PyObject ***, Py_ssize_t,
+                     PyObject *);
+PyObject * do_call_core(PyObject *, PyObject *, PyObject *);
+
+#ifdef LLTRACE
+extern int lltrace;
+int prtrace(PyObject *, const char *);
+#endif
+
+int call_trace(Py_tracefunc, PyObject *,
+                      PyThreadState *, PyFrameObject *,
+                      int, PyObject *);
+int call_trace_protected(Py_tracefunc, PyObject *,
+                                PyThreadState *, PyFrameObject *,
+                                int, PyObject *);
+void call_exc_trace(Py_tracefunc, PyObject *,
+                           PyThreadState *, PyFrameObject *);
+int maybe_call_line_trace(Py_tracefunc, PyObject *,
+                                 PyThreadState *, PyFrameObject *,
+                                 int *, int *, int *);
+void maybe_dtrace_line(PyFrameObject *, int *, int *, int *);
+void dtrace_function_entry(PyFrameObject *);
+void dtrace_function_return(PyFrameObject *);
+
+PyObject * cmp_outcome(int, PyObject *, PyObject *);
+PyObject * import_name(PyFrameObject *, PyObject *, PyObject *,
+                              PyObject *);
+PyObject * import_from(PyObject *, PyObject *);
+int import_all_from(PyObject *, PyObject *);
+void format_exc_check_arg(PyObject *, const char *, PyObject *);
+void format_exc_unbound(PyCodeObject *co, int oparg);
+PyObject * unicode_concatenate(PyObject *, PyObject *,
+                                      PyFrameObject *, const _Py_CODEUNIT *);
+PyObject * special_lookup(PyObject *, _Py_Identifier *);
+int check_args_iterable(PyObject *func, PyObject *vararg);
+void format_kwargs_mapping_error(PyObject *func, PyObject *kwargs);
+
+#define NAME_ERROR_MSG \
+    "name '%.200s' is not defined"
+#define UNBOUNDLOCAL_ERROR_MSG \
+    "local variable '%.200s' referenced before assignment"
+#define UNBOUNDFREE_ERROR_MSG \
+    "free variable '%.200s' referenced before assignment" \
+    " in enclosing scope"
+
+#define GIL_REQUEST _Py_atomic_load_relaxed(&_PyRuntime.ceval.gil_drop_request)
+
+/* This can set eval_breaker to 0 even though gil_drop_request became
+   1.  We believe this is all right because the eval loop will release
+   the GIL eventually anyway. */
+#define COMPUTE_EVAL_BREAKER() \
+    _Py_atomic_store_relaxed( \
+        &_PyRuntime.ceval.eval_breaker, \
+        GIL_REQUEST | \
+        _Py_atomic_load_relaxed(&_PyRuntime.ceval.pending.calls_to_do) | \
+        _PyRuntime.ceval.pending.async_exc)
+
+#define SET_GIL_DROP_REQUEST() \
+    do { \
+        _Py_atomic_store_relaxed(&_PyRuntime.ceval.gil_drop_request, 1); \
+        _Py_atomic_store_relaxed(&_PyRuntime.ceval.eval_breaker, 1); \
+    } while (0)
+
+#define RESET_GIL_DROP_REQUEST() \
+    do { \
+        _Py_atomic_store_relaxed(&_PyRuntime.ceval.gil_drop_request, 0); \
+        COMPUTE_EVAL_BREAKER(); \
+    } while (0)
+
+/* Pending calls are only modified under pending_lock */
+#define SIGNAL_PENDING_CALLS() \
+    do { \
+        _Py_atomic_store_relaxed(&_PyRuntime.ceval.pending.calls_to_do, 1); \
+        _Py_atomic_store_relaxed(&_PyRuntime.ceval.eval_breaker, 1); \
+    } while (0)
+
+#define UNSIGNAL_PENDING_CALLS() \
+    do { \
+        _Py_atomic_store_relaxed(&_PyRuntime.ceval.pending.calls_to_do, 0); \
+        COMPUTE_EVAL_BREAKER(); \
+    } while (0)
+
+#define SIGNAL_ASYNC_EXC() \
+    do { \
+        _PyRuntime.ceval.pending.async_exc = 1; \
+        _Py_atomic_store_relaxed(&_PyRuntime.ceval.eval_breaker, 1); \
+    } while (0)
+
+#define UNSIGNAL_ASYNC_EXC() \
+    do { \
+        _PyRuntime.ceval.pending.async_exc = 0; \
+        COMPUTE_EVAL_BREAKER(); \
+    } while (0)
+
+#ifdef HAVE_ERRNO_H
+#include <errno.h>
+#endif
+#include "pythread.h"
+#include "ceval_gil.h"
+
+void *dummy[] = {_gil_initialize, gil_created, destroy_gil, recreate_gil};
+
+/* Status code for main loop (reason for stack unwind) */
+enum why_code {
+        WHY_NOT =       0x0001, /* No error */
+        WHY_EXCEPTION = 0x0002, /* Exception occurred */
+        WHY_RETURN =    0x0008, /* 'return' statement */
+        WHY_BREAK =     0x0010, /* 'break' statement */
+        WHY_CONTINUE =  0x0020, /* 'continue' statement */
+        WHY_YIELD =     0x0040, /* 'yield' operator */
+        WHY_SILENCED =  0x0080  /* Exception silenced by 'with' */
+};
+
+int do_raise(PyObject *, PyObject *);
+int unpack_iterable(PyObject *, int, int, PyObject **);
+
+#define _Py_TracingPossible _PyRuntime.ceval.tracing_possible
+
+/* Tuple access macros */
+
+#ifndef Py_DEBUG
+#define GETITEM(v, i) PyTuple_GET_ITEM((PyTupleObject *)(v), (i))
+#else
+#define GETITEM(v, i) PyTuple_GetItem((v), (i))
+#endif
+
+//----------------------------------------------------------------------------------
+
+register EvalContext *ctx asm ("r12");
+register PyFrameObject *f asm("r13");
+
 #define TARGET_FUNC(op) \
-    void _PyEval_FUNC_JIT_TARGET_##op (EvalContext *ctx)
+    void _PyEval_FUNC_JIT_TARGET_##op (void)
 
 #define JIT_TARGET_EXPORT(f)
 
@@ -81,7 +235,7 @@
 #undef BASIC_STACKADJ
 #undef BASIC_PUSH
 #undef BASIC_POP
-#define STACK_LEVEL()     ((int)(ctx->stack_pointer - ctx->f->f_valuestack))
+#define STACK_LEVEL()     ((int)(ctx->stack_pointer - f->f_valuestack))
 #define EMPTY()           (STACK_LEVEL() == 0)
 #define TOP()             (ctx->stack_pointer[-1])
 #define SECOND()          (ctx->stack_pointer[-2])
@@ -112,6 +266,12 @@
 #define SETLOCAL(i, value)      do { PyObject *tmp = GETLOCAL(i); \
                                      GETLOCAL(i) = value; \
                                      Py_XDECREF(tmp); } while (0)
+
+void _PyEval_FUNC_JIT_RESUME(void) {
+    JITData *jd = (JITData*)ctx->co->co_jit_data;
+    int idx = ctx->next_instr - ctx->first_instr;
+    set_return_address(jd->jmptab[idx]);
+}
 
 #undef UNWIND_BLOCK
 #define UNWIND_BLOCK(b) \
@@ -144,7 +304,7 @@
 
 
 TARGET_FUNC(II_NEXT_OPCODE) {
-    assert(ctx->stack_pointer >= ctx->f->f_valuestack); /* else underflow */
+    assert(ctx->stack_pointer >= f->f_valuestack); /* else underflow */
     assert(STACK_LEVEL() <= ctx->co->co_stacksize);  /* else overflow */
     assert(!PyErr_Occurred());
 
@@ -217,10 +377,10 @@ TARGET_FUNC(II_NEXT_OPCODE) {
 JIT_TARGET_EXPORT(II_NEXT_OPCODE)
 
 TARGET_FUNC(II_FAST_NEXT_OPCODE) {
-    ctx->f->f_lasti = INSTR_OFFSET();
+    f->f_lasti = INSTR_OFFSET();
 
     if (PyDTrace_LINE_ENABLED())
-        maybe_dtrace_line(ctx->f, &ctx->instr_lb, &ctx->instr_ub, &ctx->instr_prev);
+        maybe_dtrace_line(f, &ctx->instr_lb, &ctx->instr_ub, &ctx->instr_prev);
 
     /* line-by-line tracing support */
 
@@ -229,17 +389,17 @@ TARGET_FUNC(II_FAST_NEXT_OPCODE) {
         int err;
         /* see maybe_call_line_trace
            for expository comments */
-        ctx->f->f_stacktop = ctx->stack_pointer;
+        f->f_stacktop = ctx->stack_pointer;
 
         err = maybe_call_line_trace(ctx->tstate->c_tracefunc,
                                     ctx->tstate->c_traceobj,
-                                    ctx->tstate, ctx->f,
+                                    ctx->tstate, f,
                                     &ctx->instr_lb, &ctx->instr_ub, &ctx->instr_prev);
         /* Reload possibly changed frame fields */
-        JUMPTO(ctx->f->f_lasti);
-        if (ctx->f->f_stacktop != NULL) {
-            ctx->stack_pointer = ctx->f->f_stacktop;
-            ctx->f->f_stacktop = NULL;
+        JUMPTO(f->f_lasti);
+        if (f->f_stacktop != NULL) {
+            ctx->stack_pointer = f->f_stacktop;
+            f->f_stacktop = NULL;
         }
         if (err)
             /* trace function raised an exception */
@@ -267,11 +427,11 @@ TARGET_FUNC(II_ERROR) {
 #endif
 
     /* Log traceback info. */
-    PyTraceBack_Here(ctx->f);
+    PyTraceBack_Here(f);
 
     if (ctx->tstate->c_tracefunc != NULL)
         call_exc_trace(ctx->tstate->c_tracefunc, ctx->tstate->c_traceobj,
-                       ctx->tstate, ctx->f);
+                       ctx->tstate, f);
     GOTO_FAST_BLOCK_END();
 }
 JIT_TARGET_EXPORT(II_ERROR)
@@ -280,9 +440,9 @@ TARGET_FUNC(II_FAST_BLOCK_END) {
     assert(ctx->why != WHY_NOT);
 
     /* Unwind stacks if a (pseudo) exception occurred */
-    while (ctx->why != WHY_NOT && ctx->f->f_iblock > 0) {
+    while (ctx->why != WHY_NOT && f->f_iblock > 0) {
         /* Peek at the current block. */
-        PyTryBlock *b = &ctx->f->f_blockstack[ctx->f->f_iblock - 1];
+        PyTryBlock *b = &f->f_blockstack[f->f_iblock - 1];
 
         assert(ctx->why != WHY_YIELD);
         if (b->b_type == SETUP_LOOP && ctx->why == WHY_CONTINUE) {
@@ -292,7 +452,7 @@ TARGET_FUNC(II_FAST_BLOCK_END) {
             break;
         }
         /* Now we have to pop the block. */
-        ctx->f->f_iblock--;
+        f->f_iblock--;
 
         if (b->b_type == EXCEPT_HANDLER) {
             UNWIND_EXCEPT_HANDLER(b);
@@ -310,7 +470,7 @@ TARGET_FUNC(II_FAST_BLOCK_END) {
             int handler = b->b_handler;
             _PyErr_StackItem *exc_info = ctx->tstate->exc_info;
             /* Beware, this invalidates all b->b_* fields */
-            PyFrame_BlockSetup(ctx->f, EXCEPT_HANDLER, -1, STACK_LEVEL());
+            PyFrame_BlockSetup(f, EXCEPT_HANDLER, -1, STACK_LEVEL());
             PUSH(exc_info->exc_traceback);
             PUSH(exc_info->exc_value);
             if (exc_info->exc_type != NULL) {
@@ -371,7 +531,7 @@ TARGET_FUNC(II_FAST_YIELD) {
         if (ctx->tstate->c_tracefunc) {
             if (ctx->why == WHY_RETURN || ctx->why == WHY_YIELD) {
                 if (call_trace(ctx->tstate->c_tracefunc, ctx->tstate->c_traceobj,
-                               ctx->tstate, ctx->f,
+                               ctx->tstate, f,
                                PyTrace_RETURN, ctx->retval)) {
                     Py_CLEAR(ctx->retval);
                     ctx->why = WHY_EXCEPTION;
@@ -379,7 +539,7 @@ TARGET_FUNC(II_FAST_YIELD) {
             }
             else if (ctx->why == WHY_EXCEPTION) {
                 call_trace_protected(ctx->tstate->c_tracefunc, ctx->tstate->c_traceobj,
-                                     ctx->tstate, ctx->f,
+                                     ctx->tstate, f,
                                      PyTrace_RETURN, NULL);
             }
         }
@@ -387,10 +547,10 @@ TARGET_FUNC(II_FAST_YIELD) {
             if (ctx->why == WHY_EXCEPTION)
                 call_trace_protected(ctx->tstate->c_profilefunc,
                                      ctx->tstate->c_profileobj,
-                                     ctx->tstate, ctx->f,
+                                     ctx->tstate, f,
                                      PyTrace_RETURN, NULL);
             else if (call_trace(ctx->tstate->c_profilefunc, ctx->tstate->c_profileobj,
-                                ctx->tstate, ctx->f,
+                                ctx->tstate, f,
                                 PyTrace_RETURN, ctx->retval)) {
                 Py_CLEAR(ctx->retval);
                 /* ctx->why = WHY_EXCEPTION; */
@@ -648,7 +808,7 @@ TARGET_FUNC(BINARY_ADD) {
        speedup on microbenchmarks. */
     if (PyUnicode_CheckExact(left) &&
              PyUnicode_CheckExact(right)) {
-        sum = unicode_concatenate(left, right, ctx->f, ctx->next_instr);
+        sum = unicode_concatenate(left, right, f, ctx->next_instr);
         /* unicode_concatenate consumed the ref to left */
     }
     else {
@@ -863,7 +1023,7 @@ TARGET_FUNC(INPLACE_ADD) {
     PyObject *left = TOP();
     PyObject *sum;
     if (PyUnicode_CheckExact(left) && PyUnicode_CheckExact(right)) {
-        sum = unicode_concatenate(left, right, ctx->f, ctx->next_instr);
+        sum = unicode_concatenate(left, right, f, ctx->next_instr);
         /* unicode_concatenate consumed the ref to left */
     }
     else {
@@ -979,15 +1139,15 @@ TARGET_FUNC(STORE_ANNOTATION) {
     PyObject *ann = POP();
     PyObject *name = GETITEM(ctx->names, ctx->oparg);
     int err;
-    if (ctx->f->f_locals == NULL) {
+    if (f->f_locals == NULL) {
         PyErr_Format(PyExc_SystemError,
                      "no locals found when storing annotation");
         Py_DECREF(ann);
         GOTO_ERROR();
     }
     /* first try to get __annotations__ from locals... */
-    if (PyDict_CheckExact(ctx->f->f_locals)) {
-        ann_dict = _PyDict_GetItemId(ctx->f->f_locals,
+    if (PyDict_CheckExact(f->f_locals)) {
+        ann_dict = _PyDict_GetItemId(f->f_locals,
                                      &PyId___annotations__);
         if (ann_dict == NULL) {
             PyErr_SetString(PyExc_NameError,
@@ -1003,7 +1163,7 @@ TARGET_FUNC(STORE_ANNOTATION) {
             Py_DECREF(ann);
             GOTO_ERROR();
         }
-        ann_dict = PyObject_GetItem(ctx->f->f_locals, ann_str);
+        ann_dict = PyObject_GetItem(f->f_locals, ann_str);
         if (ann_dict == NULL) {
             if (PyErr_ExceptionMatches(PyExc_KeyError)) {
                 PyErr_SetString(PyExc_NameError,
@@ -1245,7 +1405,7 @@ TARGET_FUNC(YIELD_FROM) {
         PyObject *val;
         if (ctx->tstate->c_tracefunc != NULL
                 && PyErr_ExceptionMatches(PyExc_StopIteration))
-            call_exc_trace(ctx->tstate->c_tracefunc, ctx->tstate->c_traceobj, ctx->tstate, ctx->f);
+            call_exc_trace(ctx->tstate->c_tracefunc, ctx->tstate->c_traceobj, ctx->tstate, f);
         err = _PyGen_FetchStopIterationValue(&val);
         if (err < 0)
             GOTO_ERROR();
@@ -1254,11 +1414,11 @@ TARGET_FUNC(YIELD_FROM) {
         DISPATCH();
     }
     /* receiver remains on stack, ctx->retval is value to be yielded */
-    ctx->f->f_stacktop = ctx->stack_pointer;
+    f->f_stacktop = ctx->stack_pointer;
     ctx->why = WHY_YIELD;
     /* and repeat... */
-    assert(ctx->f->f_lasti >= (int)sizeof(_Py_CODEUNIT));
-    ctx->f->f_lasti -= sizeof(_Py_CODEUNIT);
+    assert(f->f_lasti >= (int)sizeof(_Py_CODEUNIT));
+    f->f_lasti -= sizeof(_Py_CODEUNIT);
     GOTO_FAST_YIELD();
 }
 JIT_TARGET_EXPORT(YIELD_FROM)
@@ -1276,14 +1436,14 @@ TARGET_FUNC(YIELD_VALUE) {
         ctx->retval = w;
     }
 
-    ctx->f->f_stacktop = ctx->stack_pointer;
+    f->f_stacktop = ctx->stack_pointer;
     ctx->why = WHY_YIELD;
     GOTO_FAST_YIELD();
 }
 JIT_TARGET_EXPORT(YIELD_VALUE)
 
 TARGET_FUNC(POP_EXCEPT) {
-    PyTryBlock *b = PyFrame_BlockPop(ctx->f);
+    PyTryBlock *b = PyFrame_BlockPop(f);
     if (b->b_type != EXCEPT_HANDLER) {
         PyErr_SetString(PyExc_SystemError,
                         "popped block is not an except handler");
@@ -1295,7 +1455,7 @@ TARGET_FUNC(POP_EXCEPT) {
 JIT_TARGET_EXPORT(POP_EXCEPT)
 
 TARGET_FUNC(POP_BLOCK) {
-    PyTryBlock *b = PyFrame_BlockPop(ctx->f);
+    PyTryBlock *b = PyFrame_BlockPop(f);
     UNWIND_BLOCK(b);
     DISPATCH();
 }
@@ -1314,7 +1474,7 @@ TARGET_FUNC(END_FINALLY) {
             manually unwind the EXCEPT_HANDLER block which was
             created when the exception was caught, otherwise
             the stack will be in an inconsistent state. */
-            PyTryBlock *b = PyFrame_BlockPop(ctx->f);
+            PyTryBlock *b = PyFrame_BlockPop(f);
             assert(b->b_type == EXCEPT_HANDLER);
             UNWIND_EXCEPT_HANDLER(b);
             ctx->why = WHY_NOT;
@@ -1346,8 +1506,8 @@ TARGET_FUNC(LOAD_BUILD_CLASS) {
     _Py_IDENTIFIER(__build_class__);
 
     PyObject *bc;
-    if (PyDict_CheckExact(ctx->f->f_builtins)) {
-        bc = _PyDict_GetItemId(ctx->f->f_builtins, &PyId___build_class__);
+    if (PyDict_CheckExact(f->f_builtins)) {
+        bc = _PyDict_GetItemId(f->f_builtins, &PyId___build_class__);
         if (bc == NULL) {
             PyErr_SetString(PyExc_NameError,
                             "__build_class__ not found");
@@ -1359,7 +1519,7 @@ TARGET_FUNC(LOAD_BUILD_CLASS) {
         PyObject *build_class_str = _PyUnicode_FromId(&PyId___build_class__);
         if (build_class_str == NULL)
             GOTO_ERROR();
-        bc = PyObject_GetItem(ctx->f->f_builtins, build_class_str);
+        bc = PyObject_GetItem(f->f_builtins, build_class_str);
         if (bc == NULL) {
             if (PyErr_ExceptionMatches(PyExc_KeyError))
                 PyErr_SetString(PyExc_NameError,
@@ -1375,7 +1535,7 @@ JIT_TARGET_EXPORT(LOAD_BUILD_CLASS)
 TARGET_FUNC(STORE_NAME) {
     PyObject *name = GETITEM(ctx->names, ctx->oparg);
     PyObject *v = POP();
-    PyObject *ns = ctx->f->f_locals;
+    PyObject *ns = f->f_locals;
     int err;
     if (ns == NULL) {
         PyErr_Format(PyExc_SystemError,
@@ -1396,7 +1556,7 @@ JIT_TARGET_EXPORT(STORE_NAME)
 
 TARGET_FUNC(DELETE_NAME) {
     PyObject *name = GETITEM(ctx->names, ctx->oparg);
-    PyObject *ns = ctx->f->f_locals;
+    PyObject *ns = f->f_locals;
     int err;
     if (ns == NULL) {
         PyErr_Format(PyExc_SystemError,
@@ -1492,7 +1652,7 @@ TARGET_FUNC(STORE_GLOBAL) {
     PyObject *name = GETITEM(ctx->names, ctx->oparg);
     PyObject *v = POP();
     int err;
-    err = PyDict_SetItem(ctx->f->f_globals, name, v);
+    err = PyDict_SetItem(f->f_globals, name, v);
     Py_DECREF(v);
     if (err != 0)
         GOTO_ERROR();
@@ -1503,7 +1663,7 @@ JIT_TARGET_EXPORT(STORE_GLOBAL)
 TARGET_FUNC(DELETE_GLOBAL) {
     PyObject *name = GETITEM(ctx->names, ctx->oparg);
     int err;
-    err = PyDict_DelItem(ctx->f->f_globals, name);
+    err = PyDict_DelItem(f->f_globals, name);
     if (err != 0) {
         format_exc_check_arg(
             PyExc_NameError, NAME_ERROR_MSG, name);
@@ -1515,7 +1675,7 @@ JIT_TARGET_EXPORT(DELETE_GLOBAL)
 
 TARGET_FUNC(LOAD_NAME) {
     PyObject *name = GETITEM(ctx->names, ctx->oparg);
-    PyObject *locals = ctx->f->f_locals;
+    PyObject *locals = f->f_locals;
     PyObject *v;
     if (locals == NULL) {
         PyErr_Format(PyExc_SystemError,
@@ -1535,11 +1695,11 @@ TARGET_FUNC(LOAD_NAME) {
         }
     }
     if (v == NULL) {
-        v = PyDict_GetItem(ctx->f->f_globals, name);
+        v = PyDict_GetItem(f->f_globals, name);
         Py_XINCREF(v);
         if (v == NULL) {
-            if (PyDict_CheckExact(ctx->f->f_builtins)) {
-                v = PyDict_GetItem(ctx->f->f_builtins, name);
+            if (PyDict_CheckExact(f->f_builtins)) {
+                v = PyDict_GetItem(f->f_builtins, name);
                 if (v == NULL) {
                     format_exc_check_arg(
                                 PyExc_NameError,
@@ -1549,7 +1709,7 @@ TARGET_FUNC(LOAD_NAME) {
                 Py_INCREF(v);
             }
             else {
-                v = PyObject_GetItem(ctx->f->f_builtins, name);
+                v = PyObject_GetItem(f->f_builtins, name);
                 if (v == NULL) {
                     if (PyErr_ExceptionMatches(PyExc_KeyError))
                         format_exc_check_arg(
@@ -1568,11 +1728,11 @@ JIT_TARGET_EXPORT(LOAD_NAME)
 TARGET_FUNC(LOAD_GLOBAL) {
     PyObject *name = GETITEM(ctx->names, ctx->oparg);
     PyObject *v;
-    if (PyDict_CheckExact(ctx->f->f_globals)
-        && PyDict_CheckExact(ctx->f->f_builtins))
+    if (PyDict_CheckExact(f->f_globals)
+        && PyDict_CheckExact(f->f_builtins))
     {
-        v = _PyDict_LoadGlobal((PyDictObject *)ctx->f->f_globals,
-                               (PyDictObject *)ctx->f->f_builtins,
+        v = _PyDict_LoadGlobal((PyDictObject *)f->f_globals,
+                               (PyDictObject *)f->f_builtins,
                                name);
         if (v == NULL) {
             if (!_PyErr_OCCURRED()) {
@@ -1589,14 +1749,14 @@ TARGET_FUNC(LOAD_GLOBAL) {
         /* Slow-path if globals or builtins is not a dict */
 
         /* namespace 1: globals */
-        v = PyObject_GetItem(ctx->f->f_globals, name);
+        v = PyObject_GetItem(f->f_globals, name);
         if (v == NULL) {
             if (!PyErr_ExceptionMatches(PyExc_KeyError))
                 GOTO_ERROR();
             PyErr_Clear();
 
             /* namespace 2: builtins */
-            v = PyObject_GetItem(ctx->f->f_builtins, name);
+            v = PyObject_GetItem(f->f_builtins, name);
             if (v == NULL) {
                 if (PyErr_ExceptionMatches(PyExc_KeyError))
                     format_exc_check_arg(
@@ -1648,7 +1808,7 @@ TARGET_FUNC(LOAD_CLOSURE) {
 JIT_TARGET_EXPORT(LOAD_CLOSURE)
 
 TARGET_FUNC(LOAD_CLASSDEREF) {
-    PyObject *name, *value, *locals = ctx->f->f_locals;
+    PyObject *name, *value, *locals = f->f_locals;
     Py_ssize_t idx;
     assert(locals);
     assert(ctx->oparg >= PyTuple_GET_SIZE(ctx->co->co_cellvars));
@@ -1946,14 +2106,14 @@ TARGET_FUNC(SETUP_ANNOTATIONS) {
     _Py_IDENTIFIER(__annotations__);
     int err;
     PyObject *ann_dict;
-    if (ctx->f->f_locals == NULL) {
+    if (f->f_locals == NULL) {
         PyErr_Format(PyExc_SystemError,
                      "no locals found when setting up annotations");
         GOTO_ERROR();
     }
     /* check if __annotations__ in locals()... */
-    if (PyDict_CheckExact(ctx->f->f_locals)) {
-        ann_dict = _PyDict_GetItemId(ctx->f->f_locals,
+    if (PyDict_CheckExact(f->f_locals)) {
+        ann_dict = _PyDict_GetItemId(f->f_locals,
                                      &PyId___annotations__);
         if (ann_dict == NULL) {
             /* ...if not, create a new one */
@@ -1961,7 +2121,7 @@ TARGET_FUNC(SETUP_ANNOTATIONS) {
             if (ann_dict == NULL) {
                 GOTO_ERROR();
             }
-            err = _PyDict_SetItemId(ctx->f->f_locals,
+            err = _PyDict_SetItemId(f->f_locals,
                                     &PyId___annotations__, ann_dict);
             Py_DECREF(ann_dict);
             if (err != 0) {
@@ -1975,7 +2135,7 @@ TARGET_FUNC(SETUP_ANNOTATIONS) {
         if (ann_str == NULL) {
             GOTO_ERROR();
         }
-        ann_dict = PyObject_GetItem(ctx->f->f_locals, ann_str);
+        ann_dict = PyObject_GetItem(f->f_locals, ann_str);
         if (ann_dict == NULL) {
             if (!PyErr_ExceptionMatches(PyExc_KeyError)) {
                 GOTO_ERROR();
@@ -1985,7 +2145,7 @@ TARGET_FUNC(SETUP_ANNOTATIONS) {
             if (ann_dict == NULL) {
                 GOTO_ERROR();
             }
-            err = PyObject_SetItem(ctx->f->f_locals, ann_str, ann_dict);
+            err = PyObject_SetItem(f->f_locals, ann_str, ann_dict);
             Py_DECREF(ann_dict);
             if (err != 0) {
                 GOTO_ERROR();
@@ -2160,7 +2320,7 @@ TARGET_FUNC(IMPORT_NAME) {
     PyObject *fromlist = POP();
     PyObject *level = TOP();
     PyObject *res;
-    res = import_name(ctx->f, name, fromlist, level);
+    res = import_name(f, name, fromlist, level);
     Py_DECREF(level);
     Py_DECREF(fromlist);
     SET_TOP(res);
@@ -2173,12 +2333,12 @@ JIT_TARGET_EXPORT(IMPORT_NAME)
 TARGET_FUNC(IMPORT_STAR) {
     PyObject *from = POP(), *locals;
     int err;
-    if (PyFrame_FastToLocalsWithError(ctx->f) < 0) {
+    if (PyFrame_FastToLocalsWithError(f) < 0) {
         Py_DECREF(from);
         GOTO_ERROR();
     }
 
-    locals = ctx->f->f_locals;
+    locals = f->f_locals;
     if (locals == NULL) {
         PyErr_SetString(PyExc_SystemError,
             "no locals found during 'import *'");
@@ -2186,7 +2346,7 @@ TARGET_FUNC(IMPORT_STAR) {
         GOTO_ERROR();
     }
     err = import_all_from(locals, from);
-    PyFrame_LocalsToFast(ctx->f, 0);
+    PyFrame_LocalsToFast(f, 0);
     Py_DECREF(from);
     if (err != 0)
         GOTO_ERROR();
@@ -2387,7 +2547,7 @@ TARGET_FUNC(FOR_ITER) {
         if (!PyErr_ExceptionMatches(PyExc_StopIteration))
             GOTO_ERROR();
         else if (ctx->tstate->c_tracefunc != NULL)
-            call_exc_trace(ctx->tstate->c_tracefunc, ctx->tstate->c_traceobj, ctx->tstate, ctx->f);
+            call_exc_trace(ctx->tstate->c_tracefunc, ctx->tstate->c_traceobj, ctx->tstate, f);
         PyErr_Clear();
     }
     /* iterator ended normally */
@@ -2420,7 +2580,7 @@ TARGET_FUNC(SETUP_LOOP) {
        to update the PyGen_NeedsFinalizing() function.
        */
 
-    PyFrame_BlockSetup(ctx->f, ctx->opcode, INSTR_OFFSET() + ctx->oparg,
+    PyFrame_BlockSetup(f, ctx->opcode, INSTR_OFFSET() + ctx->oparg,
                        STACK_LEVEL());
     DISPATCH();
 }
@@ -2432,7 +2592,7 @@ TARGET_FUNC(SETUP_EXCEPT) {
        to update the PyGen_NeedsFinalizing() function.
        */
 
-    PyFrame_BlockSetup(ctx->f, ctx->opcode, INSTR_OFFSET() + ctx->oparg,
+    PyFrame_BlockSetup(f, ctx->opcode, INSTR_OFFSET() + ctx->oparg,
                        STACK_LEVEL());
     DISPATCH();
 }
@@ -2444,7 +2604,7 @@ TARGET_FUNC(SETUP_FINALLY) {
        to update the PyGen_NeedsFinalizing() function.
        */
 
-    PyFrame_BlockSetup(ctx->f, ctx->opcode, INSTR_OFFSET() + ctx->oparg,
+    PyFrame_BlockSetup(f, ctx->opcode, INSTR_OFFSET() + ctx->oparg,
                        STACK_LEVEL());
     DISPATCH();
 }
@@ -2479,7 +2639,7 @@ TARGET_FUNC(SETUP_ASYNC_WITH) {
     PyObject *res = POP();
     /* Setup the finally block before pushing the result
        of __aenter__ on the stack. */
-    PyFrame_BlockSetup(ctx->f, SETUP_FINALLY, INSTR_OFFSET() + ctx->oparg,
+    PyFrame_BlockSetup(f, SETUP_FINALLY, INSTR_OFFSET() + ctx->oparg,
                        STACK_LEVEL());
     PUSH(res);
     DISPATCH();
@@ -2507,7 +2667,7 @@ TARGET_FUNC(SETUP_WITH) {
         GOTO_ERROR();
     /* Setup the finally block before pushing the result
        of __enter__ on the stack. */
-    PyFrame_BlockSetup(ctx->f, SETUP_FINALLY, INSTR_OFFSET() + ctx->oparg,
+    PyFrame_BlockSetup(f, SETUP_FINALLY, INSTR_OFFSET() + ctx->oparg,
                        STACK_LEVEL());
 
     PUSH(res);
@@ -2586,7 +2746,7 @@ TARGET_FUNC(WITH_CLEANUP_START) {
         /* We just shifted the stack down, so we have
            to tell the except handler block that the
            values are lower than it expects. */
-        block = &ctx->f->f_blockstack[ctx->f->f_iblock - 1];
+        block = &f->f_blockstack[f->f_iblock - 1];
         assert(block->b_type == EXCEPT_HANDLER);
         block->b_level--;
     }
@@ -2691,7 +2851,7 @@ TARGET_FUNC(CALL_METHOD) {
            `callable` will be POPed by call_function.
            NULL will will be POPed manually later.
         */
-        res = call_function(&sp, ctx->oparg, NULL);
+        res = call_function_extern(&sp, ctx->oparg, NULL);
         ctx->stack_pointer = sp;
         (void)POP(); /* POP the NULL. */
     }
@@ -2708,7 +2868,7 @@ TARGET_FUNC(CALL_METHOD) {
           We'll be passing `ctx->oparg + 1` to call_function, to
           make it accept the `self` as a first argument.
         */
-        res = call_function(&sp, ctx->oparg + 1, NULL);
+        res = call_function_extern(&sp, ctx->oparg + 1, NULL);
         ctx->stack_pointer = sp;
     }
 
@@ -2722,7 +2882,7 @@ JIT_TARGET_EXPORT(CALL_METHOD)
 TARGET_FUNC(CALL_FUNCTION) {
     PyObject **sp, *res;
     sp = ctx->stack_pointer;
-    res = call_function(&sp, ctx->oparg, NULL);
+    res = call_function_extern(&sp, ctx->oparg, NULL);
     ctx->stack_pointer = sp;
     PUSH(res);
     if (res == NULL) {
@@ -2738,7 +2898,7 @@ TARGET_FUNC(CALL_FUNCTION_KW) {
     kwnames = POP();
     assert(PyTuple_CheckExact(kwnames) && PyTuple_GET_SIZE(kwnames) <= ctx->oparg);
     sp = ctx->stack_pointer;
-    res = call_function(&sp, ctx->oparg, kwnames);
+    res = call_function_extern(&sp, ctx->oparg, kwnames);
     ctx->stack_pointer = sp;
     PUSH(res);
     Py_DECREF(kwnames);
@@ -2808,7 +2968,7 @@ TARGET_FUNC(MAKE_FUNCTION) {
     PyObject *qualname = POP();
     PyObject *codeobj = POP();
     PyFunctionObject *func = (PyFunctionObject *)
-        PyFunction_NewWithQualName(codeobj, ctx->f->f_globals, qualname);
+        PyFunction_NewWithQualName(codeobj, f->f_globals, qualname);
 
     Py_DECREF(codeobj);
     Py_DECREF(qualname);
@@ -2923,65 +3083,3 @@ TARGET_FUNC(EXTENDED_ARG) {
     GOTO_DISPATCH_OPCODE();
 }
 JIT_TARGET_EXPORT(EXTENDED_ARG)
-
-PyObject*
-PyJIT_EvalFrame(PyFrameObject *f) {
-    int rc;
-    EvalContext _ctx;
-    EvalContext *ctx = &_ctx;
-
-#ifdef DXPAIRS
-    ctx->lastopcode = 0;
-#endif
-    ctx->tstate = PyThreadState_GET();
-    ctx->f = f;
-    ctx->retval = NULL;
-    ctx->instr_ub = -1;
-    ctx->instr_lb = 0;
-    ctx->instr_prev = -1;
-
-    /* push frame */
-    if (Py_EnterRecursiveCall(""))
-        return NULL;
-
-    ctx->tstate->frame = ctx->f;
-    ctx->co = ctx->f->f_code;
-    ctx->names = ctx->co->co_names;
-    ctx->consts = ctx->co->co_consts;
-    ctx->fastlocals = ctx->f->f_localsplus;
-    ctx->freevars = ctx->f->f_localsplus + ctx->co->co_nlocals;
-    assert(PyBytes_Check(ctx->co->co_code));
-    assert(PyBytes_GET_SIZE(ctx->co->co_code) <= INT_MAX);
-    assert(PyBytes_GET_SIZE(ctx->co->co_code) % sizeof(_Py_CODEUNIT) == 0);
-    assert(_Py_IS_ALIGNED(PyBytes_AS_STRING(ctx->co->co_code), sizeof(_Py_CODEUNIT)));
-    ctx->first_instr = (_Py_CODEUNIT *) PyBytes_AS_STRING(ctx->co->co_code);
-    assert(ctx->f->f_lasti >= -1);
-    ctx->next_instr = ctx->first_instr;
-    if (ctx->f->f_lasti >= 0) {
-        assert(ctx->f->f_lasti % sizeof(_Py_CODEUNIT) == 0);
-        ctx->next_instr += ctx->f->f_lasti / sizeof(_Py_CODEUNIT) + 1;
-    }
-    ctx->stack_pointer = ctx->f->f_stacktop;
-    assert(ctx->stack_pointer != NULL);
-    ctx->f->f_stacktop = NULL;       /* remains NULL unless yield suspends frame */
-    ctx->f->f_executing = 1;
-    ctx->why = WHY_NOT;
-
-#ifdef Py_DEBUG
-    /* PyEval_EvalFrameEx() must not be called with an exception set,
-       because it can clear it (directly or indirectly) and so the
-       caller loses its exception */
-    assert(!PyErr_Occurred());
-#endif
-
-    rc = _PyJIT_Execute(ctx);
-    if (rc != 0) {
-        /* TODO: Handle gracefully */
-        abort();
-    }
-
-    Py_LeaveRecursiveCall();
-    ctx->f->f_executing = 0;
-    ctx->tstate->frame = ctx->f->f_back;
-    return _Py_CheckFunctionResult(NULL, ctx->retval, "PyEval_EvalFrameEx");
-}

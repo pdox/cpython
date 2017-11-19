@@ -1502,7 +1502,7 @@ AC_SUBST(UNIVERSAL_ARCH_FLAGS)
 # tweak BASECFLAGS based on compiler and platform
 case $GCC in
 yes)
-    CFLAGS_NODIST="$CFLAGS_NODIST -std=c99"
+    CFLAGS_NODIST="$CFLAGS_NODIST -std=gnu99"
 
     AC_MSG_CHECKING(for -Wextra)
      ac_save_cc="$CC"
@@ -2060,7 +2060,7 @@ AC_HEADER_MAJOR
 # bluetooth/bluetooth.h has been known to not compile with -std=c99.
 # http://permalink.gmane.org/gmane.linux.bluez.kernel/22294
 SAVE_CFLAGS=$CFLAGS
-CFLAGS="-std=c99 $CFLAGS"
+CFLAGS="-std=gnu99 $CFLAGS"
 AC_CHECK_HEADERS(bluetooth/bluetooth.h)
 CFLAGS=$SAVE_CFLAGS
 
