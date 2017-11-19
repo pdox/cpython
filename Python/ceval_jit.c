@@ -152,7 +152,8 @@ int unpack_iterable(PyObject *, int, int, PyObject **);
 //----------------------------------------------------------------------------------
 
 register EvalContext *ctx asm ("r12");
-register PyFrameObject *f asm("r13");
+register PyFrameObject *f asm ("r13");
+register PyObject **stack_pointer asm ("r14");
 
 #define TARGET_FUNC(op) \
     void _PyEval_FUNC_JIT_TARGET_##op (void)
@@ -235,21 +236,21 @@ register PyFrameObject *f asm("r13");
 #undef BASIC_STACKADJ
 #undef BASIC_PUSH
 #undef BASIC_POP
-#define STACK_LEVEL()     ((int)(ctx->stack_pointer - f->f_valuestack))
+#define STACK_LEVEL()     ((int)(stack_pointer - f->f_valuestack))
 #define EMPTY()           (STACK_LEVEL() == 0)
-#define TOP()             (ctx->stack_pointer[-1])
-#define SECOND()          (ctx->stack_pointer[-2])
-#define THIRD()           (ctx->stack_pointer[-3])
-#define FOURTH()          (ctx->stack_pointer[-4])
-#define PEEK(n)           (ctx->stack_pointer[-(n)])
-#define SET_TOP(v)        (ctx->stack_pointer[-1] = (v))
-#define SET_SECOND(v)     (ctx->stack_pointer[-2] = (v))
-#define SET_THIRD(v)      (ctx->stack_pointer[-3] = (v))
-#define SET_FOURTH(v)     (ctx->stack_pointer[-4] = (v))
-#define SET_VALUE(n, v)   (ctx->stack_pointer[-(n)] = (v))
-#define BASIC_STACKADJ(n) (ctx->stack_pointer += n)
-#define BASIC_PUSH(v)     (*ctx->stack_pointer++ = (v))
-#define BASIC_POP()       (*--ctx->stack_pointer)
+#define TOP()             (stack_pointer[-1])
+#define SECOND()          (stack_pointer[-2])
+#define THIRD()           (stack_pointer[-3])
+#define FOURTH()          (stack_pointer[-4])
+#define PEEK(n)           (stack_pointer[-(n)])
+#define SET_TOP(v)        (stack_pointer[-1] = (v))
+#define SET_SECOND(v)     (stack_pointer[-2] = (v))
+#define SET_THIRD(v)      (stack_pointer[-3] = (v))
+#define SET_FOURTH(v)     (stack_pointer[-4] = (v))
+#define SET_VALUE(n, v)   (stack_pointer[-(n)] = (v))
+#define BASIC_STACKADJ(n) (stack_pointer += n)
+#define BASIC_PUSH(v)     (*stack_pointer++ = (v))
+#define BASIC_POP()       (*--stack_pointer)
 
 #undef PUSH
 #undef POP
@@ -304,7 +305,7 @@ void _PyEval_FUNC_JIT_RESUME(void) {
 
 
 TARGET_FUNC(II_NEXT_OPCODE) {
-    assert(ctx->stack_pointer >= f->f_valuestack); /* else underflow */
+    assert(stack_pointer >= f->f_valuestack); /* else underflow */
     assert(STACK_LEVEL() <= ctx->co->co_stacksize);  /* else overflow */
     assert(!PyErr_Occurred());
 
@@ -389,7 +390,7 @@ TARGET_FUNC(II_FAST_NEXT_OPCODE) {
         int err;
         /* see maybe_call_line_trace
            for expository comments */
-        f->f_stacktop = ctx->stack_pointer;
+        f->f_stacktop = stack_pointer;
 
         err = maybe_call_line_trace(ctx->tstate->c_tracefunc,
                                     ctx->tstate->c_traceobj,
@@ -398,7 +399,7 @@ TARGET_FUNC(II_FAST_NEXT_OPCODE) {
         /* Reload possibly changed frame fields */
         JUMPTO(f->f_lasti);
         if (f->f_stacktop != NULL) {
-            ctx->stack_pointer = f->f_stacktop;
+            stack_pointer = f->f_stacktop;
             f->f_stacktop = NULL;
         }
         if (err)
@@ -1414,7 +1415,7 @@ TARGET_FUNC(YIELD_FROM) {
         DISPATCH();
     }
     /* receiver remains on stack, ctx->retval is value to be yielded */
-    f->f_stacktop = ctx->stack_pointer;
+    f->f_stacktop = stack_pointer;
     ctx->why = WHY_YIELD;
     /* and repeat... */
     assert(f->f_lasti >= (int)sizeof(_Py_CODEUNIT));
@@ -1436,7 +1437,7 @@ TARGET_FUNC(YIELD_VALUE) {
         ctx->retval = w;
     }
 
-    f->f_stacktop = ctx->stack_pointer;
+    f->f_stacktop = stack_pointer;
     ctx->why = WHY_YIELD;
     GOTO_FAST_YIELD();
 }
@@ -1593,7 +1594,7 @@ TARGET_FUNC(UNPACK_SEQUENCE) {
             PUSH(item);
         }
     } else if (unpack_iterable(seq, ctx->oparg, -1,
-                               ctx->stack_pointer + ctx->oparg)) {
+                               stack_pointer + ctx->oparg)) {
         STACKADJ(ctx->oparg);
     } else {
         /* unpack_iterable() raised an exception */
@@ -1610,8 +1611,8 @@ TARGET_FUNC(UNPACK_EX) {
     PyObject *seq = POP();
 
     if (unpack_iterable(seq, ctx->oparg & 0xFF, ctx->oparg >> 8,
-                        ctx->stack_pointer + totalargs)) {
-        ctx->stack_pointer += totalargs;
+                        stack_pointer + totalargs)) {
+        stack_pointer += totalargs;
     } else {
         Py_DECREF(seq);
         GOTO_ERROR();
@@ -1870,7 +1871,7 @@ TARGET_FUNC(BUILD_STRING) {
     if (empty == NULL) {
         GOTO_ERROR();
     }
-    str = _PyUnicode_JoinArray(empty, ctx->stack_pointer - ctx->oparg, ctx->oparg);
+    str = _PyUnicode_JoinArray(empty, stack_pointer - ctx->oparg, ctx->oparg);
     Py_DECREF(empty);
     if (str == NULL)
         GOTO_ERROR();
@@ -2833,7 +2834,7 @@ TARGET_FUNC(CALL_METHOD) {
     /* Designed to work in tamdem with LOAD_METHOD. */
     PyObject **sp, *res, *meth;
 
-    sp = ctx->stack_pointer;
+    sp = stack_pointer;
 
     meth = PEEK(ctx->oparg + 2);
     if (meth == NULL) {
@@ -2852,7 +2853,7 @@ TARGET_FUNC(CALL_METHOD) {
            NULL will will be POPed manually later.
         */
         res = call_function_extern(&sp, ctx->oparg, NULL);
-        ctx->stack_pointer = sp;
+        stack_pointer = sp;
         (void)POP(); /* POP the NULL. */
     }
     else {
@@ -2869,7 +2870,7 @@ TARGET_FUNC(CALL_METHOD) {
           make it accept the `self` as a first argument.
         */
         res = call_function_extern(&sp, ctx->oparg + 1, NULL);
-        ctx->stack_pointer = sp;
+        stack_pointer = sp;
     }
 
     PUSH(res);
@@ -2881,9 +2882,9 @@ JIT_TARGET_EXPORT(CALL_METHOD)
 
 TARGET_FUNC(CALL_FUNCTION) {
     PyObject **sp, *res;
-    sp = ctx->stack_pointer;
+    sp = stack_pointer;
     res = call_function_extern(&sp, ctx->oparg, NULL);
-    ctx->stack_pointer = sp;
+    stack_pointer = sp;
     PUSH(res);
     if (res == NULL) {
         GOTO_ERROR();
@@ -2897,9 +2898,9 @@ TARGET_FUNC(CALL_FUNCTION_KW) {
 
     kwnames = POP();
     assert(PyTuple_CheckExact(kwnames) && PyTuple_GET_SIZE(kwnames) <= ctx->oparg);
-    sp = ctx->stack_pointer;
+    sp = stack_pointer;
     res = call_function_extern(&sp, ctx->oparg, kwnames);
-    ctx->stack_pointer = sp;
+    stack_pointer = sp;
     PUSH(res);
     Py_DECREF(kwnames);
 

@@ -19,13 +19,11 @@ typedef struct _JITData {
 
 typedef struct _EvalContext {
     const _Py_CODEUNIT *next_instr;
-    PyFrameObject *f;
     int opcode;        /* Current opcode */
     int oparg;         /* Current opcode argument, if any */
     void *jit_ret_addr; /* Used by the JIT internally. */
 
     unsigned why; /* Reason for block stack unwind */
-    PyObject **stack_pointer;  /* Next free slot in value stack */
     PyObject **fastlocals, **freevars;
     PyObject *retval;            /* Return value */
     PyThreadState *tstate;
@@ -51,7 +49,7 @@ typedef struct _EvalContext {
 #define set_return_address(addr) \
     (*(((void**)(ctx->jit_ret_addr) - 1)) = (void*)(addr))
 
-int _PyJIT_Execute(EvalContext *ctx, PyFrameObject *f);
+int _PyJIT_Execute(EvalContext *ctx, PyFrameObject *f, PyObject **sp);
 
 #ifdef __cplusplus
 }

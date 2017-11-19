@@ -19,7 +19,7 @@ typedef struct _CodePage {
 static CodePage *cp_head;
 static CodePage *cp_tail;
 
-typedef void (*PyJITEntryFunction)(EvalContext *ctx, PyFrameObject *f);
+typedef void (*PyJITEntryFunction)(EvalContext *ctx, PyFrameObject *f, PyObject **sp);
 typedef void (*PyJITTargetFunction)(void);
 
 void _PyEval_FUNC_JIT_RESUME(void);
@@ -191,6 +191,9 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     // movq %rsi, %r13
     insert_code(3, "\x49\x89\xf5");
 
+    // movq %rdx, %r14
+    insert_code(3, "\x49\x89\xd6");
+
     // mov %rsp, jit_ret_addr(%r12)
     insert_code(5, "\x49\x89\x64\x24\x00");
     reloc_8(-1, offsetof(EvalContext, jit_ret_addr));
@@ -305,7 +308,7 @@ _PyJIT_CodeGen(PyCodeObject *co) {
     return 0;
 }
 
-int _PyJIT_Execute(EvalContext *ctx, PyFrameObject *f) {
+int _PyJIT_Execute(EvalContext *ctx, PyFrameObject *f, PyObject **sp) {
     JITData *jd;
     if (ctx->co->co_jit_data == NULL) {
         if (_PyJIT_CodeGen(ctx->co) != 0) {
@@ -315,6 +318,6 @@ int _PyJIT_Execute(EvalContext *ctx, PyFrameObject *f) {
     }
     jd = (JITData*)ctx->co->co_jit_data;
 
-    ((PyJITEntryFunction)jd->entry)(ctx, f);
+    ((PyJITEntryFunction)jd->entry)(ctx, f, sp);
     return 0;
 }

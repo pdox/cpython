@@ -5172,6 +5172,7 @@ PyJIT_EvalFrame(PyFrameObject *f) {
     int rc;
     EvalContext _ctx;
     EvalContext *ctx = &_ctx;
+    PyObject **stack_pointer;
 
 #ifdef DXPAIRS
     ctx->lastopcode = 0;
@@ -5203,8 +5204,8 @@ PyJIT_EvalFrame(PyFrameObject *f) {
         assert(f->f_lasti % sizeof(_Py_CODEUNIT) == 0);
         ctx->next_instr += f->f_lasti / sizeof(_Py_CODEUNIT) + 1;
     }
-    ctx->stack_pointer = f->f_stacktop;
-    assert(ctx->stack_pointer != NULL);
+    stack_pointer = f->f_stacktop;
+    assert(stack_pointer != NULL);
     f->f_stacktop = NULL;       /* remains NULL unless yield suspends frame */
     f->f_executing = 1;
     ctx->why = WHY_NOT;
@@ -5216,7 +5217,7 @@ PyJIT_EvalFrame(PyFrameObject *f) {
     assert(!PyErr_Occurred());
 #endif
 
-    rc = _PyJIT_Execute(ctx, f);
+    rc = _PyJIT_Execute(ctx, f, stack_pointer);
     if (rc != 0) {
         /* TODO: Handle gracefully */
         abort();
