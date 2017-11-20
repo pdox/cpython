@@ -156,7 +156,10 @@ register PyFrameObject *f asm ("r13");
 register PyObject **stack_pointer asm ("r14");
 
 #define TARGET_FUNC(op) \
-    void _PyEval_FUNC_JIT_TARGET_##op (void)
+    void _PyEval_FUNC_JIT_TARGET_##op (int opcode, int oparg)
+
+#define TARGET_SPECIAL(op) \
+    void _PyEval_FUNC_JIT_TARGET_II_##op(void)
 
 #define JIT_TARGET_EXPORT(f)
 
@@ -190,7 +193,6 @@ register PyObject **stack_pointer asm ("r14");
 #define GOTO_FAST_YIELD()        JIT_GOTO(fast_yield)
 #define GOTO_FAST_BLOCK_END()    JIT_GOTO(fast_block_end)
 #define GOTO_ERROR()             JIT_GOTO(error)
-#define GOTO_DISPATCH_OPCODE()   JIT_GOTO(dispatch_opcode)
 #define GOTO_EXIT_EVAL_FRAME()   JIT_GOTO(ret)
 #define GOTO_FAST_NEXT_OPCODE()  return
 #define GOTO_UNWIND_CLEANUP()    JIT_GOTO(unwind_cleanup)
@@ -202,13 +204,6 @@ register PyObject **stack_pointer asm ("r14");
     (sizeof(_Py_CODEUNIT) * (int)(ctx->next_instr - ctx->first_instr))
 
 #undef NEXTOPARG
-#define NEXTOPARG()  do { \
-        _Py_CODEUNIT word = *ctx->next_instr; \
-        ctx->opcode = _Py_OPCODE(word); \
-        ctx->oparg = _Py_OPARG(word); \
-        ctx->next_instr++; \
-    } while (0)
-
 #undef JUMPTO
 #define JUMPTO(x) do { \
     ctx->next_instr = ctx->first_instr + (x) / sizeof(_Py_CODEUNIT); \
@@ -304,7 +299,7 @@ void _PyEval_FUNC_JIT_RESUME(void) {
     } while(0)
 
 
-TARGET_FUNC(II_NEXT_OPCODE) {
+TARGET_SPECIAL(NEXT_OPCODE) {
     assert(stack_pointer >= f->f_valuestack); /* else underflow */
     assert(STACK_LEVEL() <= ctx->co->co_stacksize);  /* else overflow */
     assert(!PyErr_Occurred());
@@ -327,7 +322,7 @@ TARGET_FUNC(II_NEXT_OPCODE) {
                  traditional)
                - If we're resuming a chain of nested 'yield from' or
                  'await' calls, then each frame is parked with YIELD_FROM
-                 as its next ctx->opcode. If the user hit control-C we want to
+                 as its next opcode. If the user hit control-C we want to
                  wait until we've reached the innermost frame before
                  running the signal handler and raising KeyboardInterrupt
                  (see bpo-30039).
@@ -377,44 +372,7 @@ TARGET_FUNC(II_NEXT_OPCODE) {
 }
 JIT_TARGET_EXPORT(II_NEXT_OPCODE)
 
-TARGET_FUNC(II_FAST_NEXT_OPCODE) {
-    f->f_lasti = INSTR_OFFSET();
-
-    if (PyDTrace_LINE_ENABLED())
-        maybe_dtrace_line(f, &ctx->instr_lb, &ctx->instr_ub, &ctx->instr_prev);
-
-    /* line-by-line tracing support */
-
-    if (_Py_TracingPossible &&
-        ctx->tstate->c_tracefunc != NULL && !ctx->tstate->tracing) {
-        int err;
-        /* see maybe_call_line_trace
-           for expository comments */
-        f->f_stacktop = stack_pointer;
-
-        err = maybe_call_line_trace(ctx->tstate->c_tracefunc,
-                                    ctx->tstate->c_traceobj,
-                                    ctx->tstate, f,
-                                    &ctx->instr_lb, &ctx->instr_ub, &ctx->instr_prev);
-        /* Reload possibly changed frame fields */
-        JUMPTO(f->f_lasti);
-        if (f->f_stacktop != NULL) {
-            stack_pointer = f->f_stacktop;
-            f->f_stacktop = NULL;
-        }
-        if (err)
-            /* trace function raised an exception */
-            GOTO_ERROR();
-    }
-
-    /* Extract ctx->opcode and argument */
-
-    NEXTOPARG();
-    GOTO_DISPATCH_OPCODE();
-}
-JIT_TARGET_EXPORT(II_FAST_NEXT_OPCODE)
-
-TARGET_FUNC(II_ERROR) {
+TARGET_SPECIAL(ERROR) {
     assert(ctx->why == WHY_NOT);
     ctx->why = WHY_EXCEPTION;
 
@@ -437,7 +395,7 @@ TARGET_FUNC(II_ERROR) {
 }
 JIT_TARGET_EXPORT(II_ERROR)
 
-TARGET_FUNC(II_FAST_BLOCK_END) {
+TARGET_SPECIAL(FAST_BLOCK_END) {
     assert(ctx->why != WHY_NOT);
 
     /* Unwind stacks if a (pseudo) exception occurred */
@@ -527,7 +485,7 @@ TARGET_FUNC(II_FAST_BLOCK_END) {
 }
 JIT_TARGET_EXPORT(II_FAST_BLOCK_END)
 
-TARGET_FUNC(II_FAST_YIELD) {
+TARGET_SPECIAL(FAST_YIELD) {
     if (ctx->tstate->use_tracing) {
         if (ctx->tstate->c_tracefunc) {
             if (ctx->why == WHY_RETURN || ctx->why == WHY_YIELD) {
@@ -562,7 +520,7 @@ TARGET_FUNC(II_FAST_YIELD) {
 }
 JIT_TARGET_EXPORT(II_FAST_YIELD)
 
-TARGET_FUNC(II_UNWIND_CLEANUP) {
+TARGET_SPECIAL(UNWIND_CLEANUP) {
     assert(ctx->why != WHY_YIELD);
     /* Pop remaining stack entries. */
     while (!EMPTY()) {
@@ -584,11 +542,11 @@ TARGET_FUNC(NOP) {
 JIT_TARGET_EXPORT(NOP)
 
 TARGET_FUNC(LOAD_FAST) {
-    PyObject *value = GETLOCAL(ctx->oparg);
+    PyObject *value = GETLOCAL(oparg);
     if (value == NULL) {
         format_exc_check_arg(PyExc_UnboundLocalError,
                              UNBOUNDLOCAL_ERROR_MSG,
-                             PyTuple_GetItem(ctx->co->co_varnames, ctx->oparg));
+                             PyTuple_GetItem(ctx->co->co_varnames, oparg));
         GOTO_ERROR();
     }
     Py_INCREF(value);
@@ -598,7 +556,7 @@ TARGET_FUNC(LOAD_FAST) {
 JIT_TARGET_EXPORT(LOAD_FAST)
 
 TARGET_FUNC(LOAD_CONST) {
-    PyObject *value = GETITEM(ctx->consts, ctx->oparg);
+    PyObject *value = GETITEM(ctx->consts, oparg);
     Py_INCREF(value);
     PUSH(value);
     FAST_DISPATCH();
@@ -607,7 +565,7 @@ JIT_TARGET_EXPORT(LOAD_CONST)
 
 TARGET_FUNC(STORE_FAST) {
     PyObject *value = POP();
-    SETLOCAL(ctx->oparg, value);
+    SETLOCAL(oparg, value);
     FAST_DISPATCH();
 }
 JIT_TARGET_EXPORT(STORE_FAST)
@@ -917,7 +875,7 @@ JIT_TARGET_EXPORT(BINARY_OR)
 
 TARGET_FUNC(LIST_APPEND) {
     PyObject *v = POP();
-    PyObject *list = PEEK(ctx->oparg);
+    PyObject *list = PEEK(oparg);
     int err;
     err = PyList_Append(list, v);
     Py_DECREF(v);
@@ -930,7 +888,7 @@ JIT_TARGET_EXPORT(LIST_APPEND)
 
 TARGET_FUNC(SET_ADD) {
     PyObject *v = POP();
-    PyObject *set = PEEK(ctx->oparg);
+    PyObject *set = PEEK(oparg);
     int err;
     err = PySet_Add(set, v);
     Py_DECREF(v);
@@ -1138,7 +1096,7 @@ TARGET_FUNC(STORE_ANNOTATION) {
     _Py_IDENTIFIER(__annotations__);
     PyObject *ann_dict;
     PyObject *ann = POP();
-    PyObject *name = GETITEM(ctx->names, ctx->oparg);
+    PyObject *name = GETITEM(ctx->names, oparg);
     int err;
     if (f->f_locals == NULL) {
         PyErr_Format(PyExc_SystemError,
@@ -1227,7 +1185,7 @@ JIT_TARGET_EXPORT(PRINT_EXPR)
 
 TARGET_FUNC(RAISE_VARARGS) {
     PyObject *cause = NULL, *exc = NULL;
-    switch (ctx->oparg) {
+    switch (oparg) {
     case 2:
         cause = POP(); /* cause */
         /* fall through */
@@ -1242,7 +1200,7 @@ TARGET_FUNC(RAISE_VARARGS) {
         break;
     default:
         PyErr_SetString(PyExc_SystemError,
-                   "bad RAISE_VARARGS ctx->oparg");
+                   "bad RAISE_VARARGS oparg");
         break;
     }
     GOTO_ERROR();
@@ -1534,7 +1492,7 @@ TARGET_FUNC(LOAD_BUILD_CLASS) {
 JIT_TARGET_EXPORT(LOAD_BUILD_CLASS)
 
 TARGET_FUNC(STORE_NAME) {
-    PyObject *name = GETITEM(ctx->names, ctx->oparg);
+    PyObject *name = GETITEM(ctx->names, oparg);
     PyObject *v = POP();
     PyObject *ns = f->f_locals;
     int err;
@@ -1556,7 +1514,7 @@ TARGET_FUNC(STORE_NAME) {
 JIT_TARGET_EXPORT(STORE_NAME)
 
 TARGET_FUNC(DELETE_NAME) {
-    PyObject *name = GETITEM(ctx->names, ctx->oparg);
+    PyObject *name = GETITEM(ctx->names, oparg);
     PyObject *ns = f->f_locals;
     int err;
     if (ns == NULL) {
@@ -1578,24 +1536,24 @@ JIT_TARGET_EXPORT(DELETE_NAME)
 TARGET_FUNC(UNPACK_SEQUENCE) {
     PyObject *seq = POP(), *item, **items;
     if (PyTuple_CheckExact(seq) &&
-        PyTuple_GET_SIZE(seq) == ctx->oparg) {
+        PyTuple_GET_SIZE(seq) == oparg) {
         items = ((PyTupleObject *)seq)->ob_item;
-        while (ctx->oparg--) {
-            item = items[ctx->oparg];
+        while (oparg--) {
+            item = items[oparg];
             Py_INCREF(item);
             PUSH(item);
         }
     } else if (PyList_CheckExact(seq) &&
-               PyList_GET_SIZE(seq) == ctx->oparg) {
+               PyList_GET_SIZE(seq) == oparg) {
         items = ((PyListObject *)seq)->ob_item;
-        while (ctx->oparg--) {
-            item = items[ctx->oparg];
+        while (oparg--) {
+            item = items[oparg];
             Py_INCREF(item);
             PUSH(item);
         }
-    } else if (unpack_iterable(seq, ctx->oparg, -1,
-                               stack_pointer + ctx->oparg)) {
-        STACKADJ(ctx->oparg);
+    } else if (unpack_iterable(seq, oparg, -1,
+                               stack_pointer + oparg)) {
+        STACKADJ(oparg);
     } else {
         /* unpack_iterable() raised an exception */
         Py_DECREF(seq);
@@ -1607,10 +1565,10 @@ TARGET_FUNC(UNPACK_SEQUENCE) {
 JIT_TARGET_EXPORT(UNPACK_SEQUENCE)
 
 TARGET_FUNC(UNPACK_EX) {
-    int totalargs = 1 + (ctx->oparg & 0xFF) + (ctx->oparg >> 8);
+    int totalargs = 1 + (oparg & 0xFF) + (oparg >> 8);
     PyObject *seq = POP();
 
-    if (unpack_iterable(seq, ctx->oparg & 0xFF, ctx->oparg >> 8,
+    if (unpack_iterable(seq, oparg & 0xFF, oparg >> 8,
                         stack_pointer + totalargs)) {
         stack_pointer += totalargs;
     } else {
@@ -1623,7 +1581,7 @@ TARGET_FUNC(UNPACK_EX) {
 JIT_TARGET_EXPORT(UNPACK_EX)
 
 TARGET_FUNC(STORE_ATTR) {
-    PyObject *name = GETITEM(ctx->names, ctx->oparg);
+    PyObject *name = GETITEM(ctx->names, oparg);
     PyObject *owner = TOP();
     PyObject *v = SECOND();
     int err;
@@ -1638,7 +1596,7 @@ TARGET_FUNC(STORE_ATTR) {
 JIT_TARGET_EXPORT(STORE_ATTR)
 
 TARGET_FUNC(DELETE_ATTR) {
-    PyObject *name = GETITEM(ctx->names, ctx->oparg);
+    PyObject *name = GETITEM(ctx->names, oparg);
     PyObject *owner = POP();
     int err;
     err = PyObject_SetAttr(owner, name, (PyObject *)NULL);
@@ -1650,7 +1608,7 @@ TARGET_FUNC(DELETE_ATTR) {
 JIT_TARGET_EXPORT(DELETE_ATTR)
 
 TARGET_FUNC(STORE_GLOBAL) {
-    PyObject *name = GETITEM(ctx->names, ctx->oparg);
+    PyObject *name = GETITEM(ctx->names, oparg);
     PyObject *v = POP();
     int err;
     err = PyDict_SetItem(f->f_globals, name, v);
@@ -1662,7 +1620,7 @@ TARGET_FUNC(STORE_GLOBAL) {
 JIT_TARGET_EXPORT(STORE_GLOBAL)
 
 TARGET_FUNC(DELETE_GLOBAL) {
-    PyObject *name = GETITEM(ctx->names, ctx->oparg);
+    PyObject *name = GETITEM(ctx->names, oparg);
     int err;
     err = PyDict_DelItem(f->f_globals, name);
     if (err != 0) {
@@ -1675,7 +1633,7 @@ TARGET_FUNC(DELETE_GLOBAL) {
 JIT_TARGET_EXPORT(DELETE_GLOBAL)
 
 TARGET_FUNC(LOAD_NAME) {
-    PyObject *name = GETITEM(ctx->names, ctx->oparg);
+    PyObject *name = GETITEM(ctx->names, oparg);
     PyObject *locals = f->f_locals;
     PyObject *v;
     if (locals == NULL) {
@@ -1727,7 +1685,7 @@ TARGET_FUNC(LOAD_NAME) {
 JIT_TARGET_EXPORT(LOAD_NAME)
 
 TARGET_FUNC(LOAD_GLOBAL) {
-    PyObject *name = GETITEM(ctx->names, ctx->oparg);
+    PyObject *name = GETITEM(ctx->names, oparg);
     PyObject *v;
     if (PyDict_CheckExact(f->f_globals)
         && PyDict_CheckExact(f->f_builtins))
@@ -1773,35 +1731,35 @@ TARGET_FUNC(LOAD_GLOBAL) {
 JIT_TARGET_EXPORT(LOAD_GLOBAL)
 
 TARGET_FUNC(DELETE_FAST) {
-    PyObject *v = GETLOCAL(ctx->oparg);
+    PyObject *v = GETLOCAL(oparg);
     if (v != NULL) {
-        SETLOCAL(ctx->oparg, NULL);
+        SETLOCAL(oparg, NULL);
         DISPATCH();
     }
     format_exc_check_arg(
         PyExc_UnboundLocalError,
         UNBOUNDLOCAL_ERROR_MSG,
-        PyTuple_GetItem(ctx->co->co_varnames, ctx->oparg)
+        PyTuple_GetItem(ctx->co->co_varnames, oparg)
         );
     GOTO_ERROR();
 }
 JIT_TARGET_EXPORT(DELETE_FAST)
 
 TARGET_FUNC(DELETE_DEREF) {
-    PyObject *cell = ctx->freevars[ctx->oparg];
+    PyObject *cell = ctx->freevars[oparg];
     PyObject *oldobj = PyCell_GET(cell);
     if (oldobj != NULL) {
         PyCell_SET(cell, NULL);
         Py_DECREF(oldobj);
         DISPATCH();
     }
-    format_exc_unbound(ctx->co, ctx->oparg);
+    format_exc_unbound(ctx->co, oparg);
     GOTO_ERROR();
 }
 JIT_TARGET_EXPORT(DELETE_DEREF)
 
 TARGET_FUNC(LOAD_CLOSURE) {
-    PyObject *cell = ctx->freevars[ctx->oparg];
+    PyObject *cell = ctx->freevars[oparg];
     Py_INCREF(cell);
     PUSH(cell);
     DISPATCH();
@@ -1812,8 +1770,8 @@ TARGET_FUNC(LOAD_CLASSDEREF) {
     PyObject *name, *value, *locals = f->f_locals;
     Py_ssize_t idx;
     assert(locals);
-    assert(ctx->oparg >= PyTuple_GET_SIZE(ctx->co->co_cellvars));
-    idx = ctx->oparg - PyTuple_GET_SIZE(ctx->co->co_cellvars);
+    assert(oparg >= PyTuple_GET_SIZE(ctx->co->co_cellvars));
+    idx = oparg - PyTuple_GET_SIZE(ctx->co->co_cellvars);
     assert(idx >= 0 && idx < PyTuple_GET_SIZE(ctx->co->co_freevars));
     name = PyTuple_GET_ITEM(ctx->co->co_freevars, idx);
     if (PyDict_CheckExact(locals)) {
@@ -1829,10 +1787,10 @@ TARGET_FUNC(LOAD_CLASSDEREF) {
         }
     }
     if (!value) {
-        PyObject *cell = ctx->freevars[ctx->oparg];
+        PyObject *cell = ctx->freevars[oparg];
         value = PyCell_GET(cell);
         if (value == NULL) {
-            format_exc_unbound(ctx->co, ctx->oparg);
+            format_exc_unbound(ctx->co, oparg);
             GOTO_ERROR();
         }
         Py_INCREF(value);
@@ -1843,10 +1801,10 @@ TARGET_FUNC(LOAD_CLASSDEREF) {
 JIT_TARGET_EXPORT(LOAD_CLASSDEREF)
 
 TARGET_FUNC(LOAD_DEREF) {
-    PyObject *cell = ctx->freevars[ctx->oparg];
+    PyObject *cell = ctx->freevars[oparg];
     PyObject *value = PyCell_GET(cell);
     if (value == NULL) {
-        format_exc_unbound(ctx->co, ctx->oparg);
+        format_exc_unbound(ctx->co, oparg);
         GOTO_ERROR();
     }
     Py_INCREF(value);
@@ -1857,7 +1815,7 @@ JIT_TARGET_EXPORT(LOAD_DEREF)
 
 TARGET_FUNC(STORE_DEREF) {
     PyObject *v = POP();
-    PyObject *cell = ctx->freevars[ctx->oparg];
+    PyObject *cell = ctx->freevars[oparg];
     PyObject *oldobj = PyCell_GET(cell);
     PyCell_SET(cell, v);
     Py_XDECREF(oldobj);
@@ -1871,11 +1829,11 @@ TARGET_FUNC(BUILD_STRING) {
     if (empty == NULL) {
         GOTO_ERROR();
     }
-    str = _PyUnicode_JoinArray(empty, stack_pointer - ctx->oparg, ctx->oparg);
+    str = _PyUnicode_JoinArray(empty, stack_pointer - oparg, oparg);
     Py_DECREF(empty);
     if (str == NULL)
         GOTO_ERROR();
-    while (--ctx->oparg >= 0) {
+    while (--oparg >= 0) {
         PyObject *item = POP();
         Py_DECREF(item);
     }
@@ -1885,12 +1843,12 @@ TARGET_FUNC(BUILD_STRING) {
 JIT_TARGET_EXPORT(BUILD_STRING)
 
 TARGET_FUNC(BUILD_TUPLE) {
-    PyObject *tup = PyTuple_New(ctx->oparg);
+    PyObject *tup = PyTuple_New(oparg);
     if (tup == NULL)
         GOTO_ERROR();
-    while (--ctx->oparg >= 0) {
+    while (--oparg >= 0) {
         PyObject *item = POP();
-        PyTuple_SET_ITEM(tup, ctx->oparg, item);
+        PyTuple_SET_ITEM(tup, oparg, item);
     }
     PUSH(tup);
     DISPATCH();
@@ -1898,12 +1856,12 @@ TARGET_FUNC(BUILD_TUPLE) {
 JIT_TARGET_EXPORT(BUILD_TUPLE)
 
 TARGET_FUNC(BUILD_LIST) {
-    PyObject *list =  PyList_New(ctx->oparg);
+    PyObject *list =  PyList_New(oparg);
     if (list == NULL)
         GOTO_ERROR();
-    while (--ctx->oparg >= 0) {
+    while (--oparg >= 0) {
         PyObject *item = POP();
-        PyList_SET_ITEM(list, ctx->oparg, item);
+        PyList_SET_ITEM(list, oparg, item);
     }
     PUSH(list);
     DISPATCH();
@@ -1911,7 +1869,7 @@ TARGET_FUNC(BUILD_LIST) {
 JIT_TARGET_EXPORT(BUILD_LIST)
 
 TARGET_FUNC(BUILD_TUPLE_UNPACK_WITH_CALL) {
-    int convert_to_tuple = ctx->opcode != BUILD_LIST_UNPACK;
+    int convert_to_tuple = opcode != BUILD_LIST_UNPACK;
     Py_ssize_t i;
     PyObject *sum = PyList_New(0);
     PyObject *return_value;
@@ -1919,15 +1877,15 @@ TARGET_FUNC(BUILD_TUPLE_UNPACK_WITH_CALL) {
     if (sum == NULL)
         GOTO_ERROR();
 
-    for (i = ctx->oparg; i > 0; i--) {
+    for (i = oparg; i > 0; i--) {
         PyObject *none_val;
 
         none_val = _PyList_Extend((PyListObject *)sum, PEEK(i));
         if (none_val == NULL) {
-            if (ctx->opcode == BUILD_TUPLE_UNPACK_WITH_CALL &&
+            if (opcode == BUILD_TUPLE_UNPACK_WITH_CALL &&
                 PyErr_ExceptionMatches(PyExc_TypeError))
             {
-                check_args_iterable(PEEK(1 + ctx->oparg), PEEK(i));
+                check_args_iterable(PEEK(1 + oparg), PEEK(i));
             }
             Py_DECREF(sum);
             GOTO_ERROR();
@@ -1945,7 +1903,7 @@ TARGET_FUNC(BUILD_TUPLE_UNPACK_WITH_CALL) {
         return_value = sum;
     }
 
-    while (ctx->oparg--)
+    while (oparg--)
         Py_DECREF(POP());
     PUSH(return_value);
     DISPATCH();
@@ -1953,7 +1911,7 @@ TARGET_FUNC(BUILD_TUPLE_UNPACK_WITH_CALL) {
 JIT_TARGET_EXPORT(BUILD_TUPLE_UNPACK_WITH_CALL)
 
 TARGET_FUNC(BUILD_TUPLE_UNPACK) {
-    int convert_to_tuple = ctx->opcode != BUILD_LIST_UNPACK;
+    int convert_to_tuple = opcode != BUILD_LIST_UNPACK;
     Py_ssize_t i;
     PyObject *sum = PyList_New(0);
     PyObject *return_value;
@@ -1961,15 +1919,15 @@ TARGET_FUNC(BUILD_TUPLE_UNPACK) {
     if (sum == NULL)
         GOTO_ERROR();
 
-    for (i = ctx->oparg; i > 0; i--) {
+    for (i = oparg; i > 0; i--) {
         PyObject *none_val;
 
         none_val = _PyList_Extend((PyListObject *)sum, PEEK(i));
         if (none_val == NULL) {
-            if (ctx->opcode == BUILD_TUPLE_UNPACK_WITH_CALL &&
+            if (opcode == BUILD_TUPLE_UNPACK_WITH_CALL &&
                 PyErr_ExceptionMatches(PyExc_TypeError))
             {
-                check_args_iterable(PEEK(1 + ctx->oparg), PEEK(i));
+                check_args_iterable(PEEK(1 + oparg), PEEK(i));
             }
             Py_DECREF(sum);
             GOTO_ERROR();
@@ -1987,7 +1945,7 @@ TARGET_FUNC(BUILD_TUPLE_UNPACK) {
         return_value = sum;
     }
 
-    while (ctx->oparg--)
+    while (oparg--)
         Py_DECREF(POP());
     PUSH(return_value);
     DISPATCH();
@@ -1995,7 +1953,7 @@ TARGET_FUNC(BUILD_TUPLE_UNPACK) {
 JIT_TARGET_EXPORT(BUILD_TUPLE_UNPACK)
 
 TARGET_FUNC(BUILD_LIST_UNPACK) {
-    int convert_to_tuple = ctx->opcode != BUILD_LIST_UNPACK;
+    int convert_to_tuple = opcode != BUILD_LIST_UNPACK;
     Py_ssize_t i;
     PyObject *sum = PyList_New(0);
     PyObject *return_value;
@@ -2003,15 +1961,15 @@ TARGET_FUNC(BUILD_LIST_UNPACK) {
     if (sum == NULL)
         GOTO_ERROR();
 
-    for (i = ctx->oparg; i > 0; i--) {
+    for (i = oparg; i > 0; i--) {
         PyObject *none_val;
 
         none_val = _PyList_Extend((PyListObject *)sum, PEEK(i));
         if (none_val == NULL) {
-            if (ctx->opcode == BUILD_TUPLE_UNPACK_WITH_CALL &&
+            if (opcode == BUILD_TUPLE_UNPACK_WITH_CALL &&
                 PyErr_ExceptionMatches(PyExc_TypeError))
             {
-                check_args_iterable(PEEK(1 + ctx->oparg), PEEK(i));
+                check_args_iterable(PEEK(1 + oparg), PEEK(i));
             }
             Py_DECREF(sum);
             GOTO_ERROR();
@@ -2029,7 +1987,7 @@ TARGET_FUNC(BUILD_LIST_UNPACK) {
         return_value = sum;
     }
 
-    while (ctx->oparg--)
+    while (oparg--)
         Py_DECREF(POP());
     PUSH(return_value);
     DISPATCH();
@@ -2042,13 +2000,13 @@ TARGET_FUNC(BUILD_SET) {
     int i;
     if (set == NULL)
         GOTO_ERROR();
-    for (i = ctx->oparg; i > 0; i--) {
+    for (i = oparg; i > 0; i--) {
         PyObject *item = PEEK(i);
         if (err == 0)
             err = PySet_Add(set, item);
         Py_DECREF(item);
     }
-    STACKADJ(-ctx->oparg);
+    STACKADJ(-oparg);
     if (err != 0) {
         Py_DECREF(set);
         GOTO_ERROR();
@@ -2064,14 +2022,14 @@ TARGET_FUNC(BUILD_SET_UNPACK) {
     if (sum == NULL)
         GOTO_ERROR();
 
-    for (i = ctx->oparg; i > 0; i--) {
+    for (i = oparg; i > 0; i--) {
         if (_PySet_Update(sum, PEEK(i)) < 0) {
             Py_DECREF(sum);
             GOTO_ERROR();
         }
     }
 
-    while (ctx->oparg--)
+    while (oparg--)
         Py_DECREF(POP());
     PUSH(sum);
     DISPATCH();
@@ -2080,10 +2038,10 @@ JIT_TARGET_EXPORT(BUILD_SET_UNPACK)
 
 TARGET_FUNC(BUILD_MAP) {
     Py_ssize_t i;
-    PyObject *map = _PyDict_NewPresized((Py_ssize_t)ctx->oparg);
+    PyObject *map = _PyDict_NewPresized((Py_ssize_t)oparg);
     if (map == NULL)
         GOTO_ERROR();
-    for (i = ctx->oparg; i > 0; i--) {
+    for (i = oparg; i > 0; i--) {
         int err;
         PyObject *key = PEEK(2*i);
         PyObject *value = PEEK(2*i - 1);
@@ -2094,7 +2052,7 @@ TARGET_FUNC(BUILD_MAP) {
         }
     }
 
-    while (ctx->oparg--) {
+    while (oparg--) {
         Py_DECREF(POP());
         Py_DECREF(POP());
     }
@@ -2165,18 +2123,18 @@ TARGET_FUNC(BUILD_CONST_KEY_MAP) {
     PyObject *map;
     PyObject *keys = TOP();
     if (!PyTuple_CheckExact(keys) ||
-        PyTuple_GET_SIZE(keys) != (Py_ssize_t)ctx->oparg) {
+        PyTuple_GET_SIZE(keys) != (Py_ssize_t)oparg) {
         PyErr_SetString(PyExc_SystemError,
                         "bad BUILD_CONST_KEY_MAP keys argument");
         GOTO_ERROR();
     }
-    map = _PyDict_NewPresized((Py_ssize_t)ctx->oparg);
+    map = _PyDict_NewPresized((Py_ssize_t)oparg);
     if (map == NULL) {
         GOTO_ERROR();
     }
-    for (i = ctx->oparg; i > 0; i--) {
+    for (i = oparg; i > 0; i--) {
         int err;
-        PyObject *key = PyTuple_GET_ITEM(keys, ctx->oparg - i);
+        PyObject *key = PyTuple_GET_ITEM(keys, oparg - i);
         PyObject *value = PEEK(i + 1);
         err = PyDict_SetItem(map, key, value);
         if (err != 0) {
@@ -2186,7 +2144,7 @@ TARGET_FUNC(BUILD_CONST_KEY_MAP) {
     }
 
     Py_DECREF(POP());
-    while (ctx->oparg--) {
+    while (oparg--) {
         Py_DECREF(POP());
     }
     PUSH(map);
@@ -2200,7 +2158,7 @@ TARGET_FUNC(BUILD_MAP_UNPACK) {
     if (sum == NULL)
         GOTO_ERROR();
 
-    for (i = ctx->oparg; i > 0; i--) {
+    for (i = oparg; i > 0; i--) {
         PyObject *arg = PEEK(i);
         if (PyDict_Update(sum, arg) < 0) {
             if (PyErr_ExceptionMatches(PyExc_AttributeError)) {
@@ -2213,7 +2171,7 @@ TARGET_FUNC(BUILD_MAP_UNPACK) {
         }
     }
 
-    while (ctx->oparg--)
+    while (oparg--)
         Py_DECREF(POP());
     PUSH(sum);
     DISPATCH();
@@ -2226,10 +2184,10 @@ TARGET_FUNC(BUILD_MAP_UNPACK_WITH_CALL) {
     if (sum == NULL)
         GOTO_ERROR();
 
-    for (i = ctx->oparg; i > 0; i--) {
+    for (i = oparg; i > 0; i--) {
         PyObject *arg = PEEK(i);
         if (_PyDict_MergeEx(sum, arg, 2) < 0) {
-            PyObject *func = PEEK(2 + ctx->oparg);
+            PyObject *func = PEEK(2 + oparg);
             if (PyErr_ExceptionMatches(PyExc_AttributeError)) {
                 format_kwargs_mapping_error(func, arg);
             }
@@ -2264,7 +2222,7 @@ TARGET_FUNC(BUILD_MAP_UNPACK_WITH_CALL) {
         }
     }
 
-    while (ctx->oparg--)
+    while (oparg--)
         Py_DECREF(POP());
     PUSH(sum);
     DISPATCH();
@@ -2277,7 +2235,7 @@ TARGET_FUNC(MAP_ADD) {
     PyObject *map;
     int err;
     STACKADJ(-2);
-    map = PEEK(ctx->oparg);                      /* dict */
+    map = PEEK(oparg);                      /* dict */
     assert(PyDict_CheckExact(map));
     err = PyDict_SetItem(map, key, value);  /* map[key] = value */
     Py_DECREF(value);
@@ -2290,7 +2248,7 @@ TARGET_FUNC(MAP_ADD) {
 JIT_TARGET_EXPORT(MAP_ADD)
 
 TARGET_FUNC(LOAD_ATTR) {
-    PyObject *name = GETITEM(ctx->names, ctx->oparg);
+    PyObject *name = GETITEM(ctx->names, oparg);
     PyObject *owner = TOP();
     PyObject *res = PyObject_GetAttr(owner, name);
     Py_DECREF(owner);
@@ -2304,7 +2262,7 @@ JIT_TARGET_EXPORT(LOAD_ATTR)
 TARGET_FUNC(COMPARE_OP) {
     PyObject *right = POP();
     PyObject *left = TOP();
-    PyObject *res = cmp_outcome(ctx->oparg, left, right);
+    PyObject *res = cmp_outcome(oparg, left, right);
     Py_DECREF(left);
     Py_DECREF(right);
     SET_TOP(res);
@@ -2317,7 +2275,7 @@ TARGET_FUNC(COMPARE_OP) {
 JIT_TARGET_EXPORT(COMPARE_OP)
 
 TARGET_FUNC(IMPORT_NAME) {
-    PyObject *name = GETITEM(ctx->names, ctx->oparg);
+    PyObject *name = GETITEM(ctx->names, oparg);
     PyObject *fromlist = POP();
     PyObject *level = TOP();
     PyObject *res;
@@ -2356,7 +2314,7 @@ TARGET_FUNC(IMPORT_STAR) {
 JIT_TARGET_EXPORT(IMPORT_STAR)
 
 TARGET_FUNC(IMPORT_FROM) {
-    PyObject *name = GETITEM(ctx->names, ctx->oparg);
+    PyObject *name = GETITEM(ctx->names, oparg);
     PyObject *from = TOP();
     PyObject *res;
     res = import_from(from, name);
@@ -2368,7 +2326,7 @@ TARGET_FUNC(IMPORT_FROM) {
 JIT_TARGET_EXPORT(IMPORT_FROM)
 
 TARGET_FUNC(JUMP_FORWARD) {
-    JUMPBY(ctx->oparg);
+    JUMPBY(oparg);
     FAST_DISPATCH();
 }
 JIT_TARGET_EXPORT(JUMP_FORWARD)
@@ -2382,7 +2340,7 @@ TARGET_FUNC(POP_JUMP_IF_FALSE) {
     }
     if (cond == Py_False) {
         Py_DECREF(cond);
-        JUMPTO(ctx->oparg);
+        JUMPTO(oparg);
         FAST_DISPATCH();
     }
     err = PyObject_IsTrue(cond);
@@ -2390,7 +2348,7 @@ TARGET_FUNC(POP_JUMP_IF_FALSE) {
     if (err > 0)
         ;
     else if (err == 0)
-        JUMPTO(ctx->oparg);
+        JUMPTO(oparg);
     else
         GOTO_ERROR();
     DISPATCH();
@@ -2406,13 +2364,13 @@ TARGET_FUNC(POP_JUMP_IF_TRUE) {
     }
     if (cond == Py_True) {
         Py_DECREF(cond);
-        JUMPTO(ctx->oparg);
+        JUMPTO(oparg);
         FAST_DISPATCH();
     }
     err = PyObject_IsTrue(cond);
     Py_DECREF(cond);
     if (err > 0) {
-        JUMPTO(ctx->oparg);
+        JUMPTO(oparg);
     }
     else if (err == 0)
         ;
@@ -2431,7 +2389,7 @@ TARGET_FUNC(JUMP_IF_FALSE_OR_POP) {
         FAST_DISPATCH();
     }
     if (cond == Py_False) {
-        JUMPTO(ctx->oparg);
+        JUMPTO(oparg);
         FAST_DISPATCH();
     }
     err = PyObject_IsTrue(cond);
@@ -2440,7 +2398,7 @@ TARGET_FUNC(JUMP_IF_FALSE_OR_POP) {
         Py_DECREF(cond);
     }
     else if (err == 0)
-        JUMPTO(ctx->oparg);
+        JUMPTO(oparg);
     else
         GOTO_ERROR();
     DISPATCH();
@@ -2456,12 +2414,12 @@ TARGET_FUNC(JUMP_IF_TRUE_OR_POP) {
         FAST_DISPATCH();
     }
     if (cond == Py_True) {
-        JUMPTO(ctx->oparg);
+        JUMPTO(oparg);
         FAST_DISPATCH();
     }
     err = PyObject_IsTrue(cond);
     if (err > 0) {
-        JUMPTO(ctx->oparg);
+        JUMPTO(oparg);
     }
     else if (err == 0) {
         STACKADJ(-1);
@@ -2474,7 +2432,7 @@ TARGET_FUNC(JUMP_IF_TRUE_OR_POP) {
 JIT_TARGET_EXPORT(JUMP_IF_TRUE_OR_POP)
 
 TARGET_FUNC(JUMP_ABSOLUTE) {
-    JUMPTO(ctx->oparg);
+    JUMPTO(oparg);
 #if FAST_LOOPS
     /* Enabling this path speeds-up all while and for-loops by bypassing
        the per-loop checks for signals.  By default, this should be turned-off
@@ -2554,7 +2512,7 @@ TARGET_FUNC(FOR_ITER) {
     /* iterator ended normally */
     STACKADJ(-1);
     Py_DECREF(iter);
-    JUMPBY(ctx->oparg);
+    JUMPBY(oparg);
     PREDICT(POP_BLOCK);
     DISPATCH();
 }
@@ -2567,7 +2525,7 @@ TARGET_FUNC(BREAK_LOOP) {
 JIT_TARGET_EXPORT(BREAK_LOOP)
 
 TARGET_FUNC(CONTINUE_LOOP) {
-    ctx->retval = PyLong_FromLong(ctx->oparg);
+    ctx->retval = PyLong_FromLong(oparg);
     if (ctx->retval == NULL)
         GOTO_ERROR();
     ctx->why = WHY_CONTINUE;
@@ -2581,7 +2539,7 @@ TARGET_FUNC(SETUP_LOOP) {
        to update the PyGen_NeedsFinalizing() function.
        */
 
-    PyFrame_BlockSetup(f, ctx->opcode, INSTR_OFFSET() + ctx->oparg,
+    PyFrame_BlockSetup(f, opcode, INSTR_OFFSET() + oparg,
                        STACK_LEVEL());
     DISPATCH();
 }
@@ -2593,7 +2551,7 @@ TARGET_FUNC(SETUP_EXCEPT) {
        to update the PyGen_NeedsFinalizing() function.
        */
 
-    PyFrame_BlockSetup(f, ctx->opcode, INSTR_OFFSET() + ctx->oparg,
+    PyFrame_BlockSetup(f, opcode, INSTR_OFFSET() + oparg,
                        STACK_LEVEL());
     DISPATCH();
 }
@@ -2605,7 +2563,7 @@ TARGET_FUNC(SETUP_FINALLY) {
        to update the PyGen_NeedsFinalizing() function.
        */
 
-    PyFrame_BlockSetup(f, ctx->opcode, INSTR_OFFSET() + ctx->oparg,
+    PyFrame_BlockSetup(f, opcode, INSTR_OFFSET() + oparg,
                        STACK_LEVEL());
     DISPATCH();
 }
@@ -2640,7 +2598,7 @@ TARGET_FUNC(SETUP_ASYNC_WITH) {
     PyObject *res = POP();
     /* Setup the finally block before pushing the result
        of __aenter__ on the stack. */
-    PyFrame_BlockSetup(f, SETUP_FINALLY, INSTR_OFFSET() + ctx->oparg,
+    PyFrame_BlockSetup(f, SETUP_FINALLY, INSTR_OFFSET() + oparg,
                        STACK_LEVEL());
     PUSH(res);
     DISPATCH();
@@ -2668,7 +2626,7 @@ TARGET_FUNC(SETUP_WITH) {
         GOTO_ERROR();
     /* Setup the finally block before pushing the result
        of __enter__ on the stack. */
-    PyFrame_BlockSetup(f, SETUP_FINALLY, INSTR_OFFSET() + ctx->oparg,
+    PyFrame_BlockSetup(f, SETUP_FINALLY, INSTR_OFFSET() + oparg,
                        STACK_LEVEL());
 
     PUSH(res);
@@ -2794,7 +2752,7 @@ JIT_TARGET_EXPORT(WITH_CLEANUP_FINISH)
 
 TARGET_FUNC(LOAD_METHOD) {
     /* Designed to work in tamdem with CALL_METHOD. */
-    PyObject *name = GETITEM(ctx->names, ctx->oparg);
+    PyObject *name = GETITEM(ctx->names, oparg);
     PyObject *obj = TOP();
     PyObject *meth = NULL;
 
@@ -2836,7 +2794,7 @@ TARGET_FUNC(CALL_METHOD) {
 
     sp = stack_pointer;
 
-    meth = PEEK(ctx->oparg + 2);
+    meth = PEEK(oparg + 2);
     if (meth == NULL) {
         /* `meth` is NULL when LOAD_METHOD thinks that it's not
            a method call.
@@ -2845,14 +2803,14 @@ TARGET_FUNC(CALL_METHOD) {
 
                ... | NULL | callable | arg1 | ... | argN
                                                     ^- TOP()
-                                       ^- (-ctx->oparg)
-                            ^- (-ctx->oparg-1)
-                     ^- (-ctx->oparg-2)
+                                       ^- (-oparg)
+                            ^- (-oparg-1)
+                     ^- (-oparg-2)
 
            `callable` will be POPed by call_function.
            NULL will will be POPed manually later.
         */
-        res = call_function_extern(&sp, ctx->oparg, NULL);
+        res = call_function_extern(&sp, oparg, NULL);
         stack_pointer = sp;
         (void)POP(); /* POP the NULL. */
     }
@@ -2861,15 +2819,15 @@ TARGET_FUNC(CALL_METHOD) {
 
              ... | method | self | arg1 | ... | argN
                                                 ^- TOP()
-                                   ^- (-ctx->oparg)
-                            ^- (-ctx->oparg-1)
-                   ^- (-ctx->oparg-2)
+                                   ^- (-oparg)
+                            ^- (-oparg-1)
+                   ^- (-oparg-2)
 
           `self` and `method` will be POPed by call_function.
-          We'll be passing `ctx->oparg + 1` to call_function, to
+          We'll be passing `oparg + 1` to call_function, to
           make it accept the `self` as a first argument.
         */
-        res = call_function_extern(&sp, ctx->oparg + 1, NULL);
+        res = call_function_extern(&sp, oparg + 1, NULL);
         stack_pointer = sp;
     }
 
@@ -2883,7 +2841,7 @@ JIT_TARGET_EXPORT(CALL_METHOD)
 TARGET_FUNC(CALL_FUNCTION) {
     PyObject **sp, *res;
     sp = stack_pointer;
-    res = call_function_extern(&sp, ctx->oparg, NULL);
+    res = call_function_extern(&sp, oparg, NULL);
     stack_pointer = sp;
     PUSH(res);
     if (res == NULL) {
@@ -2897,9 +2855,9 @@ TARGET_FUNC(CALL_FUNCTION_KW) {
     PyObject **sp, *res, *kwnames;
 
     kwnames = POP();
-    assert(PyTuple_CheckExact(kwnames) && PyTuple_GET_SIZE(kwnames) <= ctx->oparg);
+    assert(PyTuple_CheckExact(kwnames) && PyTuple_GET_SIZE(kwnames) <= oparg);
     sp = stack_pointer;
-    res = call_function_extern(&sp, ctx->oparg, kwnames);
+    res = call_function_extern(&sp, oparg, kwnames);
     stack_pointer = sp;
     PUSH(res);
     Py_DECREF(kwnames);
@@ -2913,7 +2871,7 @@ JIT_TARGET_EXPORT(CALL_FUNCTION_KW)
 
 TARGET_FUNC(CALL_FUNCTION_EX) {
     PyObject *func, *callargs, *kwargs = NULL, *result;
-    if (ctx->oparg & 0x01) {
+    if (oparg & 0x01) {
         kwargs = POP();
         if (!PyDict_CheckExact(kwargs)) {
             PyObject *d = PyDict_New();
@@ -2977,19 +2935,19 @@ TARGET_FUNC(MAKE_FUNCTION) {
         GOTO_ERROR();
     }
 
-    if (ctx->oparg & 0x08) {
+    if (oparg & 0x08) {
         assert(PyTuple_CheckExact(TOP()));
         func ->func_closure = POP();
     }
-    if (ctx->oparg & 0x04) {
+    if (oparg & 0x04) {
         assert(PyDict_CheckExact(TOP()));
         func->func_annotations = POP();
     }
-    if (ctx->oparg & 0x02) {
+    if (oparg & 0x02) {
         assert(PyDict_CheckExact(TOP()));
         func->func_kwdefaults = POP();
     }
-    if (ctx->oparg & 0x01) {
+    if (oparg & 0x01) {
         assert(PyTuple_CheckExact(TOP()));
         func->func_defaults = POP();
     }
@@ -3001,7 +2959,7 @@ JIT_TARGET_EXPORT(MAKE_FUNCTION)
 
 TARGET_FUNC(BUILD_SLICE) {
     PyObject *start, *stop, *step, *slice;
-    if (ctx->oparg == 3)
+    if (oparg == 3)
         step = POP();
     else
         step = NULL;
@@ -3024,8 +2982,8 @@ TARGET_FUNC(FORMAT_VALUE) {
     PyObject *fmt_spec;
     PyObject *value;
     PyObject *(*conv_fn)(PyObject *);
-    int which_conversion = ctx->oparg & FVC_MASK;
-    int have_fmt_spec = (ctx->oparg & FVS_MASK) == FVS_HAVE_SPEC;
+    int which_conversion = oparg & FVC_MASK;
+    int have_fmt_spec = (oparg & FVS_MASK) == FVS_HAVE_SPEC;
 
     fmt_spec = have_fmt_spec ? POP() : NULL;
     value = POP();
@@ -3037,7 +2995,7 @@ TARGET_FUNC(FORMAT_VALUE) {
     case FVC_ASCII: conv_fn = PyObject_ASCII; break;
 
     /* Must be 0 (meaning no conversion), since only four
-       values are allowed by (ctx->oparg & FVC_MASK). */
+       values are allowed by (oparg & FVC_MASK). */
     default:        conv_fn = NULL;           break;
     }
 
@@ -3078,9 +3036,7 @@ TARGET_FUNC(FORMAT_VALUE) {
 JIT_TARGET_EXPORT(FORMAT_VALUE)
 
 TARGET_FUNC(EXTENDED_ARG) {
-    int oldoparg = ctx->oparg;
-    NEXTOPARG();
-    ctx->oparg |= oldoparg << 8;
-    GOTO_DISPATCH_OPCODE();
+    Py_UNREACHABLE(); // Implemented in jit.c
 }
 JIT_TARGET_EXPORT(EXTENDED_ARG)
+

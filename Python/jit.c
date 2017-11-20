@@ -4,6 +4,7 @@
 #include <stddef.h>
 
 #include "Python.h"
+#include "opcode.h"
 #include "frameobject.h"
 #include "internal/jit.h"
 
@@ -20,11 +21,11 @@ static CodePage *cp_head;
 static CodePage *cp_tail;
 
 typedef void (*PyJITEntryFunction)(EvalContext *ctx, PyFrameObject *f, PyObject **sp);
-typedef void (*PyJITTargetFunction)(void);
+typedef void (*PyJITTargetFunction)(int opcode, int oparg);
 
 void _PyEval_FUNC_JIT_RESUME(void);
 
-void _PyEval_FUNC_JIT__unknown_opcode(void) {
+void _PyEval_FUNC_JIT__unknown_opcode(int opcode, int oparg) {
     assert(0);
 }
 
@@ -33,7 +34,6 @@ void _PyEval_FUNC_JIT__unknown_opcode(void) {
 /* Special pseudo-instructions */
 #define DECLARE_SPECIAL(name)  void _PyEval_FUNC_JIT_TARGET_II_##name (void)
 
-DECLARE_SPECIAL(NEXT_OPCODE);
 DECLARE_SPECIAL(ERROR);
 DECLARE_SPECIAL(FAST_YIELD);
 DECLARE_SPECIAL(FAST_BLOCK_END);
@@ -133,6 +133,31 @@ insert_special_section(void *function_addr) {
     insert_call(function_addr);
 }
 
+Py_LOCAL_INLINE(void)
+insert_instr_generic(int i, int i_next, int opcode, int oparg)
+{
+    // movl $f_lasti, f_lasti_offset(%r13)
+    insert_code(11, "\x41\xc7\x85\x00\x00\x00\x00\x00\x00\x00\x00");
+    reloc_32(-8, offsetof(PyFrameObject, f_lasti));
+    reloc_32(-4, i * sizeof(_Py_CODEUNIT));
+
+    // addq $instr_delta, next_instr(%r12)
+    insert_code(6, "\x49\x83\x44\x24\x00\x00");
+    reloc_8(-2, offsetof(EvalContext, next_instr));
+    reloc_8(-1, (i_next - i) * sizeof(_Py_CODEUNIT));
+
+    // movl $opcode, %edi
+    insert_code(5, "\xbf\x00\x00\x00\x00");
+    reloc_32(-4, opcode);
+
+    // movl $oparg, %esi
+    insert_code(5, "\xbe\x00\x00\x00\x00");
+    reloc_32(-4, oparg);
+
+    // call 32-bit relative function
+    insert_call(opcode_function_table[opcode]);
+}
+
 static void
 translate_bytecode(JITData *jd, PyCodeObject *co)
 {
@@ -178,7 +203,6 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     //
     int is_gen = (co->co_flags & (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR));
     _Py_CODEUNIT *code = (_Py_CODEUNIT*)PyBytes_AS_STRING(co->co_code);
-    _Py_CODEUNIT *p;
     Py_ssize_t i;
     Py_ssize_t inst_count = PyBytes_GET_SIZE(co->co_code)/sizeof(_Py_CODEUNIT);
 
@@ -214,32 +238,18 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     }
 
     for (i = 0; i < inst_count; i++) {
-        p = &code[i];
+        int istart = i;
+        int opcode = _Py_OPCODE(code[i]);
+        int oparg = _Py_OPARG(code[i]);
         jd->jmptab[i] = current_code_pos();
 
-        // movl $f_lasti, f_lasti_offset(%r13)
-        insert_code(11, "\x41\xc7\x85\x00\x00\x00\x00\x00\x00\x00\x00");
-        reloc_32(-8, offsetof(PyFrameObject, f_lasti));
-        reloc_32(-4, i*2);
-
-        // addq $0x2, next_instr(%r12)
-        insert_code(6, "\x49\x83\x44\x24\x00\x02");
-        reloc_8(-2, offsetof(EvalContext, next_instr));
-
-        // movl $opcode, opcode_offset(%r12)
-        insert_code(9, "\x41\xc7\x44\x24\x00\x00\x00\x00\x00");
-        reloc_32(-4, _Py_OPCODE(*p));
-        reloc_8(-5, offsetof(EvalContext, opcode));
-
-        // movl $oparg, oparg_offset(%r12)
-        insert_code(9, "\x41\xc7\x44\x24\x00\x00\x00\x00\x00");
-        reloc_32(-4, _Py_OPARG(*p));
-        reloc_8(-5, offsetof(EvalContext, oparg));
-
-        // call 32-bit relative function
-        insert_call(opcode_function_table[_Py_OPCODE(*p)]);
-
-        ++p;
+        while (opcode == EXTENDED_ARG) {
+            ++i;
+            opcode = _Py_OPCODE(code[i]);
+            oparg = (oparg << 8) | _Py_OPARG(code[i]);
+            jd->jmptab[i] = NULL;
+        }
+        insert_instr_generic(istart, i+1, opcode, oparg);
     }
 
     /* Dispatch opcode is special. It wants us to run the instruction
