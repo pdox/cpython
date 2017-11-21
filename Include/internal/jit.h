@@ -2,26 +2,22 @@
 extern "C" {
 #endif
 
-/* JIT data attached to a PyCodeObject */
-typedef void* CallTarget;
-typedef void* JumpTarget;
-typedef struct _JITData {
-    CallTarget entry;
-    JumpTarget j_error;
-    JumpTarget j_dispatch_opcode;
-    JumpTarget j_fast_yield;
-    JumpTarget j_fast_block_end;
-    JumpTarget j_unwind_cleanup;
-    JumpTarget j_next_opcode;
-    JumpTarget j_ret;
-    JumpTarget jmptab[1]; // variable-size
-} JITData;
+#include <jit/jit.h>
+
+#define JIT_RC_FLOW            0
+#define JIT_RC_JUMP            1
+#define JIT_RC_FAST_YIELD      2
+#define JIT_RC_FAST_BLOCK_END  3
+#define JIT_RC_ERROR           4
+#define JIT_RC_UNWIND_CLEANUP  5
+#define JIT_RC_NEXT_OPCODE     6
+#define JIT_RC_EXIT            7
+// EXIT needs to be the highest value
 
 typedef struct _EvalContext {
     const _Py_CODEUNIT *next_instr;
-    int opcode;        /* Current opcode */
-    int oparg;         /* Current opcode argument, if any */
     void *jit_ret_addr; /* Used by the JIT internally. */
+    PyObject **stack_pointer;
 
     unsigned why; /* Reason for block stack unwind */
     PyObject **fastlocals, **freevars;
@@ -46,8 +42,15 @@ typedef struct _EvalContext {
 #endif
 } EvalContext;
 
-#define set_return_address(addr) \
-    (*(((void**)(ctx->jit_ret_addr) - 1)) = (void*)(addr))
+/* JIT data attached to a PyCodeObject */
+typedef void (*PyJITEntryFunction)(EvalContext *ctx, PyFrameObject *f);
+
+typedef struct _JITData {
+    PyJITEntryFunction entry;
+    jit_function_t func;
+    jit_label_t j_special[JIT_RC_EXIT + 1];
+    jit_label_t jmptab[1];
+} JITData;
 
 int _PyJIT_Execute(EvalContext *ctx, PyFrameObject *f, PyObject **sp);
 

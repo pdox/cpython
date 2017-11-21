@@ -151,15 +151,11 @@ int unpack_iterable(PyObject *, int, int, PyObject **);
 
 //----------------------------------------------------------------------------------
 
-register EvalContext *ctx asm ("r12");
-register PyFrameObject *f asm ("r13");
-register PyObject **stack_pointer asm ("r14");
-
 #define TARGET_FUNC(op) \
-    void _PyEval_FUNC_JIT_TARGET_##op (int opcode, int oparg)
+    int _PyEval_FUNC_JIT_TARGET_##op (EvalContext *ctx, PyFrameObject *f, int opcode, int oparg, int jumpev)
 
 #define TARGET_SPECIAL(op) \
-    void _PyEval_FUNC_JIT_TARGET_II_##op(void)
+    int _PyEval_FUNC_JIT_TARGET_II_##op(EvalContext *ctx, PyFrameObject *f, int jumpev)
 
 #define JIT_TARGET_EXPORT(f)
 
@@ -169,34 +165,23 @@ register PyObject **stack_pointer asm ("r14");
 #undef DISPATCH
 #undef FAST_DISPATCH
 
-#define JIT_GOTO(label) do { \
-    set_return_address( ((JITData*)ctx->co->co_jit_data)->j_ ## label ); \
-    return; \
-} while (0)
-
-#define JIT_SET_JUMP() do { \
-    JITData *jd = (JITData*)ctx->co->co_jit_data; \
-    int idx = ctx->next_instr - ctx->first_instr; \
-    set_return_address(jd->jmptab[idx]); \
-} while (0)
-
 #define DISPATCH() do { \
     if (_Py_atomic_load_relaxed(&_PyRuntime.ceval.eval_breaker)) { \
-        JIT_GOTO(next_opcode); \
+        return JIT_RC_NEXT_OPCODE; \
     } else { \
-        return; \
+        return jumpev ? JIT_RC_JUMP : JIT_RC_FLOW; \
     } \
 } while (0)
 
 
-#define FAST_DISPATCH()          return
-#define GOTO_FAST_YIELD()        JIT_GOTO(fast_yield)
-#define GOTO_FAST_BLOCK_END()    JIT_GOTO(fast_block_end)
-#define GOTO_ERROR()             JIT_GOTO(error)
-#define GOTO_EXIT_EVAL_FRAME()   JIT_GOTO(ret)
-#define GOTO_FAST_NEXT_OPCODE()  return
-#define GOTO_UNWIND_CLEANUP()    JIT_GOTO(unwind_cleanup)
-#define GOTO_NEXT_OPCODE()       JIT_GOTO(next_opcode)
+#define FAST_DISPATCH()          return jumpev ? JIT_RC_JUMP : JIT_RC_FLOW
+#define GOTO_FAST_NEXT_OPCODE()  return jumpev ? JIT_RC_JUMP : JIT_RC_FLOW
+#define GOTO_FAST_YIELD()        return JIT_RC_FAST_YIELD
+#define GOTO_FAST_BLOCK_END()    return JIT_RC_FAST_BLOCK_END
+#define GOTO_ERROR()             return JIT_RC_ERROR
+#define GOTO_UNWIND_CLEANUP()    return JIT_RC_UNWIND_CLEANUP
+#define GOTO_NEXT_OPCODE()       return JIT_RC_NEXT_OPCODE
+#define GOTO_EXIT_EVAL_FRAME()   return JIT_RC_EXIT
 
 
 #undef INSTR_OFFSET
@@ -207,13 +192,13 @@ register PyObject **stack_pointer asm ("r14");
 #undef JUMPTO
 #define JUMPTO(x) do { \
     ctx->next_instr = ctx->first_instr + (x) / sizeof(_Py_CODEUNIT); \
-    JIT_SET_JUMP(); \
+    jumpev = 1; \
 } while (0)
 
 #undef JUMPBY
 #define JUMPBY(x) do { \
     ctx->next_instr += (x) / sizeof(_Py_CODEUNIT); \
-    JIT_SET_JUMP(); \
+    jumpev = 1; \
 } while (0)
 
 #undef STACK_LEVEL
@@ -231,21 +216,24 @@ register PyObject **stack_pointer asm ("r14");
 #undef BASIC_STACKADJ
 #undef BASIC_PUSH
 #undef BASIC_POP
-#define STACK_LEVEL()     ((int)(stack_pointer - f->f_valuestack))
+#define FRAMEPTR()        (f)
+#define STACKPTR()        (ctx->stack_pointer)
+
+#define STACK_LEVEL()     ((int)(STACKPTR() - FRAMEPTR()->f_valuestack))
 #define EMPTY()           (STACK_LEVEL() == 0)
-#define TOP()             (stack_pointer[-1])
-#define SECOND()          (stack_pointer[-2])
-#define THIRD()           (stack_pointer[-3])
-#define FOURTH()          (stack_pointer[-4])
-#define PEEK(n)           (stack_pointer[-(n)])
-#define SET_TOP(v)        (stack_pointer[-1] = (v))
-#define SET_SECOND(v)     (stack_pointer[-2] = (v))
-#define SET_THIRD(v)      (stack_pointer[-3] = (v))
-#define SET_FOURTH(v)     (stack_pointer[-4] = (v))
-#define SET_VALUE(n, v)   (stack_pointer[-(n)] = (v))
-#define BASIC_STACKADJ(n) (stack_pointer += n)
-#define BASIC_PUSH(v)     (*stack_pointer++ = (v))
-#define BASIC_POP()       (*--stack_pointer)
+#define TOP()             (STACKPTR()[-1])
+#define SECOND()          (STACKPTR()[-2])
+#define THIRD()           (STACKPTR()[-3])
+#define FOURTH()          (STACKPTR()[-4])
+#define PEEK(n)           (STACKPTR()[-(n)])
+#define SET_TOP(v)        (STACKPTR()[-1] = (v))
+#define SET_SECOND(v)     (STACKPTR()[-2] = (v))
+#define SET_THIRD(v)      (STACKPTR()[-3] = (v))
+#define SET_FOURTH(v)     (STACKPTR()[-4] = (v))
+#define SET_VALUE(n, v)   (STACKPTR()[-(n)] = (v))
+#define BASIC_STACKADJ(n) (STACKPTR() += n)
+#define BASIC_PUSH(v)     (*STACKPTR()++ = (v))
+#define BASIC_POP()       (*--STACKPTR())
 
 #undef PUSH
 #undef POP
@@ -262,12 +250,6 @@ register PyObject **stack_pointer asm ("r14");
 #define SETLOCAL(i, value)      do { PyObject *tmp = GETLOCAL(i); \
                                      GETLOCAL(i) = value; \
                                      Py_XDECREF(tmp); } while (0)
-
-void _PyEval_FUNC_JIT_RESUME(void) {
-    JITData *jd = (JITData*)ctx->co->co_jit_data;
-    int idx = ctx->next_instr - ctx->first_instr;
-    set_return_address(jd->jmptab[idx]);
-}
 
 #undef UNWIND_BLOCK
 #define UNWIND_BLOCK(b) \
@@ -300,7 +282,7 @@ void _PyEval_FUNC_JIT_RESUME(void) {
 
 
 TARGET_SPECIAL(NEXT_OPCODE) {
-    assert(stack_pointer >= f->f_valuestack); /* else underflow */
+    assert(STACKPTR() >= FRAMEPTR()->f_valuestack); /* else underflow */
     assert(STACK_LEVEL() <= ctx->co->co_stacksize);  /* else overflow */
     assert(!PyErr_Occurred());
 
@@ -399,9 +381,9 @@ TARGET_SPECIAL(FAST_BLOCK_END) {
     assert(ctx->why != WHY_NOT);
 
     /* Unwind stacks if a (pseudo) exception occurred */
-    while (ctx->why != WHY_NOT && f->f_iblock > 0) {
+    while (ctx->why != WHY_NOT && FRAMEPTR()->f_iblock > 0) {
         /* Peek at the current block. */
-        PyTryBlock *b = &f->f_blockstack[f->f_iblock - 1];
+        PyTryBlock *b = &FRAMEPTR()->f_blockstack[FRAMEPTR()->f_iblock - 1];
 
         assert(ctx->why != WHY_YIELD);
         if (b->b_type == SETUP_LOOP && ctx->why == WHY_CONTINUE) {
@@ -411,7 +393,7 @@ TARGET_SPECIAL(FAST_BLOCK_END) {
             break;
         }
         /* Now we have to pop the block. */
-        f->f_iblock--;
+        FRAMEPTR()->f_iblock--;
 
         if (b->b_type == EXCEPT_HANDLER) {
             UNWIND_EXCEPT_HANDLER(b);
@@ -429,7 +411,7 @@ TARGET_SPECIAL(FAST_BLOCK_END) {
             int handler = b->b_handler;
             _PyErr_StackItem *exc_info = ctx->tstate->exc_info;
             /* Beware, this invalidates all b->b_* fields */
-            PyFrame_BlockSetup(f, EXCEPT_HANDLER, -1, STACK_LEVEL());
+            PyFrame_BlockSetup(FRAMEPTR(), EXCEPT_HANDLER, -1, STACK_LEVEL());
             PUSH(exc_info->exc_traceback);
             PUSH(exc_info->exc_value);
             if (exc_info->exc_type != NULL) {
@@ -481,6 +463,7 @@ TARGET_SPECIAL(FAST_BLOCK_END) {
         GOTO_UNWIND_CLEANUP();
 
     assert(!PyErr_Occurred());
+    (void)jumpev;
     GOTO_NEXT_OPCODE();
 }
 JIT_TARGET_EXPORT(II_FAST_BLOCK_END)
@@ -490,7 +473,7 @@ TARGET_SPECIAL(FAST_YIELD) {
         if (ctx->tstate->c_tracefunc) {
             if (ctx->why == WHY_RETURN || ctx->why == WHY_YIELD) {
                 if (call_trace(ctx->tstate->c_tracefunc, ctx->tstate->c_traceobj,
-                               ctx->tstate, f,
+                               ctx->tstate, FRAMEPTR(),
                                PyTrace_RETURN, ctx->retval)) {
                     Py_CLEAR(ctx->retval);
                     ctx->why = WHY_EXCEPTION;
@@ -498,7 +481,7 @@ TARGET_SPECIAL(FAST_YIELD) {
             }
             else if (ctx->why == WHY_EXCEPTION) {
                 call_trace_protected(ctx->tstate->c_tracefunc, ctx->tstate->c_traceobj,
-                                     ctx->tstate, f,
+                                     ctx->tstate, FRAMEPTR(),
                                      PyTrace_RETURN, NULL);
             }
         }
@@ -506,10 +489,10 @@ TARGET_SPECIAL(FAST_YIELD) {
             if (ctx->why == WHY_EXCEPTION)
                 call_trace_protected(ctx->tstate->c_profilefunc,
                                      ctx->tstate->c_profileobj,
-                                     ctx->tstate, f,
+                                     ctx->tstate, FRAMEPTR(),
                                      PyTrace_RETURN, NULL);
             else if (call_trace(ctx->tstate->c_profilefunc, ctx->tstate->c_profileobj,
-                                ctx->tstate, f,
+                                ctx->tstate, FRAMEPTR(),
                                 PyTrace_RETURN, ctx->retval)) {
                 Py_CLEAR(ctx->retval);
                 /* ctx->why = WHY_EXCEPTION; */
@@ -767,7 +750,7 @@ TARGET_FUNC(BINARY_ADD) {
        speedup on microbenchmarks. */
     if (PyUnicode_CheckExact(left) &&
              PyUnicode_CheckExact(right)) {
-        sum = unicode_concatenate(left, right, f, ctx->next_instr);
+        sum = unicode_concatenate(left, right, FRAMEPTR(), ctx->next_instr);
         /* unicode_concatenate consumed the ref to left */
     }
     else {
@@ -982,7 +965,7 @@ TARGET_FUNC(INPLACE_ADD) {
     PyObject *left = TOP();
     PyObject *sum;
     if (PyUnicode_CheckExact(left) && PyUnicode_CheckExact(right)) {
-        sum = unicode_concatenate(left, right, f, ctx->next_instr);
+        sum = unicode_concatenate(left, right, FRAMEPTR(), ctx->next_instr);
         /* unicode_concatenate consumed the ref to left */
     }
     else {
@@ -1098,15 +1081,15 @@ TARGET_FUNC(STORE_ANNOTATION) {
     PyObject *ann = POP();
     PyObject *name = GETITEM(ctx->names, oparg);
     int err;
-    if (f->f_locals == NULL) {
+    if (FRAMEPTR()->f_locals == NULL) {
         PyErr_Format(PyExc_SystemError,
                      "no locals found when storing annotation");
         Py_DECREF(ann);
         GOTO_ERROR();
     }
     /* first try to get __annotations__ from locals... */
-    if (PyDict_CheckExact(f->f_locals)) {
-        ann_dict = _PyDict_GetItemId(f->f_locals,
+    if (PyDict_CheckExact(FRAMEPTR()->f_locals)) {
+        ann_dict = _PyDict_GetItemId(FRAMEPTR()->f_locals,
                                      &PyId___annotations__);
         if (ann_dict == NULL) {
             PyErr_SetString(PyExc_NameError,
@@ -1122,7 +1105,7 @@ TARGET_FUNC(STORE_ANNOTATION) {
             Py_DECREF(ann);
             GOTO_ERROR();
         }
-        ann_dict = PyObject_GetItem(f->f_locals, ann_str);
+        ann_dict = PyObject_GetItem(FRAMEPTR()->f_locals, ann_str);
         if (ann_dict == NULL) {
             if (PyErr_ExceptionMatches(PyExc_KeyError)) {
                 PyErr_SetString(PyExc_NameError,
@@ -1373,11 +1356,11 @@ TARGET_FUNC(YIELD_FROM) {
         DISPATCH();
     }
     /* receiver remains on stack, ctx->retval is value to be yielded */
-    f->f_stacktop = stack_pointer;
+    FRAMEPTR()->f_stacktop = STACKPTR();
     ctx->why = WHY_YIELD;
     /* and repeat... */
-    assert(f->f_lasti >= (int)sizeof(_Py_CODEUNIT));
-    f->f_lasti -= sizeof(_Py_CODEUNIT);
+    assert(FRAMEPTR()->f_lasti >= (int)sizeof(_Py_CODEUNIT));
+    FRAMEPTR()->f_lasti -= sizeof(_Py_CODEUNIT);
     GOTO_FAST_YIELD();
 }
 JIT_TARGET_EXPORT(YIELD_FROM)
@@ -1395,7 +1378,7 @@ TARGET_FUNC(YIELD_VALUE) {
         ctx->retval = w;
     }
 
-    f->f_stacktop = stack_pointer;
+    FRAMEPTR()->f_stacktop = STACKPTR();
     ctx->why = WHY_YIELD;
     GOTO_FAST_YIELD();
 }
@@ -1465,8 +1448,8 @@ TARGET_FUNC(LOAD_BUILD_CLASS) {
     _Py_IDENTIFIER(__build_class__);
 
     PyObject *bc;
-    if (PyDict_CheckExact(f->f_builtins)) {
-        bc = _PyDict_GetItemId(f->f_builtins, &PyId___build_class__);
+    if (PyDict_CheckExact(FRAMEPTR()->f_builtins)) {
+        bc = _PyDict_GetItemId(FRAMEPTR()->f_builtins, &PyId___build_class__);
         if (bc == NULL) {
             PyErr_SetString(PyExc_NameError,
                             "__build_class__ not found");
@@ -1478,7 +1461,7 @@ TARGET_FUNC(LOAD_BUILD_CLASS) {
         PyObject *build_class_str = _PyUnicode_FromId(&PyId___build_class__);
         if (build_class_str == NULL)
             GOTO_ERROR();
-        bc = PyObject_GetItem(f->f_builtins, build_class_str);
+        bc = PyObject_GetItem(FRAMEPTR()->f_builtins, build_class_str);
         if (bc == NULL) {
             if (PyErr_ExceptionMatches(PyExc_KeyError))
                 PyErr_SetString(PyExc_NameError,
@@ -1494,7 +1477,7 @@ JIT_TARGET_EXPORT(LOAD_BUILD_CLASS)
 TARGET_FUNC(STORE_NAME) {
     PyObject *name = GETITEM(ctx->names, oparg);
     PyObject *v = POP();
-    PyObject *ns = f->f_locals;
+    PyObject *ns = FRAMEPTR()->f_locals;
     int err;
     if (ns == NULL) {
         PyErr_Format(PyExc_SystemError,
@@ -1515,7 +1498,7 @@ JIT_TARGET_EXPORT(STORE_NAME)
 
 TARGET_FUNC(DELETE_NAME) {
     PyObject *name = GETITEM(ctx->names, oparg);
-    PyObject *ns = f->f_locals;
+    PyObject *ns = FRAMEPTR()->f_locals;
     int err;
     if (ns == NULL) {
         PyErr_Format(PyExc_SystemError,
@@ -1552,7 +1535,7 @@ TARGET_FUNC(UNPACK_SEQUENCE) {
             PUSH(item);
         }
     } else if (unpack_iterable(seq, oparg, -1,
-                               stack_pointer + oparg)) {
+                               STACKPTR() + oparg)) {
         STACKADJ(oparg);
     } else {
         /* unpack_iterable() raised an exception */
@@ -1569,8 +1552,8 @@ TARGET_FUNC(UNPACK_EX) {
     PyObject *seq = POP();
 
     if (unpack_iterable(seq, oparg & 0xFF, oparg >> 8,
-                        stack_pointer + totalargs)) {
-        stack_pointer += totalargs;
+                        STACKPTR() + totalargs)) {
+        STACKPTR() += totalargs;
     } else {
         Py_DECREF(seq);
         GOTO_ERROR();
@@ -1611,7 +1594,7 @@ TARGET_FUNC(STORE_GLOBAL) {
     PyObject *name = GETITEM(ctx->names, oparg);
     PyObject *v = POP();
     int err;
-    err = PyDict_SetItem(f->f_globals, name, v);
+    err = PyDict_SetItem(FRAMEPTR()->f_globals, name, v);
     Py_DECREF(v);
     if (err != 0)
         GOTO_ERROR();
@@ -1622,7 +1605,7 @@ JIT_TARGET_EXPORT(STORE_GLOBAL)
 TARGET_FUNC(DELETE_GLOBAL) {
     PyObject *name = GETITEM(ctx->names, oparg);
     int err;
-    err = PyDict_DelItem(f->f_globals, name);
+    err = PyDict_DelItem(FRAMEPTR()->f_globals, name);
     if (err != 0) {
         format_exc_check_arg(
             PyExc_NameError, NAME_ERROR_MSG, name);
@@ -1634,7 +1617,7 @@ JIT_TARGET_EXPORT(DELETE_GLOBAL)
 
 TARGET_FUNC(LOAD_NAME) {
     PyObject *name = GETITEM(ctx->names, oparg);
-    PyObject *locals = f->f_locals;
+    PyObject *locals = FRAMEPTR()->f_locals;
     PyObject *v;
     if (locals == NULL) {
         PyErr_Format(PyExc_SystemError,
@@ -1654,11 +1637,11 @@ TARGET_FUNC(LOAD_NAME) {
         }
     }
     if (v == NULL) {
-        v = PyDict_GetItem(f->f_globals, name);
+        v = PyDict_GetItem(FRAMEPTR()->f_globals, name);
         Py_XINCREF(v);
         if (v == NULL) {
-            if (PyDict_CheckExact(f->f_builtins)) {
-                v = PyDict_GetItem(f->f_builtins, name);
+            if (PyDict_CheckExact(FRAMEPTR()->f_builtins)) {
+                v = PyDict_GetItem(FRAMEPTR()->f_builtins, name);
                 if (v == NULL) {
                     format_exc_check_arg(
                                 PyExc_NameError,
@@ -1668,7 +1651,7 @@ TARGET_FUNC(LOAD_NAME) {
                 Py_INCREF(v);
             }
             else {
-                v = PyObject_GetItem(f->f_builtins, name);
+                v = PyObject_GetItem(FRAMEPTR()->f_builtins, name);
                 if (v == NULL) {
                     if (PyErr_ExceptionMatches(PyExc_KeyError))
                         format_exc_check_arg(
@@ -1687,11 +1670,11 @@ JIT_TARGET_EXPORT(LOAD_NAME)
 TARGET_FUNC(LOAD_GLOBAL) {
     PyObject *name = GETITEM(ctx->names, oparg);
     PyObject *v;
-    if (PyDict_CheckExact(f->f_globals)
-        && PyDict_CheckExact(f->f_builtins))
+    if (PyDict_CheckExact(FRAMEPTR()->f_globals)
+        && PyDict_CheckExact(FRAMEPTR()->f_builtins))
     {
-        v = _PyDict_LoadGlobal((PyDictObject *)f->f_globals,
-                               (PyDictObject *)f->f_builtins,
+        v = _PyDict_LoadGlobal((PyDictObject *)FRAMEPTR()->f_globals,
+                               (PyDictObject *)FRAMEPTR()->f_builtins,
                                name);
         if (v == NULL) {
             if (!_PyErr_OCCURRED()) {
@@ -1708,14 +1691,14 @@ TARGET_FUNC(LOAD_GLOBAL) {
         /* Slow-path if globals or builtins is not a dict */
 
         /* namespace 1: globals */
-        v = PyObject_GetItem(f->f_globals, name);
+        v = PyObject_GetItem(FRAMEPTR()->f_globals, name);
         if (v == NULL) {
             if (!PyErr_ExceptionMatches(PyExc_KeyError))
                 GOTO_ERROR();
             PyErr_Clear();
 
             /* namespace 2: builtins */
-            v = PyObject_GetItem(f->f_builtins, name);
+            v = PyObject_GetItem(FRAMEPTR()->f_builtins, name);
             if (v == NULL) {
                 if (PyErr_ExceptionMatches(PyExc_KeyError))
                     format_exc_check_arg(
@@ -1767,7 +1750,7 @@ TARGET_FUNC(LOAD_CLOSURE) {
 JIT_TARGET_EXPORT(LOAD_CLOSURE)
 
 TARGET_FUNC(LOAD_CLASSDEREF) {
-    PyObject *name, *value, *locals = f->f_locals;
+    PyObject *name, *value, *locals = FRAMEPTR()->f_locals;
     Py_ssize_t idx;
     assert(locals);
     assert(oparg >= PyTuple_GET_SIZE(ctx->co->co_cellvars));
@@ -1829,7 +1812,7 @@ TARGET_FUNC(BUILD_STRING) {
     if (empty == NULL) {
         GOTO_ERROR();
     }
-    str = _PyUnicode_JoinArray(empty, stack_pointer - oparg, oparg);
+    str = _PyUnicode_JoinArray(empty, STACKPTR() - oparg, oparg);
     Py_DECREF(empty);
     if (str == NULL)
         GOTO_ERROR();
@@ -2065,14 +2048,14 @@ TARGET_FUNC(SETUP_ANNOTATIONS) {
     _Py_IDENTIFIER(__annotations__);
     int err;
     PyObject *ann_dict;
-    if (f->f_locals == NULL) {
+    if (FRAMEPTR()->f_locals == NULL) {
         PyErr_Format(PyExc_SystemError,
                      "no locals found when setting up annotations");
         GOTO_ERROR();
     }
     /* check if __annotations__ in locals()... */
-    if (PyDict_CheckExact(f->f_locals)) {
-        ann_dict = _PyDict_GetItemId(f->f_locals,
+    if (PyDict_CheckExact(FRAMEPTR()->f_locals)) {
+        ann_dict = _PyDict_GetItemId(FRAMEPTR()->f_locals,
                                      &PyId___annotations__);
         if (ann_dict == NULL) {
             /* ...if not, create a new one */
@@ -2080,7 +2063,7 @@ TARGET_FUNC(SETUP_ANNOTATIONS) {
             if (ann_dict == NULL) {
                 GOTO_ERROR();
             }
-            err = _PyDict_SetItemId(f->f_locals,
+            err = _PyDict_SetItemId(FRAMEPTR()->f_locals,
                                     &PyId___annotations__, ann_dict);
             Py_DECREF(ann_dict);
             if (err != 0) {
@@ -2094,7 +2077,7 @@ TARGET_FUNC(SETUP_ANNOTATIONS) {
         if (ann_str == NULL) {
             GOTO_ERROR();
         }
-        ann_dict = PyObject_GetItem(f->f_locals, ann_str);
+        ann_dict = PyObject_GetItem(FRAMEPTR()->f_locals, ann_str);
         if (ann_dict == NULL) {
             if (!PyErr_ExceptionMatches(PyExc_KeyError)) {
                 GOTO_ERROR();
@@ -2104,7 +2087,7 @@ TARGET_FUNC(SETUP_ANNOTATIONS) {
             if (ann_dict == NULL) {
                 GOTO_ERROR();
             }
-            err = PyObject_SetItem(f->f_locals, ann_str, ann_dict);
+            err = PyObject_SetItem(FRAMEPTR()->f_locals, ann_str, ann_dict);
             Py_DECREF(ann_dict);
             if (err != 0) {
                 GOTO_ERROR();
@@ -2279,7 +2262,7 @@ TARGET_FUNC(IMPORT_NAME) {
     PyObject *fromlist = POP();
     PyObject *level = TOP();
     PyObject *res;
-    res = import_name(f, name, fromlist, level);
+    res = import_name(FRAMEPTR(), name, fromlist, level);
     Py_DECREF(level);
     Py_DECREF(fromlist);
     SET_TOP(res);
@@ -2297,7 +2280,7 @@ TARGET_FUNC(IMPORT_STAR) {
         GOTO_ERROR();
     }
 
-    locals = f->f_locals;
+    locals = FRAMEPTR()->f_locals;
     if (locals == NULL) {
         PyErr_SetString(PyExc_SystemError,
             "no locals found during 'import *'");
@@ -2305,7 +2288,7 @@ TARGET_FUNC(IMPORT_STAR) {
         GOTO_ERROR();
     }
     err = import_all_from(locals, from);
-    PyFrame_LocalsToFast(f, 0);
+    PyFrame_LocalsToFast(FRAMEPTR(), 0);
     Py_DECREF(from);
     if (err != 0)
         GOTO_ERROR();
@@ -2539,7 +2522,7 @@ TARGET_FUNC(SETUP_LOOP) {
        to update the PyGen_NeedsFinalizing() function.
        */
 
-    PyFrame_BlockSetup(f, opcode, INSTR_OFFSET() + oparg,
+    PyFrame_BlockSetup(FRAMEPTR(), opcode, INSTR_OFFSET() + oparg,
                        STACK_LEVEL());
     DISPATCH();
 }
@@ -2551,7 +2534,7 @@ TARGET_FUNC(SETUP_EXCEPT) {
        to update the PyGen_NeedsFinalizing() function.
        */
 
-    PyFrame_BlockSetup(f, opcode, INSTR_OFFSET() + oparg,
+    PyFrame_BlockSetup(FRAMEPTR(), opcode, INSTR_OFFSET() + oparg,
                        STACK_LEVEL());
     DISPATCH();
 }
@@ -2563,7 +2546,7 @@ TARGET_FUNC(SETUP_FINALLY) {
        to update the PyGen_NeedsFinalizing() function.
        */
 
-    PyFrame_BlockSetup(f, opcode, INSTR_OFFSET() + oparg,
+    PyFrame_BlockSetup(FRAMEPTR(), opcode, INSTR_OFFSET() + oparg,
                        STACK_LEVEL());
     DISPATCH();
 }
@@ -2598,7 +2581,7 @@ TARGET_FUNC(SETUP_ASYNC_WITH) {
     PyObject *res = POP();
     /* Setup the finally block before pushing the result
        of __aenter__ on the stack. */
-    PyFrame_BlockSetup(f, SETUP_FINALLY, INSTR_OFFSET() + oparg,
+    PyFrame_BlockSetup(FRAMEPTR(), SETUP_FINALLY, INSTR_OFFSET() + oparg,
                        STACK_LEVEL());
     PUSH(res);
     DISPATCH();
@@ -2626,7 +2609,7 @@ TARGET_FUNC(SETUP_WITH) {
         GOTO_ERROR();
     /* Setup the finally block before pushing the result
        of __enter__ on the stack. */
-    PyFrame_BlockSetup(f, SETUP_FINALLY, INSTR_OFFSET() + oparg,
+    PyFrame_BlockSetup(FRAMEPTR(), SETUP_FINALLY, INSTR_OFFSET() + oparg,
                        STACK_LEVEL());
 
     PUSH(res);
@@ -2705,7 +2688,7 @@ TARGET_FUNC(WITH_CLEANUP_START) {
         /* We just shifted the stack down, so we have
            to tell the except handler block that the
            values are lower than it expects. */
-        block = &f->f_blockstack[f->f_iblock - 1];
+        block = &FRAMEPTR()->f_blockstack[FRAMEPTR()->f_iblock - 1];
         assert(block->b_type == EXCEPT_HANDLER);
         block->b_level--;
     }
@@ -2792,7 +2775,7 @@ TARGET_FUNC(CALL_METHOD) {
     /* Designed to work in tamdem with LOAD_METHOD. */
     PyObject **sp, *res, *meth;
 
-    sp = stack_pointer;
+    sp = STACKPTR();
 
     meth = PEEK(oparg + 2);
     if (meth == NULL) {
@@ -2811,7 +2794,7 @@ TARGET_FUNC(CALL_METHOD) {
            NULL will will be POPed manually later.
         */
         res = call_function_extern(&sp, oparg, NULL);
-        stack_pointer = sp;
+        STACKPTR() = sp;
         (void)POP(); /* POP the NULL. */
     }
     else {
@@ -2828,7 +2811,7 @@ TARGET_FUNC(CALL_METHOD) {
           make it accept the `self` as a first argument.
         */
         res = call_function_extern(&sp, oparg + 1, NULL);
-        stack_pointer = sp;
+        STACKPTR() = sp;
     }
 
     PUSH(res);
@@ -2840,9 +2823,9 @@ JIT_TARGET_EXPORT(CALL_METHOD)
 
 TARGET_FUNC(CALL_FUNCTION) {
     PyObject **sp, *res;
-    sp = stack_pointer;
+    sp = STACKPTR();
     res = call_function_extern(&sp, oparg, NULL);
-    stack_pointer = sp;
+    STACKPTR() = sp;
     PUSH(res);
     if (res == NULL) {
         GOTO_ERROR();
@@ -2856,9 +2839,9 @@ TARGET_FUNC(CALL_FUNCTION_KW) {
 
     kwnames = POP();
     assert(PyTuple_CheckExact(kwnames) && PyTuple_GET_SIZE(kwnames) <= oparg);
-    sp = stack_pointer;
+    sp = STACKPTR();
     res = call_function_extern(&sp, oparg, kwnames);
-    stack_pointer = sp;
+    STACKPTR() = sp;
     PUSH(res);
     Py_DECREF(kwnames);
 
@@ -2927,7 +2910,7 @@ TARGET_FUNC(MAKE_FUNCTION) {
     PyObject *qualname = POP();
     PyObject *codeobj = POP();
     PyFunctionObject *func = (PyFunctionObject *)
-        PyFunction_NewWithQualName(codeobj, f->f_globals, qualname);
+        PyFunction_NewWithQualName(codeobj, FRAMEPTR()->f_globals, qualname);
 
     Py_DECREF(codeobj);
     Py_DECREF(qualname);
