@@ -17,7 +17,7 @@ extern "C" {
 typedef struct _EvalContext {
     const _Py_CODEUNIT *next_instr;
     void *jit_ret_addr; /* Used by the JIT internally. */
-    PyObject **stack_pointer;
+    PyObject **stack_pointer; /* Only used for subroutine calls */
 
     unsigned why; /* Reason for block stack unwind */
     PyObject **fastlocals, **freevars;
@@ -43,14 +43,24 @@ typedef struct _EvalContext {
 } EvalContext;
 
 /* JIT data attached to a PyCodeObject */
-typedef void (*PyJITEntryFunction)(EvalContext *ctx, PyFrameObject *f);
+typedef void (*PyJITEntryFunction)(EvalContext *ctx, PyFrameObject *f, PyObject **sp);
 
 typedef struct _JITData {
     PyJITEntryFunction entry;
     jit_function_t func;
+    jit_value_t rv;
+
+    jit_value_t ctx;
+    jit_value_t f;
+    jit_value_t stack_pointer;
+    jit_value_t fastlocals;
+
     jit_label_t j_special[JIT_RC_EXIT + 1];
     jit_label_t jmptab[1];
 } JITData;
+
+
+typedef void (*PyJITEmitterFunction)(JITData *jd, int opcode, int oparg);
 
 int _PyJIT_Execute(EvalContext *ctx, PyFrameObject *f, PyObject **sp);
 

@@ -889,6 +889,14 @@ regen-opcode-function-table:
 		$(srcdir)/Python/opcode_function_table.h.new
 	$(UPDATE_FILE) $(srcdir)/Python/opcode_function_table.h $(srcdir)/Python/opcode_function_table.h.new
 
+.PHONY: regen-opcode-emitter-table
+regen-opcode-emitter-table:
+	# Regenerate Python/opcode_emitter_table.h from Lib/opcode.py
+	# using Python/makeopcodeemittertable.py
+	$(PYTHON_FOR_REGEN) $(srcdir)/Python/makeopcodeemittertable.py \
+		$(srcdir)/Python/opcode_emitter_table.h.new
+	$(UPDATE_FILE) $(srcdir)/Python/opcode_emitter_table.h $(srcdir)/Python/opcode_emitter_table.h.new
+
 Python/ceval.o: $(srcdir)/Python/opcode_targets.h $(srcdir)/Python/ceval_gil.h
 
 Python/frozen.o: $(srcdir)/Python/importlib.h $(srcdir)/Python/importlib_external.h
