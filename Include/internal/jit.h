@@ -43,10 +43,14 @@ typedef struct _EvalContext {
 } EvalContext;
 
 /* JIT data attached to a PyCodeObject */
+struct _JITData;
+typedef struct _JITData JITData;
 typedef void (*PyJITEntryFunction)(EvalContext *ctx, PyFrameObject *f, PyObject **sp);
+typedef void (*PyJITEmitHandlerFunction)(JITData *jd, int opcode);
 
 typedef struct _JITData {
     PyJITEntryFunction entry;
+    PyCodeObject *co; /* Borrowed reference */
     jit_function_t func;
     jit_value_t rv;
 
@@ -54,6 +58,12 @@ typedef struct _JITData {
     jit_value_t f;
     jit_value_t stack_pointer;
     jit_value_t fastlocals;
+
+    /* Private storage for each opcode */
+    void *priv[256];
+
+    /* Code to emit exceptional handlers for each opcode */
+    PyJITEmitHandlerFunction handlers[256];
 
     jit_label_t j_special[JIT_RC_EXIT + 1];
     jit_label_t jmptab[1];

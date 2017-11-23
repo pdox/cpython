@@ -11,9 +11,17 @@ DECLARE_SPECIAL(NEXT_OPCODE);
     jit_type_t sigvar##_args[] = { __VA_ARGS__ }; \
     jit_type_t sigvar = jit_type_create_signature(jit_abi_cdecl, ret_type, sigvar##_args, sizeof(sigvar##_args)/sizeof(jit_type_t), 1);
 
-#define CALL_NATIVE_WITH_RET(sig, retvar, nfunc, ...) \
+#define CALL_NATIVE(sig, nfunc, ...) do { \
     jit_value_t call_args[] = { __VA_ARGS__ }; \
-    jit_value_t retvar = jit_insn_call_native(jd->func, NULL, nfunc, sig, call_args, sizeof(call_args)/sizeof(jit_value_t), JIT_CALL_NOTHROW)
+    jit_insn_call_native(jd->func, NULL, nfunc, sig, call_args, sizeof(call_args)/sizeof(jit_value_t), JIT_CALL_NOTHROW); \
+} while (0)
+
+#define CALL_NATIVE_WITH_RET(retvar, sig, nfunc, ...) \
+    jit_value_t retvar; \
+    do { \
+        jit_value_t call_args[] = { __VA_ARGS__ }; \
+        retvar = jit_insn_call_native(jd->func, NULL, nfunc, sig, call_args, sizeof(call_args)/sizeof(jit_value_t), JIT_CALL_NOTHROW); \
+    } while (0)
 
 #define HANDLE_RV(inval) do { \
     jit_insn_store(jd->func, jd->rv, (inval)); \
@@ -36,6 +44,12 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define CONSTANT_INT(n) \
     jit_value_create_nint_constant(jd->func, jit_type_int, (n))
 
+#define CONSTANT_NINT(n) \
+    jit_value_create_nint_constant(jd->func, jit_type_nint, (n))
+
+#define CONSTANT_PTR(p) \
+    jit_value_create_nint_constant(jd->func, jit_type_void_ptr, (jit_nint)((void*)(p)))
+
 #define SHIFT_RIGHT(v1, v2) \
     jit_insn_shr(jd->func, (v1), (v2))
 
@@ -44,6 +58,59 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 
 #define SET_FIELD(ptrval, structname, fieldname, fieldtype, val) \
     jit_insn_store_relative(jd->func, (ptrval), offsetof(structname, fieldname), jit_insn_convert(jd->func, (val), (fieldtype), 0))
+
+#define INCREF(objval) \
+    SET_REFCNT((objval), ADD(GET_REFCNT((objval)), CONSTANT_INT(1)))
+
+#define GET_REFCNT(objval) \
+    GET_FIELD((objval), PyObject, ob_refcnt, jit_type_nint)
+
+#define SET_REFCNT(objval, val) \
+    SET_FIELD((objval), PyObject, ob_refcnt, jit_type_nint, (val))
+
+#define DECREF(_objval) do { \
+    jit_value_t _obj = (_objval); \
+    jit_label_t skip_dealloc = jit_label_undefined; \
+    jit_value_t new_refcount = SUBTRACT(GET_REFCNT(_obj), CONSTANT_INT(1)); \
+    SET_REFCNT(_obj, new_refcount); \
+    BRANCH_IF_NOT_ZERO(new_refcount, &skip_dealloc); \
+    CREATE_SIGNATURE(sig, jit_type_void, jit_type_void_ptr); \
+    CALL_NATIVE(sig, _Py_Dealloc, _obj); \
+    LABEL(&skip_dealloc); \
+} while (0);
+
+#define XDECREF(_objval) do { \
+    jit_value_t __obj = (_objval); \
+    jit_label_t skip_if_null = jit_label_undefined; \
+    BRANCH_IF_ZERO(__obj, &skip_if_null); \
+    DECREF(__obj); \
+    LABEL(&skip_if_null); \
+} while (0)
+
+#define PUSH(objval) do { \
+    jit_insn_store_relative(jd->func, jd->stack_pointer, 0, (objval)); \
+    jit_insn_store(jd->func, jd->stack_pointer, ADD(jd->stack_pointer, CONSTANT_INT(sizeof(PyObject*)))); \
+} while (0)
+
+#define POP() \
+    (jit_insn_store(jd->func, jd->stack_pointer, SUBTRACT(jd->stack_pointer, CONSTANT_INT(sizeof(PyObject*)))), \
+     LOAD(jd->stack_pointer, jit_type_void_ptr))
+
+
+#define GET_INDEX(ptrval, elemtype, indexval) \
+    jit_insn_load_elem(jd->func, (ptrval), (indexval), elemtype)
+
+#define SET_INDEX(ptrval, elemtype, indexval, val) \
+    jit_insn_store_elem(jd->func, (ptrval), (indexval), jit_insn_convert(jd->func, (val), (elemtype), 0))
+
+#define LOAD(ptrval, fieldtype) \
+    jit_insn_load_relative(jd->func, (ptrval), 0, (fieldtype))
+
+#define STORE(ptrval, fieldtype, val) \
+    jit_insn_store_relative(jd->func, (ptrval), 0, jit_insn_convert(jd->func, (val), (fieldtype), 0))
+
+#define CRASH() \
+    STORE(CONSTANT_PTR(0), jit_type_int, CONSTANT_INT(0));
 
 #define READ_NEXT_INSTR() \
     GET_FIELD(jd->ctx, EvalContext, next_instr, jit_type_void_ptr)
@@ -54,8 +121,26 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define SET_NEXT_INSTR(v) \
     SET_FIELD(jd->ctx, EvalContext, next_instr, jit_type_void_ptr, (v))
 
-/* IR for popping a stack element and returning the value */
+#define INIT_INFO(op) \
+    op##_INFO *info = (op##_INFO *) jd->priv[opcode]; \
+    int did_alloc_info = 0; \
+    if (info == NULL) { \
+        info = jd->priv[opcode] = PyMem_RawMalloc(sizeof(op##_INFO)); \
+        if (info == NULL) { \
+            Py_FatalError("Out of memory"); \
+        } \
+        did_alloc_info = 1; \
+    } \
+    if (did_alloc_info)
 
+#define FREE_INFO(opcode) do { \
+    if (jd->priv[opcode] != NULL) { \
+        PyMem_RawFree(jd->priv[opcode]); \
+    } \
+} while (0)
+
+#define FETCH_INFO(op) \
+    op##_INFO *info = (op##_INFO *) jd->priv[opcode];
 
 #define JIT_FOR(op) \
     void _PyJIT_EMIT_TARGET_##op (JITData *jd, int opcode, int oparg)
@@ -64,7 +149,7 @@ DECLARE_SPECIAL(NEXT_OPCODE);
     void _PyJIT_EMIT_TARGET_##op (JITData *jd, int opcode, int oparg) { \
         SET_FIELD(jd->ctx, EvalContext, stack_pointer, jit_type_void_ptr, jd->stack_pointer); \
         CREATE_SIGNATURE(instr_sig, jit_type_int, jit_type_void_ptr, jit_type_void_ptr, jit_type_int, jit_type_int, jit_type_int); \
-        CALL_NATIVE_WITH_RET(instr_sig, tmprv, opcode_function_table[opcode], jd->ctx, jd->f, CONSTANT_INT(opcode), CONSTANT_INT(oparg), /*jumpev=*/ CONSTANT_INT(0)); \
+        CALL_NATIVE_WITH_RET(tmprv, instr_sig, opcode_function_table[opcode], jd->ctx, jd->f, CONSTANT_INT(opcode), CONSTANT_INT(oparg), /*jumpev=*/ CONSTANT_INT(0)); \
         jit_insn_store(jd->func, jd->stack_pointer, GET_FIELD(jd->ctx, EvalContext, stack_pointer, jit_type_void_ptr)); \
         HANDLE_RV(tmprv); \
     }
@@ -73,10 +158,30 @@ DECLARE_SPECIAL(NEXT_OPCODE);
     void _PyJIT_EMIT_SPECIAL_##op (JITData *jd) { \
         SET_FIELD(jd->ctx, EvalContext, stack_pointer, jit_type_void_ptr, jd->stack_pointer); \
         CREATE_SIGNATURE(sig, jit_type_int, jit_type_void_ptr, jit_type_void_ptr, jit_type_int); \
-        CALL_NATIVE_WITH_RET(sig, tmprv, _PyEval_FUNC_JIT_TARGET_II_##op, jd->ctx, jd->f, /*jumpev=*/ CONSTANT_INT(0)); \
+        CALL_NATIVE_WITH_RET(tmprv, sig, _PyEval_FUNC_JIT_TARGET_II_##op, jd->ctx, jd->f, /*jumpev=*/ CONSTANT_INT(0)); \
         jit_insn_store(jd->func, jd->stack_pointer, GET_FIELD(jd->ctx, EvalContext, stack_pointer, jit_type_void_ptr)); \
         HANDLE_RV(tmprv); \
     }
+
+#define GETLOCAL(i) \
+    GET_INDEX(jd->fastlocals, jit_type_void_ptr, CONSTANT_INT(i))
+
+#define SETLOCAL(i, val) do { \
+    jit_value_t tmp = GETLOCAL(i); \
+    SET_INDEX(jd->fastlocals, jit_type_void_ptr, CONSTANT_INT(i), (val)); \
+    XDECREF(tmp); \
+} while (0)
+
+#define BRANCH_IF_ZERO(val, labelptr) \
+    jit_insn_branch_if_not(jd->func, (val), (labelptr))
+
+#define BRANCH_IF_NOT_ZERO(val, labelptr) \
+    jit_insn_branch_if(jd->func, (val), (labelptr))
+
+#define HANDLERS_FOR(op) \
+    void emit_exceptional_handlers_for_##op (JITData *jd, int opcode)
+
+#define INSTALL_HANDLERS(op)   jd->handlers[opcode] = emit_exceptional_handlers_for_##op
 
 JIT_AS_SPECIAL(NEXT_OPCODE)
 JIT_AS_SPECIAL(ERROR)
@@ -91,9 +196,61 @@ JIT_FOR(INVALID_OPCODE) {
 JIT_FOR(NOP) {
 }
 
-JIT_AS_SUBROUTINE(LOAD_FAST)
-JIT_AS_SUBROUTINE(LOAD_CONST)
-JIT_AS_SUBROUTINE(STORE_FAST)
+typedef struct {
+    jit_label_t err;
+    jit_value_t oparg;
+} LOAD_FAST_INFO;
+
+void format_exc_check_arg(PyObject *, const char *, PyObject *);
+#define UNBOUNDLOCAL_ERROR_MSG \
+    "local variable '%.200s' referenced before assignment"
+
+int handle_load_fast_unbound_local(EvalContext *ctx, int opcode, int oparg) {
+    format_exc_check_arg(PyExc_UnboundLocalError,
+                         UNBOUNDLOCAL_ERROR_MSG,
+                         PyTuple_GetItem(ctx->co->co_varnames, oparg));
+    return JIT_RC_ERROR;
+}
+
+HANDLERS_FOR(LOAD_FAST) {
+    FETCH_INFO(LOAD_FAST);
+    CREATE_SIGNATURE(sig, jit_type_int, jit_type_void_ptr, jit_type_int, jit_type_int);
+    LABEL(&info->err);
+    CALL_NATIVE_WITH_RET(rvtmp, sig, handle_load_fast_unbound_local, jd->ctx, CONSTANT_INT(opcode), info->oparg);
+    HANDLE_RV(rvtmp);
+}
+
+JIT_FOR(LOAD_FAST) {
+    INIT_INFO(LOAD_FAST) {
+        info->err = jit_label_undefined;
+        info->oparg = jit_value_create(jd->func, jit_type_int);
+        INSTALL_HANDLERS(LOAD_FAST);
+    }
+
+    jit_insn_store(jd->func, info->oparg, CONSTANT_INT(oparg));
+    jit_value_t v = GETLOCAL(oparg);
+    BRANCH_IF_ZERO(v, &info->err);
+    INCREF(v);
+    PUSH(v);
+    //FAST_DISPATCH();
+}
+
+JIT_FOR(LOAD_CONST) {
+    PyObject *obj = PyTuple_GET_ITEM(jd->co->co_consts, oparg);
+    assert(obj != NULL);
+    jit_value_t v = CONSTANT_PTR(obj);
+    INCREF(v);
+    PUSH(v);
+    //FAST_DISPATCH();
+}
+
+JIT_FOR(STORE_FAST) {
+    jit_value_t v = POP();
+    SETLOCAL(oparg, v);
+    //FAST_DISPATCH();
+}
+
+
 JIT_AS_SUBROUTINE(POP_TOP)
 JIT_AS_SUBROUTINE(ROT_TWO)
 JIT_AS_SUBROUTINE(ROT_THREE)

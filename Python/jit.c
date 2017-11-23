@@ -37,7 +37,12 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     jd->ctx = jit_value_get_param(jd->func, 0);
     jd->f = jit_value_get_param(jd->func, 1);
     jd->stack_pointer = jit_value_get_param(jd->func, 2);
-    jd->fastlocals = GET_FIELD(jd->f, PyFrameObject, f_localsplus, jit_type_void_ptr);
+    jd->fastlocals = ADD(jd->f, CONSTANT_NINT(offsetof(PyFrameObject, f_localsplus)));
+
+    for (i = 0; i < 256; i++) {
+        jd->priv[i] = NULL;
+        jd->handlers[i] = NULL;
+    }
 
     // We have to do signal check immediately upon function entry.
     CALL_SPECIAL(NEXT_OPCODE);
@@ -69,6 +74,18 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
 
         // Emit instruction
         opcode_emitter_table[opcode](jd, opcode, oparg);
+    }
+    CRASH();
+
+    /* Add extra handling sections */
+    for (i = 0; i < 256; i++) {
+        if (jd->handlers[i]) {
+            jd->handlers[i](jd, i);
+            // Force crash if handler continues
+            CRASH();
+        }
+        // Free private info
+        FREE_INFO(i);
     }
 
     /* Special sections */
@@ -119,6 +136,7 @@ _PyJIT_CodeGen(PyCodeObject *co) {
         return -1;
     }
     jit_context_build_start(gcontext);
+    jd->co = co;
 
     Py_ssize_t i;
     for (i = 0; i <= JIT_RC_EXIT; i++) {
