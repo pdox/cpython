@@ -2951,9 +2951,9 @@ _PyBytes_Resize(PyObject **pv, Py_ssize_t newsize)
         /* return early if newsize equals to v->ob_size */
         return 0;
     }
-    if (Py_REFCNT(v) != 1) {
-        goto error;
-    }
+    //if (Py_REFCNT(v) != 1) {
+    //    goto error;
+    //}
     /* XXX UNREF/NEWREF interface should be more symmetrical */
     _Py_DEC_REFTOTAL;
     _Py_ForgetReference(v);
@@ -3208,7 +3208,7 @@ _PyBytesWriter_CheckConsistency(_PyBytesWriter *writer, char *str)
             assert(PyByteArray_CheckExact(writer->buffer));
         else
             assert(PyBytes_CheckExact(writer->buffer));
-        assert(Py_REFCNT(writer->buffer) == 1);
+        //assert(Py_REFCNT(writer->buffer) == 1);
     }
 
     if (writer->use_bytearray) {

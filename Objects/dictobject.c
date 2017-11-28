@@ -871,6 +871,7 @@ _PyDict_HasOnlyStringKeys(PyObject *dict)
 
 #define MAINTAIN_TRACKING(mp, key, value) \
     do { \
+        break; \
         if (!_PyObject_GC_IS_TRACKED(mp)) { \
             if (_PyObject_GC_MAY_BE_TRACKED(key) || \
                 _PyObject_GC_MAY_BE_TRACKED(value)) { \

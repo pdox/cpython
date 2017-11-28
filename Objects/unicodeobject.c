@@ -901,7 +901,7 @@ resize_compact(PyObject *unicode, Py_ssize_t length)
     Py_ssize_t old_length = _PyUnicode_LENGTH(unicode);
 #endif
 
-    assert(unicode_modifiable(unicode));
+    //assert(unicode_modifiable(unicode));
     assert(PyUnicode_IS_READY(unicode));
     assert(PyUnicode_IS_COMPACT(unicode));
 
@@ -1386,11 +1386,13 @@ unicode_convert_wchar_to_ucs4(const wchar_t *begin, const wchar_t *end,
 static int
 unicode_check_modifiable(PyObject *unicode)
 {
+    /*
     if (!unicode_modifiable(unicode)) {
         PyErr_SetString(PyExc_SystemError,
                         "Cannot modify a string currently used");
         return -1;
     }
+*/
     return 0;
 }
 
@@ -1782,7 +1784,7 @@ unicode_dealloc(PyObject *unicode)
 
     case SSTATE_INTERNED_MORTAL:
         /* revive dead object temporarily for DelItem */
-        Py_REFCNT(unicode) = 3;
+        Py_SETREFCNT(unicode, 3);
         if (PyDict_DelItem(interned, unicode) != 0)
             Py_FatalError(
                 "deletion of interned string failed");
@@ -15196,7 +15198,7 @@ PyUnicode_InternInPlace(PyObject **p)
     }
     /* The two references in interned are not counted by refcnt.
        The deallocator will take care of this */
-    Py_REFCNT(s) -= 2;
+    Py_SETREFCNT(s, Py_REFCNT(s) - 2);
     _PyUnicode_STATE(s).interned = SSTATE_INTERNED_MORTAL;
 }
 
@@ -15254,11 +15256,11 @@ _Py_ReleaseInternedUnicodeStrings(void)
             /* XXX Shouldn't happen */
             break;
         case SSTATE_INTERNED_IMMORTAL:
-            Py_REFCNT(s) += 1;
+            Py_SETREFCNT(s, Py_REFCNT(s) + 1);
             immortal_size += PyUnicode_GET_LENGTH(s);
             break;
         case SSTATE_INTERNED_MORTAL:
-            Py_REFCNT(s) += 2;
+            Py_SETREFCNT(s, Py_REFCNT(s) + 2);
             mortal_size += PyUnicode_GET_LENGTH(s);
             break;
         default:

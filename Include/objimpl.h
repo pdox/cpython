@@ -293,6 +293,7 @@ extern PyGC_Head *_PyGC_generation0;
 /* Tell the GC to track this object.  NB: While the object is tracked the
  * collector it must be safe to call the ob_traverse method. */
 #define _PyObject_GC_TRACK(o) do { \
+    break; \
     PyGC_Head *g = _Py_AS_GC(o); \
     if (_PyGCHead_REFS(g) != _PyGC_REFS_UNTRACKED) \
         Py_FatalError("GC object already tracked"); \
@@ -308,6 +309,7 @@ extern PyGC_Head *_PyGC_generation0;
  * way to provoke memory errors if calling code is confused.
  */
 #define _PyObject_GC_UNTRACK(o) do { \
+    break; \
     PyGC_Head *g = _Py_AS_GC(o); \
     assert(_PyGCHead_REFS(g) != _PyGC_REFS_UNTRACKED); \
     _PyGCHead_SET_REFS(g, _PyGC_REFS_UNTRACKED); \

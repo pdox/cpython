@@ -84,7 +84,7 @@ whose size is determined when the object is allocated.
 
 #define PyObject_HEAD_INIT(type)        \
     { _PyObject_EXTRA_INIT              \
-    1, type },
+    type },
 
 #define PyVarObject_HEAD_INIT(type, size)       \
     { PyObject_HEAD_INIT(type) size },
@@ -105,7 +105,7 @@ whose size is determined when the object is allocated.
  */
 typedef struct _object {
     _PyObject_HEAD_EXTRA
-    Py_ssize_t ob_refcnt_hidden;
+    //Py_ssize_t ob_refcnt_hidden;
     struct _typeobject *ob_type_hidden;
 } PyObject;
 
@@ -114,12 +114,12 @@ typedef struct {
     Py_ssize_t ob_size; /* Number of items in variable part */
 } PyVarObject;
 
-#define Py_REFCNT(ob)           (((PyObject*)(ob))->ob_refcnt_hidden)
+#define Py_REFCNT(ob)           (10)
 #define Py_TYPE(ob)             (((PyObject*)(ob))->ob_type_hidden)
 #define Py_SIZE(ob)             (((PyVarObject*)(ob))->ob_size)
 
-#define Py_SETREFCNT(ob, v)    (  ((PyObject*)(ob))->ob_refcnt_hidden = (v) )
-#define Py_DECREFCNT(ob)       (--((PyObject*)(ob))->ob_refcnt_hidden )
+#define Py_SETREFCNT(ob, v)    ((void)(ob), (int)10)
+#define Py_DECREFCNT(ob)       ((void)(ob), (int)10)
 
 #ifndef Py_LIMITED_API
 /********************* String Literals ****************************************/
@@ -723,11 +723,8 @@ PyAPI_FUNC(Py_ssize_t) _Py_GetRefTotal(void);
 #define _Py_INC_REFTOTAL        _Py_RefTotal++
 #define _Py_DEC_REFTOTAL        _Py_RefTotal--
 #define _Py_REF_DEBUG_COMMA     ,
-#define _Py_CHECK_REFCNT(OP)                                    \
-{       if (((PyObject*)OP)->ob_refcnt_hidden < 0)                             \
-                _Py_NegativeRefcount(__FILE__, __LINE__,        \
-                                     (PyObject *)(OP));         \
-}
+#define _Py_CHECK_REFCNT(OP)
+
 /* Py_REF_DEBUG also controls the display of refcounts and memory block
  * allocations at the interactive prompt and at interpreter shutdown
  */
@@ -782,19 +779,8 @@ PyAPI_FUNC(void) _Py_Dealloc(PyObject *);
 #endif
 #endif /* !Py_TRACE_REFS */
 
-#define Py_INCREF(op) (                         \
-    _Py_INC_REFTOTAL  _Py_REF_DEBUG_COMMA       \
-    ((PyObject *)(op))->ob_refcnt_hidden++)
-
-#define Py_DECREF(op)                                   \
-    do {                                                \
-        PyObject *_py_decref_tmp = (PyObject *)(op);    \
-        if (_Py_DEC_REFTOTAL  _Py_REF_DEBUG_COMMA       \
-        --(_py_decref_tmp)->ob_refcnt_hidden != 0)             \
-            _Py_CHECK_REFCNT(_py_decref_tmp)            \
-        else                                            \
-            _Py_Dealloc(_py_decref_tmp);                \
-    } while (0)
+#define Py_INCREF(op)  ((void)op, (void)0)
+#define Py_DECREF(op)  do { (void)op; } while (0)
 
 /* Safely decref `op` and set `op` to NULL, especially useful in tp_clear
  * and tp_dealloc implementations.

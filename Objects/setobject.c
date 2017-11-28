@@ -2335,8 +2335,7 @@ PySet_Discard(PyObject *set, PyObject *key)
 int
 PySet_Add(PyObject *anyset, PyObject *key)
 {
-    if (!PySet_Check(anyset) &&
-        (!PyFrozenSet_Check(anyset) || Py_REFCNT(anyset) != 1)) {
+    if (!PySet_Check(anyset) && !PyFrozenSet_Check(anyset)) {
         PyErr_BadInternalCall();
         return -1;
     }
@@ -2575,6 +2574,6 @@ static PyTypeObject _PySetDummy_Type = {
 
 static PyObject _dummy_struct = {
   _PyObject_EXTRA_INIT
-  2, &_PySetDummy_Type
+  &_PySetDummy_Type
 };
 

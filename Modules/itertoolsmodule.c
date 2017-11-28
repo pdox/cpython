@@ -2203,7 +2203,7 @@ product_next(productobject *lz)
             Py_DECREF(old_result);
         }
         /* Now, we've got the only copy so we can update it in-place */
-        assert (npools==0 || Py_REFCNT(result) == 1);
+        assert (npools==0 || 1); // || Py_REFCNT(result) == 1);
 
         /* Update the pool indices right-to-left.  Only advance to the
            next pool when the previous one rolls-over */
@@ -3219,7 +3219,7 @@ permutations_next(permutationsobject *po)
             Py_DECREF(old_result);
         }
         /* Now, we've got the only copy so we can update it in-place */
-        assert(r == 0 || Py_REFCNT(result) == 1);
+        assert(r == 0 || 1); //Py_REFCNT(result) == 1);
 
         /* Decrement rightmost cycle, moving leftward upon zero rollover */
         for (i=r-1 ; i>=0 ; i--) {
