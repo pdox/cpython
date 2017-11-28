@@ -192,7 +192,7 @@ extern "C" {
    function will delete the reference from this dictionary.
 
    Another way to look at this is that to say that the actual reference
-   count of a string is:  s->ob_refcnt + (s->state ? 2 : 0)
+   count of a string is:  Py_REFCNT(s) + (s->state ? 2 : 0)
 */
 static PyObject *interned = NULL;
 

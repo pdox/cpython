@@ -105,8 +105,8 @@ whose size is determined when the object is allocated.
  */
 typedef struct _object {
     _PyObject_HEAD_EXTRA
-    Py_ssize_t ob_refcnt;
-    struct _typeobject *ob_type;
+    Py_ssize_t ob_refcnt_hidden;
+    struct _typeobject *ob_type_hidden;
 } PyObject;
 
 typedef struct {
@@ -114,9 +114,12 @@ typedef struct {
     Py_ssize_t ob_size; /* Number of items in variable part */
 } PyVarObject;
 
-#define Py_REFCNT(ob)           (((PyObject*)(ob))->ob_refcnt)
-#define Py_TYPE(ob)             (((PyObject*)(ob))->ob_type)
+#define Py_REFCNT(ob)           (((PyObject*)(ob))->ob_refcnt_hidden)
+#define Py_TYPE(ob)             (((PyObject*)(ob))->ob_type_hidden)
 #define Py_SIZE(ob)             (((PyVarObject*)(ob))->ob_size)
+
+#define Py_SETREFCNT(ob, v)    (  ((PyObject*)(ob))->ob_refcnt_hidden = (v) )
+#define Py_DECREFCNT(ob)       (--((PyObject*)(ob))->ob_refcnt_hidden )
 
 #ifndef Py_LIMITED_API
 /********************* String Literals ****************************************/
@@ -721,7 +724,7 @@ PyAPI_FUNC(Py_ssize_t) _Py_GetRefTotal(void);
 #define _Py_DEC_REFTOTAL        _Py_RefTotal--
 #define _Py_REF_DEBUG_COMMA     ,
 #define _Py_CHECK_REFCNT(OP)                                    \
-{       if (((PyObject*)OP)->ob_refcnt < 0)                             \
+{       if (((PyObject*)OP)->ob_refcnt_hidden < 0)                             \
                 _Py_NegativeRefcount(__FILE__, __LINE__,        \
                                      (PyObject *)(OP));         \
 }
@@ -781,13 +784,13 @@ PyAPI_FUNC(void) _Py_Dealloc(PyObject *);
 
 #define Py_INCREF(op) (                         \
     _Py_INC_REFTOTAL  _Py_REF_DEBUG_COMMA       \
-    ((PyObject *)(op))->ob_refcnt++)
+    ((PyObject *)(op))->ob_refcnt_hidden++)
 
 #define Py_DECREF(op)                                   \
     do {                                                \
         PyObject *_py_decref_tmp = (PyObject *)(op);    \
         if (_Py_DEC_REFTOTAL  _Py_REF_DEBUG_COMMA       \
-        --(_py_decref_tmp)->ob_refcnt != 0)             \
+        --(_py_decref_tmp)->ob_refcnt_hidden != 0)             \
             _Py_CHECK_REFCNT(_py_decref_tmp)            \
         else                                            \
             _Py_Dealloc(_py_decref_tmp);                \
