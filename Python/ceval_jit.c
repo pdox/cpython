@@ -152,10 +152,10 @@ int unpack_iterable(PyObject *, int, int, PyObject **);
 //----------------------------------------------------------------------------------
 
 #define TARGET_FUNC(op) \
-    int _PyEval_FUNC_JIT_TARGET_##op (EvalContext *ctx, PyFrameObject *f, int opcode, int oparg, int jumpev)
+    int _PyEval_FUNC_JIT_TARGET_##op (EvalContext *ctx, PyFrameObject *f, int next_instr_index, int opcode, int oparg, int jumpev)
 
 #define TARGET_SPECIAL(op) \
-    int _PyEval_FUNC_JIT_TARGET_II_##op(EvalContext *ctx, PyFrameObject *f, int jumpev)
+    int _PyEval_FUNC_JIT_TARGET_II_##op(EvalContext *ctx, PyFrameObject *f, int next_instr_index, int jumpev)
 
 #define JIT_TARGET_EXPORT(f)
 
@@ -165,39 +165,42 @@ int unpack_iterable(PyObject *, int, int, PyObject **);
 #undef DISPATCH
 #undef FAST_DISPATCH
 
+
+#define PREPARE_NEXT_INSTR_INDEX()  if (!jumpev) ctx->next_instr_index = next_instr_index;
+
 #define DISPATCH() do { \
     if (_Py_atomic_load_relaxed(&_PyRuntime.ceval.eval_breaker)) { \
+        PREPARE_NEXT_INSTR_INDEX(); \
         return JIT_RC_NEXT_OPCODE; \
     } else { \
         return jumpev ? JIT_RC_JUMP : JIT_RC_FLOW; \
     } \
 } while (0)
 
-
-#define FAST_DISPATCH()          return jumpev ? JIT_RC_JUMP : JIT_RC_FLOW
-#define GOTO_FAST_NEXT_OPCODE()  return jumpev ? JIT_RC_JUMP : JIT_RC_FLOW
-#define GOTO_FAST_YIELD()        return JIT_RC_FAST_YIELD
-#define GOTO_FAST_BLOCK_END()    return JIT_RC_FAST_BLOCK_END
-#define GOTO_ERROR()             return JIT_RC_ERROR
-#define GOTO_UNWIND_CLEANUP()    return JIT_RC_UNWIND_CLEANUP
-#define GOTO_NEXT_OPCODE()       return JIT_RC_NEXT_OPCODE
-#define GOTO_EXIT_EVAL_FRAME()   return JIT_RC_EXIT
+#define FAST_DISPATCH()          do { return jumpev ? JIT_RC_JUMP : JIT_RC_FLOW; } while (0)
+#define GOTO_FAST_NEXT_OPCODE()  do { return jumpev ? JIT_RC_JUMP : JIT_RC_FLOW; } while (0)
+#define GOTO_FAST_YIELD()        do { PREPARE_NEXT_INSTR_INDEX(); return JIT_RC_FAST_YIELD; } while (0)
+#define GOTO_FAST_BLOCK_END()    do { PREPARE_NEXT_INSTR_INDEX(); return JIT_RC_FAST_BLOCK_END; } while (0)
+#define GOTO_ERROR()             do { PREPARE_NEXT_INSTR_INDEX(); return JIT_RC_ERROR; } while (0)
+#define GOTO_UNWIND_CLEANUP()    do { PREPARE_NEXT_INSTR_INDEX(); return JIT_RC_UNWIND_CLEANUP; } while (0)
+#define GOTO_NEXT_OPCODE()       do { PREPARE_NEXT_INSTR_INDEX(); return JIT_RC_NEXT_OPCODE; } while (0)
+#define GOTO_EXIT_EVAL_FRAME()   do { PREPARE_NEXT_INSTR_INDEX(); return JIT_RC_EXIT; } while (0)
 
 
 #undef INSTR_OFFSET
-#define INSTR_OFFSET()  \
-    (sizeof(_Py_CODEUNIT) * (int)(ctx->next_instr - ctx->first_instr))
+#define INSTR_OFFSET()          (sizeof(_Py_CODEUNIT) * next_instr_index)
+#define NEXT_INSTR()            (ctx->first_instr + next_instr_index)
 
 #undef NEXTOPARG
 #undef JUMPTO
 #define JUMPTO(x) do { \
-    ctx->next_instr = ctx->first_instr + (x) / sizeof(_Py_CODEUNIT); \
+    ctx->next_instr_index = (x)/sizeof(_Py_CODEUNIT); \
     jumpev = 1; \
 } while (0)
 
 #undef JUMPBY
 #define JUMPBY(x) do { \
-    ctx->next_instr += (x) / sizeof(_Py_CODEUNIT); \
+    ctx->next_instr_index = next_instr_index + (x)/sizeof(_Py_CODEUNIT); \
     jumpev = 1; \
 } while (0)
 
@@ -295,8 +298,8 @@ TARGET_SPECIAL(NEXT_OPCODE) {
        Py_MakePendingCalls() above. */
 
     if (_Py_atomic_load_relaxed(&_PyRuntime.ceval.eval_breaker)) {
-        if (_Py_OPCODE(*ctx->next_instr) == SETUP_FINALLY ||
-            _Py_OPCODE(*ctx->next_instr) == YIELD_FROM) {
+        if (_Py_OPCODE(*NEXT_INSTR()) == SETUP_FINALLY ||
+            _Py_OPCODE(*NEXT_INSTR()) == YIELD_FROM) {
             /* Two cases where we skip running signal handlers and other
                pending calls:
                - If we're about to enter the try: of a try/finally (not
@@ -463,7 +466,6 @@ TARGET_SPECIAL(FAST_BLOCK_END) {
         GOTO_UNWIND_CLEANUP();
 
     assert(!PyErr_Occurred());
-    (void)jumpev;
     GOTO_NEXT_OPCODE();
 }
 JIT_TARGET_EXPORT(II_FAST_BLOCK_END)
@@ -750,7 +752,7 @@ TARGET_FUNC(BINARY_ADD) {
        speedup on microbenchmarks. */
     if (PyUnicode_CheckExact(left) &&
              PyUnicode_CheckExact(right)) {
-        sum = unicode_concatenate(left, right, FRAMEPTR(), ctx->next_instr);
+        sum = unicode_concatenate(left, right, FRAMEPTR(), NEXT_INSTR());
         /* unicode_concatenate consumed the ref to left */
     }
     else {
@@ -965,7 +967,7 @@ TARGET_FUNC(INPLACE_ADD) {
     PyObject *left = TOP();
     PyObject *sum;
     if (PyUnicode_CheckExact(left) && PyUnicode_CheckExact(right)) {
-        sum = unicode_concatenate(left, right, FRAMEPTR(), ctx->next_instr);
+        sum = unicode_concatenate(left, right, FRAMEPTR(), NEXT_INSTR());
         /* unicode_concatenate consumed the ref to left */
     }
     else {

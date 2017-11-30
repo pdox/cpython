@@ -9,9 +9,9 @@
 #include "internal/jit.h"
 #include <jit/jit.h>
 
-typedef int (*PyJITTargetFunction)(EvalContext *ctx, PyFrameObject *f, int opcode, int oparg, int jumpev);
+typedef int (*PyJITTargetFunction)(EvalContext *ctx, PyFrameObject *f, int next_instr_index, int opcode, int oparg, int jumpev);
 
-int _PyEval_FUNC_JIT__unknown_opcode(EvalContext *ctx, PyFrameObject *f, int opcode, int oparg, int jumpev) {
+int _PyEval_FUNC_JIT__unknown_opcode(EvalContext *ctx, PyFrameObject *f, int next_instr_index, int opcode, int oparg, int jumpev) {
     assert(0);
 }
 
@@ -20,8 +20,16 @@ int _PyEval_FUNC_JIT__unknown_opcode(EvalContext *ctx, PyFrameObject *f, int opc
 #include "opcode_emitter_table.h"
 
 
-#define CALL_SPECIAL(op)   _PyJIT_EMIT_SPECIAL_##op (jd)
-
+PyJITSpecialEmitterFunction special_emitter_table[] = {
+        _PyJIT_EMIT_SPECIAL_FLOW,
+        _PyJIT_EMIT_SPECIAL_JUMP,
+        _PyJIT_EMIT_SPECIAL_FAST_YIELD,
+        _PyJIT_EMIT_SPECIAL_FAST_BLOCK_END,
+        _PyJIT_EMIT_SPECIAL_ERROR,
+        _PyJIT_EMIT_SPECIAL_UNWIND_CLEANUP,
+        _PyJIT_EMIT_SPECIAL_NEXT_OPCODE,
+        _PyJIT_EMIT_SPECIAL_EXIT
+};
 
 static void
 translate_bytecode(JITData *jd, PyCodeObject *co)
@@ -45,19 +53,19 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     }
 
     // We have to do signal check immediately upon function entry.
-    CALL_SPECIAL(NEXT_OPCODE);
+    special_emitter_table[JIT_RC_NEXT_OPCODE](jd);
 
     if (is_gen) {
         /* jump to next_instr */
-        jit_value_t v_index = SHIFT_RIGHT(INSTR_OFFSET(), CONSTANT_INT(1));
+        jit_value_t v_index = GET_FIELD(jd->ctx, EvalContext, next_instr_index, jit_type_int);
         jit_insn_jump_table(jd->func, v_index, jd->jmptab, inst_count);
     }
 
     for (i = 0; i < inst_count; i++) {
-        int istart = i;
         int opcode = _Py_OPCODE(code[i]);
         int oparg = _Py_OPARG(code[i]);
         LABEL(&jd->jmptab[i]);
+        JIT_NOP();
 
         while (opcode == EXTENDED_ARG) {
             ++i;
@@ -67,13 +75,10 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
         }
 
         // Set f->f_lasti
-        SET_FIELD(jd->f, PyFrameObject, f_lasti, jit_type_int, CONSTANT_INT(istart * sizeof(_Py_CODEUNIT)));
-
-        // Increment next_instr
-        SET_NEXT_INSTR( ADD(READ_NEXT_INSTR(), CONSTANT_INT( sizeof(_Py_CODEUNIT) * (i+1 - istart) )));
+        SET_FIELD(jd->f, PyFrameObject, f_lasti, jit_type_int, CONSTANT_INT(i * sizeof(_Py_CODEUNIT)));
 
         // Emit instruction
-        opcode_emitter_table[opcode](jd, opcode, oparg);
+        opcode_emitter_table[opcode](jd, i + 1, opcode, oparg);
     }
     CRASH();
 
@@ -88,38 +93,18 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
         FREE_INFO(i);
     }
 
-    /* Special sections */
-
-    // Index 0 is special, it dispatches to the others.
-    LABEL(&jd->j_special[0]);
-    jit_insn_jump_table(jd->func, jd->rv, jd->j_special, JIT_RC_EXIT + 1);
-
-    LABEL(&jd->j_special[JIT_RC_JUMP]);
-    jit_value_t v_index = SHIFT_RIGHT(INSTR_OFFSET(), CONSTANT_INT(1));
-    jit_insn_jump_table(jd->func, v_index, jd->jmptab, inst_count);
-
-    LABEL(&jd->j_special[JIT_RC_FAST_YIELD]);
-    CALL_SPECIAL(FAST_YIELD);
-    BRANCH(&jd->j_special[JIT_RC_JUMP]);
-
-    LABEL(&jd->j_special[JIT_RC_FAST_BLOCK_END]);
-    CALL_SPECIAL(FAST_BLOCK_END);
-    BRANCH(&jd->j_special[JIT_RC_JUMP]);
-
-    LABEL(&jd->j_special[JIT_RC_ERROR]);
-    CALL_SPECIAL(ERROR);
-    BRANCH(&jd->j_special[JIT_RC_JUMP]);
-
-    LABEL(&jd->j_special[JIT_RC_UNWIND_CLEANUP]);
-    CALL_SPECIAL(UNWIND_CLEANUP);
-    BRANCH(&jd->j_special[JIT_RC_JUMP]);
-
-    LABEL(&jd->j_special[JIT_RC_NEXT_OPCODE]);
-    CALL_SPECIAL(NEXT_OPCODE);
-    BRANCH(&jd->j_special[JIT_RC_JUMP]);
-
-    LABEL(&jd->j_special[JIT_RC_EXIT]);
-    jit_insn_return(jd->func, NULL);
+    /* Special sections. While in a special section, ctx->next_instr_index must
+       be valid and point to the next instruction to execute (for next dispatch).
+       There are two entrypoints to each special section. One for instructions,
+       and one for coming from another special section.
+     */
+    for (i = 0; i <= JIT_RC_EXIT; i++) {
+        LABEL(&jd->j_special[i]);
+        SET_NEXT_INSTR_INDEX();
+        LABEL(&jd->j_special_internal[i]);
+        special_emitter_table[i](jd);
+        BRANCH(&jd->j_special_internal[JIT_RC_JUMP]);
+    }
 }
 
 jit_context_t gcontext = NULL;
@@ -141,6 +126,7 @@ _PyJIT_CodeGen(PyCodeObject *co) {
     Py_ssize_t i;
     for (i = 0; i <= JIT_RC_EXIT; i++) {
         jd->j_special[i] = jit_label_undefined;
+        jd->j_special_internal[i] = jit_label_undefined;
     }
     for (i = 0; i < inst_count; i++) {
         jd->jmptab[i] = jit_label_undefined;

@@ -5199,10 +5199,11 @@ PyJIT_EvalFrame(PyFrameObject *f) {
     assert(_Py_IS_ALIGNED(PyBytes_AS_STRING(ctx->co->co_code), sizeof(_Py_CODEUNIT)));
     ctx->first_instr = (_Py_CODEUNIT *) PyBytes_AS_STRING(ctx->co->co_code);
     assert(f->f_lasti >= -1);
-    ctx->next_instr = ctx->first_instr;
+
+    ctx->next_instr_index = 0;
     if (f->f_lasti >= 0) {
         assert(f->f_lasti % sizeof(_Py_CODEUNIT) == 0);
-        ctx->next_instr += f->f_lasti / sizeof(_Py_CODEUNIT) + 1;
+        ctx->next_instr_index = f->f_lasti / sizeof(_Py_CODEUNIT) + 1;
     }
     stack_pointer = f->f_stacktop;
     assert(stack_pointer != NULL);

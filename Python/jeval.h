@@ -1,3 +1,6 @@
+#include "Include/internal/ceval.h"
+#include "Include/internal/pystate.h"
+
 /* Special pseudo-instructions */
 #define DECLARE_SPECIAL(name)  int _PyEval_FUNC_JIT_TARGET_II_##name (EvalContext *ctx, PyFrameObject *f, int jumpev)
 
@@ -10,6 +13,13 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define CREATE_SIGNATURE(sigvar, ret_type, ...) \
     jit_type_t sigvar##_args[] = { __VA_ARGS__ }; \
     jit_type_t sigvar = jit_type_create_signature(jit_abi_cdecl, ret_type, sigvar##_args, sizeof(sigvar##_args)/sizeof(jit_type_t), 1);
+
+#define CALL_INDIRECT_WITH_RET(retvar, sig, funcval, ...) \
+    jit_value_t retvar; \
+    do { \
+        jit_value_t call_args[] = { __VA_ARGS__ }; \
+        retvar = jit_insn_call_indirect(jd->func, (funcval), sig, call_args, sizeof(call_args)/sizeof(jit_value_t), JIT_CALL_NOTHROW); \
+    } while (0)
 
 #define CALL_NATIVE(sig, nfunc, ...) do { \
     jit_value_t call_args[] = { __VA_ARGS__ }; \
@@ -28,18 +38,22 @@ DECLARE_SPECIAL(NEXT_OPCODE);
     jit_insn_branch_if(jd->func, jd->rv, &jd->j_special[0]); \
 } while (0)
 
+#define HANDLE_RV_INTERNAL(inval) do { \
+    jit_insn_store(jd->func, jd->rv, (inval)); \
+    jit_insn_branch_if(jd->func, jd->rv, &jd->j_special_internal[0]); \
+} while (0)
+
 #define LABEL(ptr)    jit_insn_label(jd->func, (ptr))
 
 #define BRANCH(ptr)   jit_insn_branch(jd->func, (ptr))
+
+#define JIT_NOP()     jit_insn_nop(jd->func)
 
 #define ADD(v1, v2) \
     jit_insn_add(jd->func, (v1), (v2))
 
 #define SUBTRACT(v1, v2) \
     jit_insn_sub(jd->func, (v1), (v2))
-
-#define INSTR_OFFSET() \
-    SUBTRACT(READ_NEXT_INSTR(), READ_FIRST_INSTR())
 
 #define CONSTANT_INT(n) \
     jit_value_create_nint_constant(jd->func, jit_type_int, (n))
@@ -92,6 +106,12 @@ DECLARE_SPECIAL(NEXT_OPCODE);
     jit_insn_store(jd->func, jd->stack_pointer, ADD(jd->stack_pointer, CONSTANT_INT(sizeof(PyObject*)))); \
 } while (0)
 
+#define STACKADJ(n) \
+    jit_insn_store(jd->func, jd->stack_pointer, ADD(jd->stack_pointer, CONSTANT_INT(n * sizeof(PyObject*))))
+
+#define TOP() \
+     LOAD(SUBTRACT(jd->stack_pointer, CONSTANT_INT(sizeof(PyObject*))), jit_type_void_ptr)
+
 #define POP() \
     (jit_insn_store(jd->func, jd->stack_pointer, SUBTRACT(jd->stack_pointer, CONSTANT_INT(sizeof(PyObject*)))), \
      LOAD(jd->stack_pointer, jit_type_void_ptr))
@@ -112,14 +132,16 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define CRASH() \
     STORE(CONSTANT_PTR(0), jit_type_int, CONSTANT_INT(0));
 
-#define READ_NEXT_INSTR() \
-    GET_FIELD(jd->ctx, EvalContext, next_instr, jit_type_void_ptr)
+// TODO: This needs to be adjusted depending on the configuration of _Py_atomic_int
+#define LOAD_EVAL_BREAKER() \
+    LOAD(CONSTANT_PTR(&_PyRuntime.ceval.eval_breaker._value), jit_type_int)
 
-#define READ_FIRST_INSTR() \
-    GET_FIELD(jd->ctx, EvalContext, first_instr, jit_type_void_ptr)
-
-#define SET_NEXT_INSTR(v) \
-    SET_FIELD(jd->ctx, EvalContext, next_instr, jit_type_void_ptr, (v))
+/* Check eval breaker, and jump to handler if set. This can only be used
+   in instructions with no jumping, since it assumes the next instruction
+   is computed using f_lasti.
+ */
+#define CHECK_EVAL_BREAKER() \
+    BRANCH_IF_NOT_ZERO(LOAD_EVAL_BREAKER(), &jd->j_special[JIT_RC_NEXT_OPCODE]);
 
 #define INIT_INFO(op) \
     op##_INFO *info = (op##_INFO *) jd->priv[opcode]; \
@@ -143,24 +165,42 @@ DECLARE_SPECIAL(NEXT_OPCODE);
     op##_INFO *info = (op##_INFO *) jd->priv[opcode];
 
 #define JIT_FOR(op) \
-    void _PyJIT_EMIT_TARGET_##op (JITData *jd, int opcode, int oparg)
+    void _PyJIT_EMIT_TARGET_##op (JITData *jd, int next_instr_index, int opcode, int oparg)
 
 #define JIT_AS_SUBROUTINE(op) \
-    void _PyJIT_EMIT_TARGET_##op (JITData *jd, int opcode, int oparg) { \
+    void _PyJIT_EMIT_TARGET_##op (JITData *jd, int next_instr_index, int opcode, int oparg) { \
         SET_FIELD(jd->ctx, EvalContext, stack_pointer, jit_type_void_ptr, jd->stack_pointer); \
-        CREATE_SIGNATURE(instr_sig, jit_type_int, jit_type_void_ptr, jit_type_void_ptr, jit_type_int, jit_type_int, jit_type_int); \
-        CALL_NATIVE_WITH_RET(tmprv, instr_sig, opcode_function_table[opcode], jd->ctx, jd->f, CONSTANT_INT(opcode), CONSTANT_INT(oparg), /*jumpev=*/ CONSTANT_INT(0)); \
+        CREATE_SIGNATURE(instr_sig, jit_type_int, jit_type_void_ptr, jit_type_void_ptr, jit_type_int, jit_type_int, jit_type_int, jit_type_int); \
+        CALL_NATIVE_WITH_RET(tmprv, instr_sig, opcode_function_table[opcode], jd->ctx, jd->f, CONSTANT_INT(next_instr_index), CONSTANT_INT(opcode), CONSTANT_INT(oparg), /*jumpev=*/ CONSTANT_INT(0)); \
         jit_insn_store(jd->func, jd->stack_pointer, GET_FIELD(jd->ctx, EvalContext, stack_pointer, jit_type_void_ptr)); \
-        HANDLE_RV(tmprv); \
+        HANDLE_RV_INTERNAL(tmprv); \
     }
 
-#define JIT_AS_SPECIAL(op) \
+/* Set next_instr_index based on the current f_lasti. This must be done
+   when a regular instruction jumps to a special handler. */
+#define SET_NEXT_INSTR_INDEX() do { \
+        /* ctx->next_instr_index = (f->f_lasti / 2) + 1 */ \
+        jit_value_t f_lasti_val = GET_FIELD(jd->f, PyFrameObject, f_lasti, jit_type_int); \
+        jit_value_t computed_next_instr_index = ADD(SHIFT_RIGHT(f_lasti_val, CONSTANT_INT(1)), CONSTANT_INT(1)); \
+        SET_FIELD(jd->ctx, EvalContext, next_instr_index, jit_type_int, computed_next_instr_index); \
+} while (0)
+
+#define JIT_SPECIAL(op) \
+    void _PyJIT_EMIT_SPECIAL_##op (JITData *jd)
+
+#define GET_CTX_NEXT_INSTR_INDEX() \
+    GET_FIELD(jd->ctx, EvalContext, next_instr_index, jit_type_int)
+
+#define SET_CTX_NEXT_INSTR_INDEX(val) \
+    SET_FIELD(jd->ctx, EvalContext, next_instr_index, jit_type_int, (val))
+
+#define JIT_SPECIAL_AS_SUBROUTINE(op) \
     void _PyJIT_EMIT_SPECIAL_##op (JITData *jd) { \
         SET_FIELD(jd->ctx, EvalContext, stack_pointer, jit_type_void_ptr, jd->stack_pointer); \
-        CREATE_SIGNATURE(sig, jit_type_int, jit_type_void_ptr, jit_type_void_ptr, jit_type_int); \
-        CALL_NATIVE_WITH_RET(tmprv, sig, _PyEval_FUNC_JIT_TARGET_II_##op, jd->ctx, jd->f, /*jumpev=*/ CONSTANT_INT(0)); \
+        CREATE_SIGNATURE(sig, jit_type_int, jit_type_void_ptr, jit_type_void_ptr, jit_type_int, jit_type_int); \
+        CALL_NATIVE_WITH_RET(tmprv, sig, _PyEval_FUNC_JIT_TARGET_II_##op, jd->ctx, jd->f, GET_CTX_NEXT_INSTR_INDEX(), /*jumpev=*/ CONSTANT_INT(0)); \
         jit_insn_store(jd->func, jd->stack_pointer, GET_FIELD(jd->ctx, EvalContext, stack_pointer, jit_type_void_ptr)); \
-        HANDLE_RV(tmprv); \
+        HANDLE_RV_INTERNAL(tmprv); \
     }
 
 #define GETLOCAL(i) \
@@ -178,16 +218,57 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define BRANCH_IF_NOT_ZERO(val, labelptr) \
     jit_insn_branch_if(jd->func, (val), (labelptr))
 
+#define EMIT_JUMP(check_eval_breaker) do { \
+    if (check_eval_breaker) { \
+        BRANCH_IF_ZERO(LOAD_EVAL_BREAKER(), &jd->jmptab[next_instr_index]); \
+        SET_CTX_NEXT_INSTR_INDEX(CONSTANT_INT(next_instr_index)); \
+        BRANCH(&jd->j_special_internal[JIT_RC_NEXT_OPCODE]); \
+    } else { \
+        BRANCH(&jd->jmptab[next_instr_index]); \
+    } \
+} while (0)
+
+/* Emits immediate jump. */
+#define JUMPTO(x, check_eval_breaker) do { \
+    next_instr_index = (x) / sizeof(_Py_CODEUNIT); \
+    EMIT_JUMP(check_eval_breaker); \
+} while (0)
+
+/* Emits immediate jump. Does not check eval_breaker. */
+#define JUMPBY(x, check_eval_breaker) do { \
+    next_instr_index += (x) / sizeof(_Py_CODEUNIT); \
+    EMIT_JUMP(check_eval_breaker); \
+} while (0)
+
 #define HANDLERS_FOR(op) \
     void emit_exceptional_handlers_for_##op (JITData *jd, int opcode)
 
 #define INSTALL_HANDLERS(op)   jd->handlers[opcode] = emit_exceptional_handlers_for_##op
 
-JIT_AS_SPECIAL(NEXT_OPCODE)
-JIT_AS_SPECIAL(ERROR)
-JIT_AS_SPECIAL(FAST_BLOCK_END)
-JIT_AS_SPECIAL(FAST_YIELD)
-JIT_AS_SPECIAL(UNWIND_CLEANUP)
+/* Unlike PyErr_Occurred, this assumes tstate != NULL */
+#define PYERR_OCCURRED()  GET_FIELD(TSTATE(), PyThreadState, curexc_type, jit_type_void_ptr)
+#define TSTATE()    LOAD(CONSTANT_PTR(&_PyRuntime.gilstate.tstate_current._value), jit_type_void_ptr)
+
+JIT_SPECIAL(FLOW) {
+    // Index 0 is special, it dispatches to the other handlers based on 'rv'
+    jit_insn_jump_table(jd->func, jd->rv, jd->j_special_internal, JIT_RC_EXIT + 1);
+}
+
+JIT_SPECIAL(JUMP) {
+    Py_ssize_t inst_count = PyBytes_GET_SIZE(jd->co->co_code)/sizeof(_Py_CODEUNIT);
+    jit_value_t index_val = GET_CTX_NEXT_INSTR_INDEX();
+    jit_insn_jump_table(jd->func, index_val, jd->jmptab, inst_count);
+}
+
+JIT_SPECIAL_AS_SUBROUTINE(NEXT_OPCODE)
+JIT_SPECIAL_AS_SUBROUTINE(ERROR)
+JIT_SPECIAL_AS_SUBROUTINE(FAST_BLOCK_END)
+JIT_SPECIAL_AS_SUBROUTINE(FAST_YIELD)
+JIT_SPECIAL_AS_SUBROUTINE(UNWIND_CLEANUP)
+
+JIT_SPECIAL(EXIT) {
+    jit_insn_return(jd->func, NULL);
+}
 
 JIT_FOR(INVALID_OPCODE) {
     Py_UNREACHABLE();
@@ -226,7 +307,6 @@ JIT_FOR(LOAD_FAST) {
         info->oparg = jit_value_create(jd->func, jit_type_int);
         INSTALL_HANDLERS(LOAD_FAST);
     }
-
     jit_insn_store(jd->func, info->oparg, CONSTANT_INT(oparg));
     jit_value_t v = GETLOCAL(oparg);
     BRANCH_IF_ZERO(v, &info->err);
@@ -344,10 +424,46 @@ JIT_AS_SUBROUTINE(POP_JUMP_IF_FALSE)
 JIT_AS_SUBROUTINE(POP_JUMP_IF_TRUE)
 JIT_AS_SUBROUTINE(JUMP_IF_FALSE_OR_POP)
 JIT_AS_SUBROUTINE(JUMP_IF_TRUE_OR_POP)
-JIT_AS_SUBROUTINE(JUMP_ABSOLUTE)
+
+
+JIT_FOR(JUMP_ABSOLUTE) {
+    JUMPTO(oparg, 1);
+}
+
 JIT_AS_SUBROUTINE(GET_ITER)
 JIT_AS_SUBROUTINE(GET_YIELD_FROM_ITER)
-JIT_AS_SUBROUTINE(FOR_ITER)
+
+
+JIT_FOR(FOR_ITER) {
+    jit_label_t handle_null = jit_label_undefined;
+    jit_label_t cleanup = jit_label_undefined;
+    jit_label_t next_instruction = jit_label_undefined;
+    jit_value_t iter_obj = TOP();
+    jit_value_t type_obj = GET_FIELD(iter_obj, PyObject, ob_type, jit_type_void_ptr);
+    jit_value_t tp_iternext = GET_FIELD(type_obj, PyTypeObject, tp_iternext, jit_type_void_ptr);
+    CREATE_SIGNATURE(sig, jit_type_void_ptr, jit_type_void_ptr);
+    CALL_INDIRECT_WITH_RET(next, sig, tp_iternext, iter_obj);
+    BRANCH_IF_ZERO(next, &handle_null);
+    PUSH(next);
+    BRANCH(&next_instruction);
+
+    /* Handle NULL case */
+    LABEL(&handle_null);
+    BRANCH_IF_ZERO(PYERR_OCCURRED(), &cleanup);
+    CREATE_SIGNATURE(sig2, jit_type_int, jit_type_void_ptr);
+    CALL_NATIVE_WITH_RET(ret, sig2, PyErr_ExceptionMatches, CONSTANT_PTR(PyExc_StopIteration));
+    BRANCH_IF_ZERO(ret, &jd->j_special[JIT_RC_ERROR]);
+    CREATE_SIGNATURE(sig3, jit_type_void);
+    CALL_NATIVE(sig3, PyErr_Clear);
+
+    LABEL(&cleanup);
+    STACKADJ(-1);
+    DECREF(iter_obj);
+    JUMPBY(oparg, 1);
+    LABEL(&next_instruction);
+    CHECK_EVAL_BREAKER();
+}
+
 JIT_AS_SUBROUTINE(BREAK_LOOP)
 JIT_AS_SUBROUTINE(CONTINUE_LOOP)
 JIT_AS_SUBROUTINE(SETUP_LOOP)

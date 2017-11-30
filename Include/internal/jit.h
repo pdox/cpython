@@ -15,7 +15,7 @@ extern "C" {
 // EXIT needs to be the highest value
 
 typedef struct _EvalContext {
-    const _Py_CODEUNIT *next_instr;
+    int next_instr_index;  /* Next instruction index. Only used during jumps and special instructions. */
     void *jit_ret_addr; /* Used by the JIT internally. */
     PyObject **stack_pointer; /* Only used for subroutine calls */
 
@@ -66,11 +66,13 @@ typedef struct _JITData {
     PyJITEmitHandlerFunction handlers[256];
 
     jit_label_t j_special[JIT_RC_EXIT + 1];
+    jit_label_t j_special_internal[JIT_RC_EXIT + 1];
     jit_label_t jmptab[1];
 } JITData;
 
 
-typedef void (*PyJITEmitterFunction)(JITData *jd, int opcode, int oparg);
+typedef void (*PyJITEmitterFunction)(JITData *jd, int next_instr_index, int opcode, int oparg);
+typedef void (*PyJITSpecialEmitterFunction)(JITData *jd);
 
 int _PyJIT_Execute(EvalContext *ctx, PyFrameObject *f, PyObject **sp);
 
