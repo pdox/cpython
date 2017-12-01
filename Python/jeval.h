@@ -14,6 +14,12 @@ DECLARE_SPECIAL(NEXT_OPCODE);
     jit_type_t sigvar##_args[] = { __VA_ARGS__ }; \
     jit_type_t sigvar = jit_type_create_signature(jit_abi_cdecl, ret_type, sigvar##_args, sizeof(sigvar##_args)/sizeof(jit_type_t), 1);
 
+#define CALL_INDIRECT(sig, funcval, ...) \
+    do { \
+        jit_value_t call_args[] = { __VA_ARGS__ }; \
+        jit_insn_call_indirect(jd->func, (funcval), sig, call_args, sizeof(call_args)/sizeof(jit_value_t), JIT_CALL_NOTHROW); \
+    } while (0)
+
 #define CALL_INDIRECT_WITH_RET(retvar, sig, funcval, ...) \
     jit_value_t retvar; \
     do { \
@@ -82,14 +88,27 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define SET_REFCNT(objval, val) \
     SET_FIELD((objval), PyObject, ob_refcnt, jit_type_nint, (val))
 
+#if defined(Py_DEBUG) || defined(Py_TRACE_REFS)
+#  define _DEALLOC(objval) do { \
+        CREATE_SIGNATURE(sig, jit_type_void, jit_type_void_ptr); \
+        CALL_NATIVE(sig, _Py_Dealloc, (objval)); \
+    } while (0)
+#else
+#  define _DEALLOC(objval) do { \
+        jit_value_t _dealloc_type = GET_FIELD((objval), PyObject, ob_type, jit_type_void_ptr); \
+        jit_value_t _dealloc_func = GET_FIELD(_dealloc_type, PyTypeObject, tp_dealloc, jit_type_void_ptr); \
+        CREATE_SIGNATURE(sig, jit_type_void, jit_type_void_ptr); \
+        CALL_INDIRECT(sig, _dealloc_func, (objval)); \
+    } while (0)
+#endif
+
 #define DECREF(_objval) do { \
     jit_value_t _obj = (_objval); \
     jit_label_t skip_dealloc = jit_label_undefined; \
     jit_value_t new_refcount = SUBTRACT(GET_REFCNT(_obj), CONSTANT_INT(1)); \
     SET_REFCNT(_obj, new_refcount); \
     BRANCH_IF_NOT_ZERO(new_refcount, &skip_dealloc); \
-    CREATE_SIGNATURE(sig, jit_type_void, jit_type_void_ptr); \
-    CALL_NATIVE(sig, _Py_Dealloc, _obj); \
+    _DEALLOC(_obj); \
     LABEL(&skip_dealloc); \
 } while (0);
 

@@ -12,7 +12,7 @@
 typedef int (*PyJITTargetFunction)(EvalContext *ctx, PyFrameObject *f, int next_instr_index, int opcode, int oparg, int jumpev);
 
 int _PyEval_FUNC_JIT__unknown_opcode(EvalContext *ctx, PyFrameObject *f, int next_instr_index, int opcode, int oparg, int jumpev) {
-    assert(0);
+    Py_UNREACHABLE();
 }
 
 #include "opcode_function_table.h"
@@ -137,7 +137,9 @@ _PyJIT_CodeGen(PyCodeObject *co) {
     translate_bytecode(jd, co);
     jit_function_set_optimization_level(jd->func, jit_function_get_max_optimization_level());
     int ok = jit_function_compile(jd->func);
-    assert(ok);
+    if (!ok) {
+        Py_FatalError("JIT compile failed");
+    }
     jd->entry = jit_function_to_closure(jd->func);
     jit_context_build_end(gcontext);
 
