@@ -58,25 +58,39 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 
 #define LABEL(ptr)          jit_insn_label(jd->func, (ptr))
 #define BRANCH(ptr)         jit_insn_branch(jd->func, (ptr))
+#define BRANCH_IF_ZERO(val, labelptr) \
+    jit_insn_branch_if_not(jd->func, (val), (labelptr))
+#define BRANCH_IF(val, labelptr) \
+    jit_insn_branch_if(jd->func, (val), (labelptr))
 
-/*
-#define MOVE_TO_END(from_label, to_label) do { \
+
+#define MOVE_TO_END(_from_label, _to_label) do { \
     move_entry *m = PyMem_RawMalloc(sizeof(move_entry)); \
     assert(m); \
-    assert(from_label != JLABEL_INIT); \
-    assert(to_label != JLABEL_INIT); \
-    m->from_label = from_label; \
-    m->to_label = to_label; \
+    assert(_from_label != JLABEL_INIT); \
+    assert(_to_label != JLABEL_INIT); \
+    m->from_label = _from_label; \
+    m->to_label = _to_label; \
     m->next = jd->move_entry_list; \
     jd->move_entry_list = m; \
 } while (0)
-*/
 
+#define BEGIN_REMOTE_SECTION(label_ptr) do { \
+    assert(*(label_ptr) != JLABEL_INIT); \
+    LABEL(label_ptr); \
+} while (0)
+
+#define END_REMOTE_SECTION(label_ptr) do { \
+    JLABEL end_label = JLABEL_INIT; \
+    LABEL(&end_label); \
+    MOVE_TO_END(*(label_ptr), end_label); \
+} while (0)
 
 #define ADD(v1, v2)         jit_insn_add(jd->func, (v1), (v2))
 #define SUBTRACT(v1, v2)    jit_insn_sub(jd->func, (v1), (v2))
 #define SHIFT_RIGHT(v1, v2) jit_insn_shr(jd->func, (v1), (v2))
 #define CMP_LT(v1, v2)      jit_insn_lt(jd->func, (v1), (v2))
+#define TERNARY(v, if_true, if_false)   _ternary(jd, (v), (if_true), (if_false))
 
 /* Constant int value */
 #define CONSTANT_INT(n)  jit_value_create_nint_constant(jd->func, jit_type_int, (n))
@@ -109,6 +123,21 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define CRASH() \
     STORE(CONSTANT_PTR(0), jit_type_int, CONSTANT_INT(0));
 
+/* TODO: Use CMOVE for constant values */
+static inline JVALUE _ternary(JITData *jd, JVALUE v, JVALUE if_true, JVALUE if_false) {
+    JLABEL if_false_label = JLABEL_INIT;
+    JLABEL fin = JLABEL_INIT;
+    JVALUE ret = jit_value_create(jd->func, jit_value_get_type(if_true));
+    assert(jit_value_get_type(if_true) == jit_value_get_type(if_false));
+    BRANCH_IF_ZERO(v, &if_false_label);
+    SET_VALUE(ret, if_true);
+    BRANCH(&fin);
+    LABEL(&if_false_label);
+    SET_VALUE(ret, if_false);
+    LABEL(&fin);
+    return ret;
+}
+
 /* High-level Python macros */
 
 #define INCREF(objval) \
@@ -136,12 +165,16 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 
 #define DECREF(_objval) do { \
     JVALUE _obj = (_objval); \
-    JLABEL skip_dealloc = JLABEL_INIT; \
+    JLABEL do_dealloc = JLABEL_INIT; \
+    JLABEL return_point = JLABEL_INIT; \
     JVALUE new_refcount = SUBTRACT(GET_REFCNT(_obj), CONSTANT_INT(1)); \
     SET_REFCNT(_obj, new_refcount); \
-    BRANCH_IF(new_refcount, &skip_dealloc); \
+    BRANCH_IF_ZERO(new_refcount, &do_dealloc); \
+    LABEL(&return_point); \
+    BEGIN_REMOTE_SECTION(&do_dealloc); \
     _DEALLOC(_obj); \
-    LABEL(&skip_dealloc); \
+    BRANCH(&return_point); \
+    END_REMOTE_SECTION(&do_dealloc); \
 } while (0);
 
 #define XDECREF(_objval) do { \
@@ -264,12 +297,6 @@ DECLARE_SPECIAL(NEXT_OPCODE);
     XDECREF(tmp); \
 } while (0)
 
-#define BRANCH_IF_ZERO(val, labelptr) \
-    jit_insn_branch_if_not(jd->func, (val), (labelptr))
-
-#define BRANCH_IF(val, labelptr) \
-    jit_insn_branch_if(jd->func, (val), (labelptr))
-
 #define EMIT_JUMP(check_eval_breaker) do { \
     if (check_eval_breaker) { \
         BRANCH_IF_ZERO(LOAD_EVAL_BREAKER(), &jd->jmptab[next_instr_index]); \
@@ -329,41 +356,28 @@ EMITTER_FOR(INVALID_OPCODE) {
 EMITTER_FOR(NOP) {
 }
 
-typedef struct {
-    JLABEL err;
-    JVALUE oparg;
-} LOAD_FAST_INFO;
-
 void format_exc_check_arg(PyObject *, const char *, PyObject *);
 #define UNBOUNDLOCAL_ERROR_MSG \
     "local variable '%.200s' referenced before assignment"
 
-int handle_load_fast_unbound_local(EvalContext *ctx, int opcode, int oparg) {
+void handle_load_fast_unbound_local(EvalContext *ctx, int opcode, int oparg) {
     format_exc_check_arg(PyExc_UnboundLocalError,
                          UNBOUNDLOCAL_ERROR_MSG,
                          PyTuple_GetItem(ctx->co->co_varnames, oparg));
-    return JIT_RC_ERROR;
-}
-
-HANDLERS_FOR(LOAD_FAST) {
-    FETCH_INFO(LOAD_FAST);
-    CREATE_SIGNATURE(sig, jit_type_int, jit_type_void_ptr, jit_type_int, jit_type_int);
-    LABEL(&info->err);
-    CALL_NATIVE_WITH_RET(rvtmp, sig, handle_load_fast_unbound_local, jd->ctx, CONSTANT_INT(opcode), info->oparg);
-    HANDLE_RV(rvtmp);
 }
 
 EMITTER_FOR(LOAD_FAST) {
-    INIT_INFO(LOAD_FAST) {
-        info->err = JLABEL_INIT;
-        info->oparg = jit_value_create(jd->func, jit_type_int);
-        INSTALL_HANDLERS(LOAD_FAST);
-    }
-    SET_VALUE(info->oparg, CONSTANT_INT(oparg));
+    JLABEL load_fast_error = JLABEL_INIT;
     JVALUE v = GETLOCAL(oparg);
-    BRANCH_IF_ZERO(v, &info->err);
+    BRANCH_IF_ZERO(v, &load_fast_error);
     INCREF(v);
     PUSH(v);
+
+    BEGIN_REMOTE_SECTION(&load_fast_error);
+    CREATE_SIGNATURE(sig, jit_type_void, jit_type_void_ptr, jit_type_int, jit_type_int);
+    CALL_NATIVE(sig, handle_load_fast_unbound_local, jd->ctx, CONSTANT_INT(opcode), CONSTANT_INT(oparg));
+    BRANCH(&jd->j_special[JIT_RC_ERROR]);
+    END_REMOTE_SECTION(&load_fast_error);
 }
 
 EMITTER_FOR(LOAD_CONST) {
@@ -433,38 +447,25 @@ EMIT_AS_UNARY_OP(UNARY_INVERT, PyNumber_Invert)
 
 EMITTER_FOR(UNARY_NOT) {
     JLABEL real_error = JLABEL_INIT;
-    JLABEL zero_case = JLABEL_INIT;
-    JLABEL fin = JLABEL_INIT;
     JVALUE value = TOP();
     CREATE_SIGNATURE(sig, jit_type_int, jit_type_void_ptr);
     CALL_NATIVE_WITH_RET(err, sig, PyObject_IsTrue, value);
     DECREF(value);
 
-    BRANCH_IF(CMP_LT(err, CONSTANT_INT(0)), &real_error); // UNLIKELY
-    BRANCH_IF_ZERO(err, &zero_case);
+    /* Jump if err < 0 (unlikely) */
+    BRANCH_IF(CMP_LT(err, CONSTANT_INT(0)), &real_error);
 
     /* Handle err > 0 case */
-    JVALUE pyfalse = CONSTANT_PTR(Py_False);
-    INCREF(pyfalse);
-    SET_TOP(pyfalse);
+    JVALUE obj = TERNARY(err, CONSTANT_PTR(Py_False), CONSTANT_PTR(Py_True));
+    INCREF(obj);
+    SET_TOP(obj);
     CHECK_EVAL_BREAKER();
-    BRANCH(&fin);
-
-    /* Handle err == 0 case */
-    LABEL(&zero_case);
-    JVALUE pytrue = CONSTANT_PTR(Py_True);
-    INCREF(pytrue);
-    SET_TOP(pytrue);
-    CHECK_EVAL_BREAKER();
-    BRANCH(&fin);
 
     /* Handle err < 0 case */
-    LABEL(&real_error);
+    BEGIN_REMOTE_SECTION(&real_error);
     STACKADJ(-1);
     BRANCH(&jd->j_special[JIT_RC_ERROR]);
-
-    LABEL(&fin);
-    //MOVE_TO_END(real_error, fin);
+    END_REMOTE_SECTION(&real_error);
 }
 
 #define EMIT_AS_BINARY_OP(op, func) \
@@ -531,7 +532,20 @@ EMIT_AS_SUBROUTINE(STORE_NAME)
 EMIT_AS_SUBROUTINE(DELETE_NAME)
 EMIT_AS_SUBROUTINE(UNPACK_SEQUENCE)
 EMIT_AS_SUBROUTINE(UNPACK_EX)
-EMIT_AS_SUBROUTINE(STORE_ATTR)
+
+EMITTER_FOR(STORE_ATTR) {
+    PyObject *name = PyTuple_GET_ITEM(jd->co->co_names, oparg);
+    JVALUE owner = TOP();
+    JVALUE v = SECOND();
+    STACKADJ(-2);
+    CREATE_SIGNATURE(sig, jit_type_int, jit_type_void_ptr, jit_type_void_ptr, jit_type_void_ptr);
+    CALL_NATIVE_WITH_RET(err, sig, PyObject_SetAttr, owner, CONSTANT_PTR(name), v);
+    DECREF(v);
+    DECREF(owner);
+    BRANCH_IF(err, &jd->j_special[JIT_RC_ERROR]);
+    CHECK_EVAL_BREAKER();
+}
+
 EMIT_AS_SUBROUTINE(DELETE_ATTR)
 EMIT_AS_SUBROUTINE(STORE_GLOBAL)
 EMIT_AS_SUBROUTINE(DELETE_GLOBAL)
@@ -557,7 +571,18 @@ EMIT_AS_SUBROUTINE(BUILD_CONST_KEY_MAP)
 EMIT_AS_SUBROUTINE(BUILD_MAP_UNPACK)
 EMIT_AS_SUBROUTINE(BUILD_MAP_UNPACK_WITH_CALL)
 EMIT_AS_SUBROUTINE(MAP_ADD)
-EMIT_AS_SUBROUTINE(LOAD_ATTR)
+
+EMITTER_FOR(LOAD_ATTR) {
+    PyObject *name = PyTuple_GET_ITEM(jd->co->co_names, oparg);
+    JVALUE owner = TOP();
+    CREATE_SIGNATURE(sig, jit_type_void_ptr, jit_type_void_ptr, jit_type_void_ptr);
+    CALL_NATIVE_WITH_RET(res, sig, PyObject_GetAttr, owner, CONSTANT_PTR(name));
+    DECREF(owner);
+    SET_TOP(res);
+    BRANCH_IF_ZERO(res, &jd->j_special[JIT_RC_ERROR]);
+    CHECK_EVAL_BREAKER();
+}
+
 EMIT_AS_SUBROUTINE(COMPARE_OP)
 EMIT_AS_SUBROUTINE(IMPORT_NAME)
 EMIT_AS_SUBROUTINE(IMPORT_STAR)

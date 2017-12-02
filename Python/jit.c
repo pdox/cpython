@@ -105,6 +105,19 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
         special_emitter_table[i](jd);
         BRANCH(&jd->j_special_internal[JIT_RC_JUMP]);
     }
+
+    /* Move extra sections to end */
+    {
+        move_entry *m = jd->move_entry_list;
+        move_entry *next;
+        while (m != NULL) {
+            next = m->next;
+            jit_insn_move_blocks_to_end(jd->func, m->from_label, m->to_label);
+            PyMem_RawFree(m);
+            m = next;
+        }
+        jd->move_entry_list = NULL;
+    }
 }
 
 jit_context_t gcontext = NULL;
