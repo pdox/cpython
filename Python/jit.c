@@ -57,7 +57,7 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
 
     if (is_gen) {
         /* jump to next_instr */
-        jit_value_t v_index = GET_FIELD(jd->ctx, EvalContext, next_instr_index, jit_type_int);
+        jit_value_t v_index = LOAD_FIELD(jd->ctx, EvalContext, next_instr_index, jit_type_int);
         jit_insn_jump_table(jd->func, v_index, jd->jmptab, inst_count);
     }
 
@@ -65,7 +65,6 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
         int opcode = _Py_OPCODE(code[i]);
         int oparg = _Py_OPARG(code[i]);
         LABEL(&jd->jmptab[i]);
-        JIT_NOP();
 
         while (opcode == EXTENDED_ARG) {
             ++i;
@@ -75,7 +74,7 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
         }
 
         // Set f->f_lasti
-        SET_FIELD(jd->f, PyFrameObject, f_lasti, jit_type_int, CONSTANT_INT(i * sizeof(_Py_CODEUNIT)));
+        STORE_FIELD(jd->f, PyFrameObject, f_lasti, jit_type_int, CONSTANT_INT(i * sizeof(_Py_CODEUNIT)));
 
         // Emit instruction
         opcode_emitter_table[opcode](jd, i + 1, opcode, oparg);
