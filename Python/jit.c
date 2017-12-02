@@ -46,6 +46,7 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     jd->f = jit_value_get_param(jd->func, 1);
     jd->stack_pointer = jit_value_get_param(jd->func, 2);
     jd->fastlocals = ADD(jd->f, CONSTANT_NINT(offsetof(PyFrameObject, f_localsplus)));
+    jd->move_entry_list = NULL;
 
     for (i = 0; i < 256; i++) {
         jd->priv[i] = NULL;

@@ -48,6 +48,12 @@ typedef struct _JITData JITData;
 typedef void (*PyJITEntryFunction)(EvalContext *ctx, PyFrameObject *f, PyObject **sp);
 typedef void (*PyJITEmitHandlerFunction)(JITData *jd, int opcode);
 
+typedef struct move_entry {
+    jit_label_t from_label;
+    jit_label_t to_label;
+    struct move_entry *next;
+} move_entry;
+
 typedef struct _JITData {
     PyJITEntryFunction entry;
     PyCodeObject *co; /* Borrowed reference */
@@ -58,6 +64,9 @@ typedef struct _JITData {
     jit_value_t f;
     jit_value_t stack_pointer;
     jit_value_t fastlocals;
+
+    /* Blocks that will be moved to the end */
+    move_entry *move_entry_list;
 
     /* Private storage for each opcode */
     void *priv[256];

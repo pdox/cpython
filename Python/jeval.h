@@ -13,6 +13,7 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define JTYPE       jit_type_t
 #define JVALUE      jit_value_t
 #define JLABEL      jit_label_t
+#define JLABEL_INIT jit_label_undefined
 
 #define SET_VALUE(dest, src)     jit_insn_store(jd->func, (dest), (src))
 
@@ -57,9 +58,25 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 
 #define LABEL(ptr)          jit_insn_label(jd->func, (ptr))
 #define BRANCH(ptr)         jit_insn_branch(jd->func, (ptr))
+
+/*
+#define MOVE_TO_END(from_label, to_label) do { \
+    move_entry *m = PyMem_RawMalloc(sizeof(move_entry)); \
+    assert(m); \
+    assert(from_label != JLABEL_INIT); \
+    assert(to_label != JLABEL_INIT); \
+    m->from_label = from_label; \
+    m->to_label = to_label; \
+    m->next = jd->move_entry_list; \
+    jd->move_entry_list = m; \
+} while (0)
+*/
+
+
 #define ADD(v1, v2)         jit_insn_add(jd->func, (v1), (v2))
 #define SUBTRACT(v1, v2)    jit_insn_sub(jd->func, (v1), (v2))
 #define SHIFT_RIGHT(v1, v2) jit_insn_shr(jd->func, (v1), (v2))
+#define CMP_LT(v1, v2)      jit_insn_lt(jd->func, (v1), (v2))
 
 /* Constant int value */
 #define CONSTANT_INT(n)  jit_value_create_nint_constant(jd->func, jit_type_int, (n))
@@ -119,17 +136,17 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 
 #define DECREF(_objval) do { \
     JVALUE _obj = (_objval); \
-    JLABEL skip_dealloc = jit_label_undefined; \
+    JLABEL skip_dealloc = JLABEL_INIT; \
     JVALUE new_refcount = SUBTRACT(GET_REFCNT(_obj), CONSTANT_INT(1)); \
     SET_REFCNT(_obj, new_refcount); \
-    BRANCH_IF_NOT_ZERO(new_refcount, &skip_dealloc); \
+    BRANCH_IF(new_refcount, &skip_dealloc); \
     _DEALLOC(_obj); \
     LABEL(&skip_dealloc); \
 } while (0);
 
 #define XDECREF(_objval) do { \
     JVALUE __obj = (_objval); \
-    JLABEL skip_if_null = jit_label_undefined; \
+    JLABEL skip_if_null = JLABEL_INIT; \
     BRANCH_IF_ZERO(__obj, &skip_if_null); \
     DECREF(__obj); \
     LABEL(&skip_if_null); \
@@ -170,7 +187,7 @@ DECLARE_SPECIAL(NEXT_OPCODE);
    is computed using f_lasti.
  */
 #define CHECK_EVAL_BREAKER() \
-    BRANCH_IF_NOT_ZERO(LOAD_EVAL_BREAKER(), &jd->j_special[JIT_RC_NEXT_OPCODE]);
+    BRANCH_IF(LOAD_EVAL_BREAKER(), &jd->j_special[JIT_RC_NEXT_OPCODE]);
 
 #define INIT_INFO(op) \
     op##_INFO *info = (op##_INFO *) jd->priv[opcode]; \
@@ -193,8 +210,14 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define FETCH_INFO(op) \
     op##_INFO *info = (op##_INFO *) jd->priv[opcode];
 
+/* Defeat nested macro evaluation problem.
+   TODO: Can this be done in a less hacky way?
+ */
 #define EMITTER_FOR(op) \
-    void _PyJIT_EMIT_TARGET_##op (JITData *jd, int next_instr_index, int opcode, int oparg)
+    EMITTER_FOR_BASE(_ ## op)
+
+#define EMITTER_FOR_BASE(op) \
+    void _PyJIT_EMIT_TARGET##op (JITData *jd, int next_instr_index, int opcode, int oparg)
 
 #define EMIT_AS_SUBROUTINE(op) \
     void _PyJIT_EMIT_TARGET_##op (JITData *jd, int next_instr_index, int opcode, int oparg) { \
@@ -244,7 +267,7 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define BRANCH_IF_ZERO(val, labelptr) \
     jit_insn_branch_if_not(jd->func, (val), (labelptr))
 
-#define BRANCH_IF_NOT_ZERO(val, labelptr) \
+#define BRANCH_IF(val, labelptr) \
     jit_insn_branch_if(jd->func, (val), (labelptr))
 
 #define EMIT_JUMP(check_eval_breaker) do { \
@@ -332,7 +355,7 @@ HANDLERS_FOR(LOAD_FAST) {
 
 EMITTER_FOR(LOAD_FAST) {
     INIT_INFO(LOAD_FAST) {
-        info->err = jit_label_undefined;
+        info->err = JLABEL_INIT;
         info->oparg = jit_value_create(jd->func, jit_type_int);
         INSTALL_HANDLERS(LOAD_FAST);
     }
@@ -368,13 +391,83 @@ EMITTER_FOR(ROT_TWO) {
     SET_SECOND(top);
 }
 
-EMIT_AS_SUBROUTINE(ROT_THREE)
-EMIT_AS_SUBROUTINE(DUP_TOP)
-EMIT_AS_SUBROUTINE(DUP_TOP_TWO)
-EMIT_AS_SUBROUTINE(UNARY_POSITIVE)
-EMIT_AS_SUBROUTINE(UNARY_NEGATIVE)
-EMIT_AS_SUBROUTINE(UNARY_NOT)
-EMIT_AS_SUBROUTINE(UNARY_INVERT)
+EMITTER_FOR(ROT_THREE) {
+    JVALUE top = TOP();
+    JVALUE second = SECOND();
+    JVALUE third = THIRD();
+    SET_TOP(second);
+    SET_SECOND(third);
+    SET_THIRD(top);
+}
+
+EMITTER_FOR(DUP_TOP) {
+    JVALUE top = TOP();
+    INCREF(top);
+    PUSH(top);
+}
+
+EMITTER_FOR(DUP_TOP_TWO) {
+    JVALUE top = TOP();
+    JVALUE second = SECOND();
+    INCREF(top);
+    INCREF(second);
+    STACKADJ(2);
+    SET_TOP(top);
+    SET_SECOND(second);
+}
+
+#define EMIT_AS_UNARY_OP(op, func) \
+    EMITTER_FOR_BASE(_ ## op) { \
+        JVALUE objval = TOP(); \
+        CREATE_SIGNATURE(sig, jit_type_void_ptr, jit_type_void_ptr); \
+        CALL_NATIVE_WITH_RET(res, sig, func, objval); \
+        DECREF(objval); \
+        SET_TOP(res); \
+        BRANCH_IF_ZERO(res, &jd->j_special[JIT_RC_ERROR]); \
+        CHECK_EVAL_BREAKER(); \
+    }
+
+EMIT_AS_UNARY_OP(UNARY_POSITIVE, PyNumber_Positive)
+EMIT_AS_UNARY_OP(UNARY_NEGATIVE, PyNumber_Negative)
+EMIT_AS_UNARY_OP(UNARY_INVERT, PyNumber_Invert)
+
+EMITTER_FOR(UNARY_NOT) {
+    JLABEL real_error = JLABEL_INIT;
+    JLABEL zero_case = JLABEL_INIT;
+    JLABEL fin = JLABEL_INIT;
+    JVALUE value = TOP();
+    CREATE_SIGNATURE(sig, jit_type_int, jit_type_void_ptr);
+    CALL_NATIVE_WITH_RET(err, sig, PyObject_IsTrue, value);
+    DECREF(value);
+
+    BRANCH_IF(CMP_LT(err, CONSTANT_INT(0)), &real_error); // UNLIKELY
+    BRANCH_IF_ZERO(err, &zero_case);
+
+    /* Handle err > 0 case */
+    JVALUE pyfalse = CONSTANT_PTR(Py_False);
+    INCREF(pyfalse);
+    SET_TOP(pyfalse);
+    CHECK_EVAL_BREAKER();
+    BRANCH(&fin);
+
+    /* Handle err == 0 case */
+    LABEL(&zero_case);
+    JVALUE pytrue = CONSTANT_PTR(Py_True);
+    INCREF(pytrue);
+    SET_TOP(pytrue);
+    CHECK_EVAL_BREAKER();
+    BRANCH(&fin);
+
+    /* Handle err < 0 case */
+    LABEL(&real_error);
+    STACKADJ(-1);
+    BRANCH(&jd->j_special[JIT_RC_ERROR]);
+
+    LABEL(&fin);
+    //MOVE_TO_END(real_error, fin);
+}
+
+
 EMIT_AS_SUBROUTINE(BINARY_POWER)
 EMIT_AS_SUBROUTINE(BINARY_MULTIPLY)
 EMIT_AS_SUBROUTINE(BINARY_MATRIX_MULTIPLY)
@@ -470,9 +563,9 @@ EMIT_AS_SUBROUTINE(GET_YIELD_FROM_ITER)
 
 
 EMITTER_FOR(FOR_ITER) {
-    JLABEL handle_null = jit_label_undefined;
-    JLABEL cleanup = jit_label_undefined;
-    JLABEL next_instruction = jit_label_undefined;
+    JLABEL handle_null = JLABEL_INIT;
+    JLABEL cleanup = JLABEL_INIT;
+    JLABEL next_instruction = JLABEL_INIT;
     JVALUE iter_obj = TOP();
     JVALUE type_obj = LOAD_FIELD(iter_obj, PyObject, ob_type, jit_type_void_ptr);
     JVALUE tp_iternext = LOAD_FIELD(type_obj, PyTypeObject, tp_iternext, jit_type_void_ptr);
