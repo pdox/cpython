@@ -268,6 +268,9 @@ static inline JVALUE _ternary(JITData *jd, JVALUE v, JVALUE if_true, JVALUE if_f
 #define FETCH_INFO(op) \
     op##_INFO *info = (op##_INFO *) jd->priv[opcode];
 
+/* Functions borrowed from ceval */
+int do_raise(PyObject *, PyObject *);
+
 /* Defeat nested macro evaluation problem.
    TODO: Can this be done in a less hacky way?
  */
@@ -649,7 +652,30 @@ EMITTER_FOR(PRINT_EXPR) {
     END_REMOTE_SECTION(&hook_null);
 }
 
-EMIT_AS_SUBROUTINE(RAISE_VARARGS)
+EMITTER_FOR(RAISE_VARARGS) {
+    JVALUE cause = CONSTANT_PTR(NULL);
+    JVALUE exc = CONSTANT_PTR(NULL);
+    JLABEL fin = JLABEL_INIT;
+    switch (oparg) {
+    case 2:
+        cause = POP(); /* fall through */
+    case 1:
+        exc = POP();   /* fall through */
+    case 0: {
+        CREATE_SIGNATURE(sig, jit_type_int, jit_type_void_ptr, jit_type_void_ptr);
+        CALL_NATIVE_WITH_RET(ret, sig, do_raise, exc, cause);
+        BRANCH_IF_ZERO(ret, &fin);
+        SET_WHY(WHY_EXCEPTION);
+        BRANCH_SPECIAL(FAST_BLOCK_END);
+    }
+    default:
+        CALL_PyErr_SetString(PyExc_SystemError, "bad RAISE_VARARGS oparg");
+        break;
+    }
+    LABEL(&fin);
+    BRANCH_SPECIAL(ERROR);
+}
+
 EMIT_AS_SUBROUTINE(RETURN_VALUE)
 EMIT_AS_SUBROUTINE(GET_AITER)
 EMIT_AS_SUBROUTINE(GET_ANEXT)
