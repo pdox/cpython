@@ -593,7 +593,21 @@ EMIT_AS_BINARY_OP(INPLACE_AND, PyNumber_InPlaceAnd)
 EMIT_AS_BINARY_OP(INPLACE_XOR, PyNumber_InPlaceXor)
 EMIT_AS_BINARY_OP(INPLACE_OR, PyNumber_InPlaceOr)
 
-EMIT_AS_SUBROUTINE(STORE_SUBSCR)
+EMITTER_FOR(STORE_SUBSCR) {
+    JVALUE sub = TOP();
+    JVALUE container = SECOND();
+    JVALUE v = THIRD();
+    STACKADJ(-3);
+    /* container[sub] = v */
+    CREATE_SIGNATURE(sig, jit_type_int, jit_type_void_ptr, jit_type_void_ptr, jit_type_void_ptr);
+    CALL_NATIVE_WITH_RET(err, sig, PyObject_SetItem, container, sub, v);
+    DECREF(v);
+    DECREF(container);
+    DECREF(sub);
+    BRANCH_SPECIAL_IF(err, ERROR);
+    CHECK_EVAL_BREAKER();
+}
+
 EMIT_AS_SUBROUTINE(STORE_ANNOTATION)
 EMIT_AS_SUBROUTINE(DELETE_SUBSCR)
 EMIT_AS_SUBROUTINE(PRINT_EXPR)
