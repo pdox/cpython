@@ -242,6 +242,11 @@ static inline JVALUE _ternary(JITData *jd, JVALUE v, JVALUE if_true, JVALUE if_f
 #define CHECK_EVAL_BREAKER() \
     BRANCH_IF(LOAD_EVAL_BREAKER(), &jd->j_special[JIT_RC_NEXT_OPCODE]);
 
+#define CALL_PyErr_SetString(exc, msg) do { \
+    CREATE_SIGNATURE(sig, jit_type_void, jit_type_void_ptr, jit_type_void_ptr); \
+    CALL_NATIVE(sig, PyErr_SetString, CONSTANT_PTR(exc), CONSTANT_PTR(msg)); \
+} while (0)
+
 #define INIT_INFO(op) \
     op##_INFO *info = (op##_INFO *) jd->priv[opcode]; \
     int did_alloc_info = 0; \
@@ -609,8 +614,41 @@ EMITTER_FOR(STORE_SUBSCR) {
 }
 
 EMIT_AS_SUBROUTINE(STORE_ANNOTATION)
-EMIT_AS_SUBROUTINE(DELETE_SUBSCR)
-EMIT_AS_SUBROUTINE(PRINT_EXPR)
+
+EMITTER_FOR(DELETE_SUBSCR) {
+    JVALUE sub = TOP();
+    JVALUE container = SECOND();
+    STACKADJ(-2);
+    /* del container[sub] */
+    CREATE_SIGNATURE(sig, jit_type_int, jit_type_void_ptr, jit_type_void_ptr);
+    CALL_NATIVE_WITH_RET(err, sig, PyObject_DelItem, container, sub);
+    DECREF(container);
+    DECREF(sub);
+    BRANCH_SPECIAL_IF(err, ERROR);
+    CHECK_EVAL_BREAKER();
+}
+
+EMITTER_FOR(PRINT_EXPR) {
+    _Py_IDENTIFIER(displayhook);
+    JVALUE value = POP();
+    JLABEL hook_null = JLABEL_INIT;
+    CREATE_SIGNATURE(sig1, jit_type_void_ptr, jit_type_void_ptr);
+    CALL_NATIVE_WITH_RET(hook, sig1, _PySys_GetObjectId, CONSTANT_PTR(&PyId_displayhook));
+    BRANCH_IF_ZERO(hook, &hook_null);
+    CREATE_SIGNATURE(sig2, jit_type_void_ptr, jit_type_void_ptr, jit_type_void_ptr, jit_type_void_ptr);
+    CALL_NATIVE_WITH_RET(res, sig2, PyObject_CallFunctionObjArgs, hook, value, CONSTANT_PTR(NULL));
+    DECREF(value);
+    BRANCH_SPECIAL_IF_ZERO(res, ERROR);
+    DECREF(res);
+    CHECK_EVAL_BREAKER();
+
+    BEGIN_REMOTE_SECTION(&hook_null);
+    CALL_PyErr_SetString(PyExc_RuntimeError, "lost sys.displayhook");
+    DECREF(value);
+    BRANCH_SPECIAL(ERROR);
+    END_REMOTE_SECTION(&hook_null);
+}
+
 EMIT_AS_SUBROUTINE(RAISE_VARARGS)
 EMIT_AS_SUBROUTINE(RETURN_VALUE)
 EMIT_AS_SUBROUTINE(GET_AITER)
