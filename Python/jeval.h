@@ -90,6 +90,9 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define SUBTRACT(v1, v2)    jit_insn_sub(jd->func, (v1), (v2))
 #define SHIFT_RIGHT(v1, v2) jit_insn_shr(jd->func, (v1), (v2))
 #define CMP_LT(v1, v2)      jit_insn_lt(jd->func, (v1), (v2))
+#define CMP_EQ(v1, v2)      jit_insn_eq(jd->func, (v1), (v2))
+#define CMP_NE(v1, v2)      jit_insn_ne(jd->func, (v1), (v2))
+#define CMP_GT(v1, v2)      jit_insn_gt(jd->func, (v1), (v2))
 #define TERNARY(v, if_true, if_false)   _ternary(jd, (v), (if_true), (if_false))
 
 /* Constant int value */
@@ -587,11 +590,132 @@ EMIT_AS_SUBROUTINE(COMPARE_OP)
 EMIT_AS_SUBROUTINE(IMPORT_NAME)
 EMIT_AS_SUBROUTINE(IMPORT_STAR)
 EMIT_AS_SUBROUTINE(IMPORT_FROM)
-EMIT_AS_SUBROUTINE(JUMP_FORWARD)
-EMIT_AS_SUBROUTINE(POP_JUMP_IF_FALSE)
-EMIT_AS_SUBROUTINE(POP_JUMP_IF_TRUE)
-EMIT_AS_SUBROUTINE(JUMP_IF_FALSE_OR_POP)
-EMIT_AS_SUBROUTINE(JUMP_IF_TRUE_OR_POP)
+
+EMITTER_FOR(JUMP_FORWARD) {
+    JUMPBY(oparg, 0);
+}
+
+EMITTER_FOR(POP_JUMP_IF_FALSE) {
+    JLABEL skip1 = JLABEL_INIT;
+    JLABEL skip2 = JLABEL_INIT;
+    JLABEL fin = JLABEL_INIT;
+    JVALUE cond = POP();
+    BRANCH_IF(CMP_NE(cond, CONSTANT_PTR(Py_True)), &skip1);
+    /* Py_True case */
+    DECREF(cond);
+    BRANCH(&fin);
+    LABEL(&skip1);
+    BRANCH_IF(CMP_NE(cond, CONSTANT_PTR(Py_False)), &skip2);
+    /* Py_False case */
+    DECREF(cond);
+    JUMPTO(oparg, 0);
+    LABEL(&skip2);
+    /* Generic case */
+    CREATE_SIGNATURE(sig, jit_type_int, jit_type_void_ptr);
+    CALL_NATIVE_WITH_RET(err, sig, PyObject_IsTrue, cond);
+    DECREF(cond);
+    BRANCH_IF(CMP_GT(err, CONSTANT_INT(0)), &fin);
+    BRANCH_IF(CMP_LT(err, CONSTANT_INT(0)), &jd->j_special[JIT_RC_ERROR]);
+    /* err == 0 case */
+    JUMPTO(oparg, 1);
+    LABEL(&fin);
+    CHECK_EVAL_BREAKER();
+}
+
+EMITTER_FOR(POP_JUMP_IF_TRUE) {
+    JLABEL skip1 = JLABEL_INIT;
+    JLABEL skip2 = JLABEL_INIT;
+    JLABEL fin = JLABEL_INIT;
+    JVALUE cond = POP();
+    BRANCH_IF(CMP_NE(cond, CONSTANT_PTR(Py_False)), &skip1);
+    /* Py_False case */
+    DECREF(cond);
+    BRANCH(&fin);
+    LABEL(&skip1);
+    BRANCH_IF(CMP_NE(cond, CONSTANT_PTR(Py_True)), &skip2);
+    /* Py_True case */
+    DECREF(cond);
+    JUMPTO(oparg, 0);
+    LABEL(&skip2);
+    /* Generic case */
+    CREATE_SIGNATURE(sig, jit_type_int, jit_type_void_ptr);
+    CALL_NATIVE_WITH_RET(err, sig, PyObject_IsTrue, cond);
+    DECREF(cond);
+    BRANCH_IF(CMP_EQ(err, CONSTANT_INT(0)), &fin);
+    BRANCH_IF(CMP_LT(err, CONSTANT_INT(0)), &jd->j_special[JIT_RC_ERROR]);
+    /* err > 0 case */
+    JUMPTO(oparg, 1);
+    LABEL(&fin);
+    CHECK_EVAL_BREAKER();
+}
+
+EMITTER_FOR(JUMP_IF_FALSE_OR_POP) {
+    JLABEL skip1 = JLABEL_INIT;
+    JLABEL skip2 = JLABEL_INIT;
+    JLABEL dispatch = JLABEL_INIT;
+    JLABEL fast_dispatch = JLABEL_INIT;
+    JLABEL do_jump = JLABEL_INIT;
+    JVALUE cond = TOP();
+    BRANCH_IF(CMP_NE(cond, CONSTANT_PTR(Py_True)), &skip1);
+    /* Py_True case */
+    STACKADJ(-1);
+    DECREF(cond);
+    BRANCH(&fast_dispatch);
+    LABEL(&skip1);
+    BRANCH_IF(CMP_NE(cond, CONSTANT_PTR(Py_False)), &skip2);
+    /* Py_False case */
+    JUMPTO(oparg, 0);
+    /* Generic case */
+    LABEL(&skip2);
+    CREATE_SIGNATURE(sig, jit_type_int, jit_type_void_ptr);
+    CALL_NATIVE_WITH_RET(err, sig, PyObject_IsTrue, cond);
+    BRANCH_IF(CMP_EQ(err, CONSTANT_INT(0)), &do_jump);
+    BRANCH_IF(CMP_LT(err, CONSTANT_INT(0)), &jd->j_special[JIT_RC_ERROR]);
+    /* err > 0 case */
+    STACKADJ(-1);
+    DECREF(cond);
+    BRANCH(&dispatch);
+    /* err == 0 case */
+    LABEL(&do_jump);
+    JUMPTO(oparg, 1);
+    LABEL(&dispatch);
+    CHECK_EVAL_BREAKER();
+    LABEL(&fast_dispatch);
+}
+
+EMITTER_FOR(JUMP_IF_TRUE_OR_POP) {
+    JLABEL skip1 = JLABEL_INIT;
+    JLABEL skip2 = JLABEL_INIT;
+    JLABEL dispatch = JLABEL_INIT;
+    JLABEL fast_dispatch = JLABEL_INIT;
+    JLABEL do_jump = JLABEL_INIT;
+    JVALUE cond = TOP();
+    BRANCH_IF(CMP_NE(cond, CONSTANT_PTR(Py_False)), &skip1);
+    /* Py_False case */
+    STACKADJ(-1);
+    DECREF(cond);
+    BRANCH(&fast_dispatch);
+    LABEL(&skip1);
+    BRANCH_IF(CMP_NE(cond, CONSTANT_PTR(Py_True)), &skip2);
+    /* Py_True case */
+    JUMPTO(oparg, 0);
+    /* Generic case */
+    LABEL(&skip2);
+    CREATE_SIGNATURE(sig, jit_type_int, jit_type_void_ptr);
+    CALL_NATIVE_WITH_RET(err, sig, PyObject_IsTrue, cond);
+    BRANCH_IF(CMP_GT(err, CONSTANT_INT(0)), &do_jump);
+    BRANCH_IF(CMP_LT(err, CONSTANT_INT(0)), &jd->j_special[JIT_RC_ERROR]);
+    /* err == 0 case */
+    STACKADJ(-1);
+    DECREF(cond);
+    BRANCH(&dispatch);
+    /* err > 0 case */
+    LABEL(&do_jump);
+    JUMPTO(oparg, 1);
+    LABEL(&dispatch);
+    CHECK_EVAL_BREAKER();
+    LABEL(&fast_dispatch);
+}
 
 
 EMITTER_FOR(JUMP_ABSOLUTE) {
