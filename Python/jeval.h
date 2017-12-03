@@ -63,6 +63,12 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define BRANCH_IF(val, labelptr) \
     jit_insn_branch_if(jd->func, (val), (labelptr))
 
+#define BRANCH_SPECIAL(name) \
+    BRANCH(&jd->j_special[JIT_RC_ ## name])
+#define BRANCH_SPECIAL_IF(val, name) \
+    BRANCH_IF((val), &jd->j_special[JIT_RC_ ## name])
+#define BRANCH_SPECIAL_IF_ZERO(val, name) \
+    BRANCH_IF_ZERO((val), &jd->j_special[JIT_RC_ ## name])
 
 #define MOVE_TO_END(_from_label, _to_label) do { \
     move_entry *m = PyMem_RawMalloc(sizeof(move_entry)); \
@@ -96,10 +102,14 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define TERNARY(v, if_true, if_false)   _ternary(jd, (v), (if_true), (if_false))
 
 /* Constant int value */
-#define CONSTANT_INT(n)  jit_value_create_nint_constant(jd->func, jit_type_int, (n))
+#define CONSTANT_INT(n)   jit_value_create_nint_constant(jd->func, jit_type_int, (n))
+#define CONSTANT_UINT(n)  jit_value_create_nint_constant(jd->func, jit_type_uint, (n))
+
+#define CONSTANT_LONG(n)  jit_value_create_nint_constant(jd->func, jit_type_long, (n))
+#define CONSTANT_ULONG(n) jit_value_create_nint_constant(jd->func, jit_type_ulong, (n))
 
 /* Constant uintptr_t value */
-#define CONSTANT_NINT(n) jit_value_create_nint_constant(jd->func, jit_type_nint, (n))
+#define CONSTANT_NINT(n)  jit_value_create_nint_constant(jd->func, jit_type_nint, (n))
 
 /* Constant pointer value */
 #define CONSTANT_PTR(p) \
@@ -191,6 +201,7 @@ static inline JVALUE _ternary(JITData *jd, JVALUE v, JVALUE if_true, JVALUE if_f
 /* Stack operations */
 
 #define STACKPTR()    (jd->stack_pointer)
+#define FRAMEPTR()    (jd->f)
 
 #define PUSH(objval) do { \
     STORE(STACKPTR(), jit_type_void_ptr, (objval)); \
@@ -213,6 +224,12 @@ static inline JVALUE _ternary(JITData *jd, JVALUE v, JVALUE if_true, JVALUE if_f
 #define SET_THIRD(v)   PUT(3, (v))
 #define SET_FOURTH(v)  PUT(4, (v))
 #define POP()          (STACKADJ(-1), PEEK(0))
+
+#define LOAD_VALUE_STACK()  LOAD_FIELD(FRAMEPTR(), PyFrameObject, f_valuestack, jit_type_void_ptr)
+
+/* Computes: ((uintptr_t)stack_pointer - (uintptr_t)f_valuestack)/sizeof(PyObject*)  */
+#define STACK_LEVEL() \
+    SHIFT_RIGHT(SUBTRACT(STACKPTR(), LOAD_VALUE_STACK()), CONSTANT_INT(3))
 
 // TODO: This needs to be adjusted depending on the configuration of _Py_atomic_int
 #define LOAD_EVAL_BREAKER() \
@@ -322,6 +339,15 @@ static inline JVALUE _ternary(JITData *jd, JVALUE v, JVALUE if_true, JVALUE if_f
     EMIT_JUMP(check_eval_breaker); \
 } while (0)
 
+#define INSTR_OFFSET()  (next_instr_index * sizeof(_Py_CODEUNIT))
+
+#define SET_WHY(n) \
+    STORE_FIELD(jd->ctx, EvalContext, why, jit_type_uint, CONSTANT_UINT(n))
+
+#define SET_RETVAL(val) \
+    STORE_FIELD(jd->ctx, EvalContext, retval, jit_type_void_ptr, (val))
+
+
 #define HANDLERS_FOR(op) \
     void emit_exceptional_handlers_for_##op (JITData *jd, int opcode)
 
@@ -330,6 +356,17 @@ static inline JVALUE _ternary(JITData *jd, JVALUE v, JVALUE if_true, JVALUE if_f
 /* Unlike PyErr_Occurred, this assumes tstate != NULL */
 #define PYERR_OCCURRED()  LOAD_FIELD(TSTATE(), PyThreadState, curexc_type, jit_type_void_ptr)
 #define TSTATE()    LOAD(CONSTANT_PTR(&_PyRuntime.gilstate.tstate_current._value), jit_type_void_ptr)
+
+/* Status code for main loop (reason for stack unwind) */
+enum why_code {
+        WHY_NOT =       0x0001, /* No error */
+        WHY_EXCEPTION = 0x0002, /* Exception occurred */
+        WHY_RETURN =    0x0008, /* 'return' statement */
+        WHY_BREAK =     0x0010, /* 'break' statement */
+        WHY_CONTINUE =  0x0020, /* 'continue' statement */
+        WHY_YIELD =     0x0040, /* 'yield' operator */
+        WHY_SILENCED =  0x0080  /* Exception silenced by 'with' */
+};
 
 EMITTER_FOR_SPECIAL(FLOW) {
     // Index 0 is special, it dispatches to the other handlers based on 'rv'
@@ -756,11 +793,42 @@ EMITTER_FOR(FOR_ITER) {
     CHECK_EVAL_BREAKER();
 }
 
-EMIT_AS_SUBROUTINE(BREAK_LOOP)
-EMIT_AS_SUBROUTINE(CONTINUE_LOOP)
-EMIT_AS_SUBROUTINE(SETUP_LOOP)
-EMIT_AS_SUBROUTINE(SETUP_EXCEPT)
-EMIT_AS_SUBROUTINE(SETUP_FINALLY)
+EMITTER_FOR(BREAK_LOOP) {
+    SET_WHY(WHY_BREAK);
+    BRANCH_SPECIAL(FAST_BLOCK_END);
+}
+
+EMITTER_FOR(CONTINUE_LOOP) {
+    CREATE_SIGNATURE(sig, jit_type_void_ptr, jit_type_long);
+    CALL_NATIVE_WITH_RET(tmp, sig, PyLong_FromLong, CONSTANT_LONG(oparg));
+    SET_RETVAL(tmp);
+    BRANCH_SPECIAL_IF_ZERO(tmp, ERROR);
+    SET_WHY(WHY_CONTINUE);
+    BRANCH_SPECIAL(FAST_BLOCK_END);
+}
+
+/* SETUP_* are the same */
+EMITTER_FOR(SETUP_LOOP) {
+    CREATE_SIGNATURE(sig, jit_type_void, jit_type_void_ptr, jit_type_int, jit_type_int, jit_type_int);
+    CALL_NATIVE(sig, PyFrame_BlockSetup,
+        FRAMEPTR(), CONSTANT_INT(opcode), CONSTANT_INT(INSTR_OFFSET() + oparg), STACK_LEVEL());
+    CHECK_EVAL_BREAKER();
+}
+
+EMITTER_FOR(SETUP_EXCEPT) {
+    CREATE_SIGNATURE(sig, jit_type_void, jit_type_void_ptr, jit_type_int, jit_type_int, jit_type_int);
+    CALL_NATIVE(sig, PyFrame_BlockSetup,
+        FRAMEPTR(), CONSTANT_INT(opcode), CONSTANT_INT(INSTR_OFFSET() + oparg), STACK_LEVEL());
+    CHECK_EVAL_BREAKER();
+}
+
+EMITTER_FOR(SETUP_FINALLY) {
+    CREATE_SIGNATURE(sig, jit_type_void, jit_type_void_ptr, jit_type_int, jit_type_int, jit_type_int);
+    CALL_NATIVE(sig, PyFrame_BlockSetup,
+        FRAMEPTR(), CONSTANT_INT(opcode), CONSTANT_INT(INSTR_OFFSET() + oparg), STACK_LEVEL());
+    CHECK_EVAL_BREAKER();
+}
+
 EMIT_AS_SUBROUTINE(BEFORE_ASYNC_WITH)
 EMIT_AS_SUBROUTINE(SETUP_ASYNC_WITH)
 EMIT_AS_SUBROUTINE(SETUP_WITH)
