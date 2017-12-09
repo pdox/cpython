@@ -546,7 +546,9 @@ PyEval_EvalFrameEx(PyFrameObject *f, int throwflag)
 {
     PyThreadState *tstate = PyThreadState_GET();
     if (!tstate->use_tracing && !_Py_TracingPossible && !PyDTrace_LINE_ENABLED() && !throwflag) {
-        return PyJIT_EvalFrame(f);
+//        if (strcmp(PyUnicode_AsUTF8(f->f_code->co_name), "foo") == 0) {
+            return PyJIT_EvalFrame(f);
+//        }
     }
     //fprintf(stderr, "SKIPPING JIT for %s\n", PyUnicode_AsUTF8(f->f_code->co_name));
     return tstate->interp->eval_frame(f, throwflag);

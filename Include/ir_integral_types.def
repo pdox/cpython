@@ -1,0 +1,24 @@
+/*
+  This is an X-macro which invokes a macro for each integral type:
+
+     PROCESS(name, ctype, printf_string, imm_identifier, va_arg_type)
+
+   For example:
+
+     PROCESS(ulonglong, long long, "%llu", ull, long long)
+
+*/
+
+PROCESS(char, char, "%d", c, int)
+PROCESS(uchar, unsigned char, "%u", uc, unsigned int)
+PROCESS(short, short, "%d", s, int)
+PROCESS(ushort, unsigned short, "%u", us, unsigned int)
+PROCESS(int, int, "%d", i, int)
+PROCESS(uint, unsigned int, "%u", ui, unsigned int)
+PROCESS(long, long, "%ld", l, long)
+PROCESS(ulong, unsigned long, "%lu", ul, unsigned long)
+PROCESS(longlong, long long, "%lld", ll, long long)
+PROCESS(ulonglong, unsigned long long, "%llu", ull, unsigned long long)
+PROCESS(intptr, intptr_t, "%" PRIdPTR, ip, intptr_t)
+PROCESS(uintptr, uintptr_t, "%" PRIuPTR, uip, uintptr_t)
+PROCESS(pyssizet, Py_ssize_t, "%" PY_FORMAT_SIZE_T "d", pyssizet, Py_ssize_t)

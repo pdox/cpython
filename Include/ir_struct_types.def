@@ -1,0 +1,10 @@
+/*
+   This is an X-macro which invokes the PROCESS macro
+   for each built-in struct type.
+ */
+
+PROCESS(pyobject, PyObject)
+PROCESS(pytypeobject, PyTypeObject)
+PROCESS(pyframeobject, PyFrameObject)
+PROCESS(evalcontext, EvalContext)
+PROCESS(pythreadstate, PyThreadState)

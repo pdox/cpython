@@ -2,7 +2,7 @@
 extern "C" {
 #endif
 
-#include <jit/jit.h>
+#include "ir.h"
 
 #define JIT_RC_FLOW            0
 #define JIT_RC_JUMP            1
@@ -16,7 +16,6 @@ extern "C" {
 
 typedef struct _EvalContext {
     int next_instr_index;  /* Next instruction index. Only used during jumps and special instructions. */
-    void *jit_ret_addr; /* Used by the JIT internally. */
     PyObject **stack_pointer; /* Only used for subroutine calls */
 
     unsigned why; /* Reason for block stack unwind */
@@ -49,21 +48,22 @@ typedef void (*PyJITEntryFunction)(EvalContext *ctx, PyFrameObject *f, PyObject 
 typedef void (*PyJITEmitHandlerFunction)(JITData *jd, int opcode);
 
 typedef struct move_entry {
-    jit_label_t from_label;
-    jit_label_t to_label;
+    ir_label from_label;
+    ir_label to_label;
     struct move_entry *next;
 } move_entry;
 
 typedef struct _JITData {
     PyJITEntryFunction entry;
     PyCodeObject *co; /* Borrowed reference */
-    jit_function_t func;
-    jit_value_t rv;
+    ir_context context;
+    ir_func func;
 
-    jit_value_t ctx;
-    jit_value_t f;
-    jit_value_t stack_pointer;
-    jit_value_t fastlocals;
+    ir_value rv;
+    ir_value ctx;
+    ir_value f;
+    ir_value stack_pointer;
+    ir_value fastlocals;
 
     /* Blocks that will be moved to the end */
     move_entry *move_entry_list;
@@ -74,9 +74,9 @@ typedef struct _JITData {
     /* Code to emit exceptional handlers for each opcode */
     PyJITEmitHandlerFunction handlers[256];
 
-    jit_label_t j_special[JIT_RC_EXIT + 1];
-    jit_label_t j_special_internal[JIT_RC_EXIT + 1];
-    jit_label_t jmptab[1];
+    ir_label j_special[JIT_RC_EXIT + 1];
+    ir_label j_special_internal[JIT_RC_EXIT + 1];
+    ir_label jmptab[1];
 } JITData;
 
 

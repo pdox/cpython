@@ -322,6 +322,12 @@ PYTHON_OBJS=	\
 		Python/bltinmodule.o \
 		Python/ceval.o \
 		Python/ceval_jit.o \
+                Python/ir_context.o \
+                Python/ir_func.o \
+                Python/ir_type_system.o \
+                Python/ir_instructions.o \
+                Python/ir_eval.o \
+                Python/ir_libjit.o \
 		Python/jit.o \
 		Python/compile.o \
 		Python/codecs.o \
@@ -897,6 +903,14 @@ regen-opcode-emitter-table:
 		$(srcdir)/Python/opcode_emitter_table.h.new
 	$(UPDATE_FILE) $(srcdir)/Python/opcode_emitter_table.h $(srcdir)/Python/opcode_emitter_table.h.new
 
+.PHONY: regen-opcode-names
+regen-opcode-names:
+	# Regenerate Python/opcode_names.h from Lib/opcode.py
+	# using Python/makeopcodenames.py
+	$(PYTHON_FOR_REGEN) $(srcdir)/Python/makeopcodenames.py \
+		$(srcdir)/Python/opcode_names.h.new
+	$(UPDATE_FILE) $(srcdir)/Python/opcode_names.h $(srcdir)/Python/opcode_names.h.new
+
 Python/ceval.o: $(srcdir)/Python/opcode_targets.h $(srcdir)/Python/ceval_gil.h
 
 Python/frozen.o: $(srcdir)/Python/importlib.h $(srcdir)/Python/importlib_external.h
@@ -1017,6 +1031,12 @@ PYTHON_HEADERS= \
 		$(srcdir)/Include/unicodeobject.h \
 		$(srcdir)/Include/warnings.h \
 		$(srcdir)/Include/weakrefobject.h \
+                $(srcdir)/Include/ir.h \
+                $(srcdir)/Include/ir_context.h \
+                $(srcdir)/Include/ir_func.h \
+                $(srcdir)/Include/ir_instructions.h \
+                $(srcdir)/Include/ir_macros.h \
+                $(srcdir)/Include/ir_type_system.h \
 		pyconfig.h \
 		$(PARSER_HEADERS) \
 		$(srcdir)/Include/Python-ast.h \
@@ -1026,6 +1046,7 @@ PYTHON_HEADERS= \
 		$(srcdir)/Include/internal/pymalloc.h \
 		$(srcdir)/Include/internal/pystate.h \
 		$(srcdir)/Include/internal/warnings.h \
+		$(srcdir)/Include/internal/jit.h \
 		$(DTRACE_HEADERS)
 
 $(LIBRARY_OBJS) $(MODOBJS) Programs/python.o: $(PYTHON_HEADERS)
