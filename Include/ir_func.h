@@ -15,8 +15,8 @@ struct ir_block_t {
     ir_block prev;
     ir_block next;
     ir_instr first_instr;
+    ir_instr current_instr; /* NULL means 'insert before first_instr' */
     ir_instr last_instr;
-    ir_label label_list;
     size_t index;
 };
 
@@ -35,7 +35,7 @@ struct ir_func_t {
     ir_context context;
     ir_type sig;
     ir_block first_block;
-    ir_block current_block;
+    ir_block current_block; /* NULL means 'insert after last_block' */
     ir_block last_block;
     size_t next_block_index;
 
@@ -69,28 +69,12 @@ static inline
 void _ir_func_new_block(ir_func func) {
     IR_FUNC_ALLOC(block, ir_block, 0)
     block->first_instr = NULL;
+    block->current_instr = NULL;
     block->last_instr = NULL;
-    block->label_list = NULL;
     block->index = (func->next_block_index)++;
     ir_block after = func->current_block ? func->current_block : func->last_block;
     IR_LL_INSERT_AFTER(func->first_block, func->last_block, after, block);
     func->current_block = block;
-}
-
-/* Internal function. Return the current block for instruction insertion,
-   creating if necessary.
- */
-static inline
-ir_block _ir_func_current_block(ir_func func) {
-    if (func->current_block == NULL) {
-        _ir_func_new_block(func);
-    }
-    return func->current_block;
-}
-
-static inline
-void _ir_func_end_block(ir_func func) {
-    func->current_block = NULL;
 }
 
 static inline
@@ -134,23 +118,6 @@ ir_label ir_label_new(ir_func func, const char *name) {
 
 static inline
 void ir_branch(ir_func func, ir_label target);
-
-/* Assign label to current position in function */
-static inline
-void ir_label_here(ir_func func, ir_label label) {
-    assert(label->block == NULL && "Label already assigned");
-    ir_block b = _ir_func_current_block(func);
-    if (b->last_instr != NULL) {
-        /* If we're in the middle of a block, end it and start a new one */
-        /* We do this by inserting an unconditional branch to the label */
-        ir_branch(func, label);
-        b = _ir_func_current_block(func);
-    }
-    assert(b->last_instr == NULL);
-    label->next = b->label_list;
-    label->block = b;
-    b->label_list = label;
-}
 
 /* Add a prefix to all labels from this point on.
    This must be matched with a corresponding ir_label_pop_prefix()

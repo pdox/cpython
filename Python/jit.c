@@ -156,8 +156,17 @@ _PyJIT_CodeGen(PyCodeObject *co) {
         jd->jmptab[i] = ir_label_new(jd->func, namebuf);
     }
     translate_bytecode(jd, co);
+#ifdef IR_DEBUG
     ir_func_verify(jd->func);
+#endif
+//    fprintf(stderr, "BEFORE LOWER:\n");
 //    ir_func_dump(jd->func);
+    ir_lower(jd->func, jd->fastlocals, jd->stack_pointer, jd->j_special[JIT_RC_NEXT_OPCODE]);
+//    fprintf(stderr, "AFTER LOWER:\n");
+//    ir_func_dump(jd->func);
+#ifdef IR_DEBUG
+    ir_func_verify(jd->func);
+#endif
     jd->entry = (PyJITEntryFunction)ir_libjit_compile(jd->func);
     co->co_jit_data = jd;
     return 0;

@@ -45,6 +45,7 @@ _ir_opcode_repr(ir_opcode opcode) {
     OPCODE_CASE(cast)
     OPCODE_CASE(phi)
     OPCODE_CASE(set_value)
+    OPCODE_CASE(label_here)
     OPCODE_CASE(branch)
     OPCODE_CASE(branch_cond)
     OPCODE_CASE(jumptable)
@@ -54,7 +55,8 @@ _ir_opcode_repr(ir_opcode opcode) {
     OPCODE_CASE(incref)
     OPCODE_CASE(decref)
     OPCODE_CASE(stackadj)
-    OPCODE_CASE(peek)
+    OPCODE_CASE(stack_peek)
+    OPCODE_CASE(stack_put)
     OPCODE_CASE(check_eval_breaker)
 
 #undef OPCODE_CASE
@@ -73,15 +75,11 @@ ir_instr_repr(char *p, ir_instr _instr) {
     }
     p += sprintf(p, "%s ", _ir_opcode_repr(_instr->opcode));
 
-#    define INSTR_AS(new_instr_type) \
-            new_instr_type instr = (new_instr_type)_instr;
-
     switch (_instr->opcode) {
         /* Unary ops */
         case ir_opcode_neg:
-        case ir_opcode_not:
-        case ir_opcode_bool: {
-            INSTR_AS(ir_instr_unop)
+        case ir_opcode_not: {
+            IR_INSTR_AS(unop)
             p = ir_value_repr(p, instr->value);
             break;
         }
@@ -101,7 +99,7 @@ ir_instr_repr(char *p, ir_instr _instr) {
         case ir_opcode_ne:
         case ir_opcode_le:
         case ir_opcode_ge: {
-            INSTR_AS(ir_instr_binop)
+            IR_INSTR_AS(binop)
             p = ir_value_repr(p, instr->left);
             p += sprintf(p, ", ");
             p = ir_value_repr(p, instr->right);
@@ -109,22 +107,29 @@ ir_instr_repr(char *p, ir_instr _instr) {
         }
         case ir_opcode_shl:
         case ir_opcode_shr: {
-            INSTR_AS(ir_instr_shift)
+            IR_INSTR_AS(shift)
             p = ir_value_repr(p, instr->value);
             p += sprintf(p, ", ");
             p = ir_value_repr(p, instr->count);
             break;
         }
+        case ir_opcode_notbool:
+        case ir_opcode_bool: {
+            IR_INSTR_AS(boolean)
+            p = ir_value_repr(p, instr->value);
+            break;
+        }
         case ir_opcode_ternary: {
-            INSTR_AS(ir_instr_ternary)
+            IR_INSTR_AS(ternary)
             p = ir_value_repr(p, instr->cond);
             p += sprintf(p, " ? ");
             p = ir_value_repr(p, instr->if_true);
             p += sprintf(p, " : ");
             p = ir_value_repr(p, instr->if_false);
             break;
+        }
         case ir_opcode_call: {
-            INSTR_AS(ir_instr_call)
+            IR_INSTR_AS(call)
             int i;
             p = ir_type_repr(p, ir_typeof(instr->target));
             p += sprintf(p, " ");
@@ -139,7 +144,7 @@ ir_instr_repr(char *p, ir_instr _instr) {
             break;
         }
         case ir_opcode_get_element_ptr: {
-            INSTR_AS(ir_instr_get_element_ptr)
+            IR_INSTR_AS(get_element_ptr)
             /* struct name */
             p = ir_type_repr(p, ir_pointer_base(ir_typeof(instr->ptr)));
             /* member name */
@@ -150,7 +155,7 @@ ir_instr_repr(char *p, ir_instr _instr) {
             break;
         }
         case ir_opcode_get_index_ptr: {
-            INSTR_AS(ir_instr_get_index_ptr)
+            IR_INSTR_AS(get_index_ptr)
             p = ir_type_repr(p, ir_pointer_base(ir_typeof(instr->ptr)));
             p += sprintf(p, " ");
             p = ir_value_repr(p, instr->ptr);
@@ -159,21 +164,21 @@ ir_instr_repr(char *p, ir_instr _instr) {
             break;
         }
         case ir_opcode_load: {
-            INSTR_AS(ir_instr_load)
+            IR_INSTR_AS(load)
             p = ir_type_repr(p, ir_pointer_base(ir_typeof(instr->ptr)));
             p += sprintf(p, " ");
             p = ir_value_repr(p, instr->ptr);
             break;
         }
         case ir_opcode_store: {
-            INSTR_AS(ir_instr_store)
+            IR_INSTR_AS(store)
             p = ir_value_repr(p, instr->ptr);
             p += sprintf(p, " <- ");
             p = ir_value_repr(p, instr->value);
             break;
         }
         case ir_opcode_constant: {
-            INSTR_AS(ir_instr_constant)
+            IR_INSTR_AS(constant)
             ir_type type = ir_typeof(_instr->dest);
             p = ir_type_repr(p, type);
             p += sprintf(p, " ");
@@ -184,22 +189,31 @@ ir_instr_repr(char *p, ir_instr _instr) {
             break;
         }
         case ir_opcode_cast: {
-            INSTR_AS(ir_instr_cast)
+            IR_INSTR_AS(cast)
             p = ir_value_repr(p, instr->value);
+            break;
+        }
+        case ir_opcode_phi: {
+            abort();
             break;
         }
         case ir_opcode_set_value: {
-            INSTR_AS(ir_instr_cast)
+            IR_INSTR_AS(cast)
             p = ir_value_repr(p, instr->value);
             break;
         }
+        case ir_opcode_label_here: {
+            IR_INSTR_AS(label_here)
+            p = ir_label_repr(p, instr->label);
+            p += sprintf(p, ":");
+        }
         case ir_opcode_branch: {
-            INSTR_AS(ir_instr_branch)
+            IR_INSTR_AS(branch)
             p = ir_label_repr(p, instr->target);
             break;
         }
         case ir_opcode_branch_cond: {
-            INSTR_AS(ir_instr_branch_cond)
+            IR_INSTR_AS(branch_cond)
             p = ir_value_repr(p, instr->cond);
             p += sprintf(p, " ? ");
             p = ir_label_repr(p, instr->if_true);
@@ -208,7 +222,7 @@ ir_instr_repr(char *p, ir_instr _instr) {
             break;
         }
         case ir_opcode_jumptable: {
-            INSTR_AS(ir_instr_jumptable)
+            IR_INSTR_AS(jumptable)
             unsigned int i;
             p = ir_value_repr(p, instr->index);
             p += sprintf(p, " [ ");
@@ -223,14 +237,58 @@ ir_instr_repr(char *p, ir_instr _instr) {
             break;
         }
         case ir_opcode_ret: {
-            INSTR_AS(ir_instr_ret)
+            IR_INSTR_AS(ret)
             if (instr->value) {
                 p = ir_value_repr(p, instr->value);
             }
             break;
         }
-        default:
-            p += sprintf(p, "<unhandled ir_opcode %d>", _instr->opcode);
+        case ir_opcode_getlocal: {
+            IR_INSTR_AS(getlocal)
+            p += sprintf(p, "%ld", (long)instr->index);
+            break;
+        }
+        case ir_opcode_setlocal: {
+            IR_INSTR_AS(setlocal)
+            p += sprintf(p, "%ld ", (long)instr->index);
+            p = ir_value_repr(p, instr->value);
+            break;
+        }
+        case ir_opcode_incref: {
+            IR_INSTR_AS(incref)
+            p = ir_value_repr(p, instr->obj);
+            if (instr->is_xincref) {
+                p += sprintf(p, " allows_null");
+            }
+            break;
+        }
+        case ir_opcode_decref: {
+            IR_INSTR_AS(decref)
+            p = ir_value_repr(p, instr->obj);
+            if (instr->is_xdecref) {
+                p += sprintf(p, " allows_null");
+            }
+            break;
+        }
+        case ir_opcode_stackadj: {
+            IR_INSTR_AS(stackadj)
+            p += sprintf(p, "%d", instr->amount);
+            break;
+        }
+        case ir_opcode_stack_peek: {
+            IR_INSTR_AS(stack_peek)
+            p += sprintf(p, "%d", instr->offset);
+            break;
+        }
+        case ir_opcode_stack_put: {
+            IR_INSTR_AS(stack_put)
+            p += sprintf(p, "%d ", instr->offset);
+            p = ir_value_repr(p, instr->value);
+            break;
+        }
+        case ir_opcode_check_eval_breaker: {
+            //IR_INSTR_AS(check_eval_breaker)
+            break;
         }
     }
     p += sprintf(p, "\n");

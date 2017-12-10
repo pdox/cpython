@@ -6,9 +6,6 @@
 
 jit_context_t gcontext = NULL;
 
-#define INSTR_AS(new_instr_type) \
-        new_instr_type instr = (new_instr_type)_instr;
-
 #define SET_DEST(v) do { \
     jit_value_t _v = (v); \
     assert(_instr->dest != NULL); \
@@ -81,19 +78,19 @@ void _emit_instr(jit_function_t jit_func,
                  ir_func func, ir_block block, ir_instr _instr) {
     switch (_instr->opcode) {
     case ir_opcode_neg: {
-        INSTR_AS(ir_instr_unop)
+        IR_INSTR_AS(unop)
         SET_DEST(jit_insn_neg(jit_func, JIT_VALUE(instr->value)));
         break;
     }
     case ir_opcode_not: {
-        INSTR_AS(ir_instr_unop)
+        IR_INSTR_AS(unop)
         SET_DEST(jit_insn_not(jit_func, JIT_VALUE(instr->value)));
         break;
     }
 
 #define EMIT_BINOP(name) \
     case ir_opcode_ ## name: { \
-        INSTR_AS(ir_instr_binop) \
+        IR_INSTR_AS(binop) \
         SET_DEST(jit_insn_ ## name (jit_func, JIT_VALUE(instr->left), JIT_VALUE(instr->right))); \
         break; \
     }
@@ -109,7 +106,7 @@ void _emit_instr(jit_function_t jit_func,
 
 #define EMIT_SHIFT(name) \
     case ir_opcode_ ## name: { \
-        INSTR_AS(ir_instr_shift) \
+        IR_INSTR_AS(shift) \
         SET_DEST(jit_insn_ ## name (jit_func, JIT_VALUE(instr->value), JIT_VALUE(instr->count))); \
         break; \
     }
@@ -118,19 +115,19 @@ void _emit_instr(jit_function_t jit_func,
 #undef EMIT_SHIFT
 
     case ir_opcode_notbool: {
-        INSTR_AS(ir_instr_boolean)
+        IR_INSTR_AS(boolean)
         SET_DEST(jit_insn_to_bool(jit_func, JIT_VALUE(instr->value)));
         break;
     }
     case ir_opcode_bool: {
-        INSTR_AS(ir_instr_boolean)
+        IR_INSTR_AS(boolean)
         SET_DEST(jit_insn_to_not_bool(jit_func, JIT_VALUE(instr->value)));
         break;
     }
 
 #define EMIT_COMPARISON(name) \
     case ir_opcode_ ## name: { \
-        INSTR_AS(ir_instr_comparison) \
+        IR_INSTR_AS(comparison) \
         SET_DEST(jit_insn_ ## name (jit_func, JIT_VALUE(instr->left), JIT_VALUE(instr->right))); \
         break; \
     }
@@ -143,7 +140,7 @@ void _emit_instr(jit_function_t jit_func,
 #undef EMIT_COMPARISON
 
     case ir_opcode_ternary: {
-        INSTR_AS(ir_instr_ternary)
+        IR_INSTR_AS(ternary)
         jit_label_t if_false_label = jit_label_undefined;
         jit_label_t after = jit_label_undefined;
         jit_value_t cond = JIT_VALUE(instr->cond);
@@ -160,7 +157,7 @@ void _emit_instr(jit_function_t jit_func,
         break;
     }
     case ir_opcode_call: {
-        INSTR_AS(ir_instr_call)
+        IR_INSTR_AS(call)
         int num_args = instr->arg_count;
         jit_value_t *args = (jit_value_t*)malloc(num_args * sizeof(jit_value_t));
         int i;
@@ -176,29 +173,29 @@ void _emit_instr(jit_function_t jit_func,
         break;
     }
     case ir_opcode_get_element_ptr: {
-        INSTR_AS(ir_instr_get_element_ptr)
+        IR_INSTR_AS(get_element_ptr)
         SET_DEST(jit_insn_add_relative(jit_func, JIT_VALUE(instr->ptr), instr->offset));
         break;
     }
     case ir_opcode_get_index_ptr: {
-        INSTR_AS(ir_instr_get_index_ptr)
+        IR_INSTR_AS(get_index_ptr)
         ir_type base_type = ir_pointer_base(ir_typeof(instr->ptr));
         SET_DEST(jit_insn_load_elem_address(jit_func, JIT_VALUE(instr->ptr), JIT_VALUE(instr->index), JIT_TYPE(base_type)));
         break;
     }
     case ir_opcode_load: {
-        INSTR_AS(ir_instr_load)
+        IR_INSTR_AS(load)
         ir_type base_type = ir_pointer_base(ir_typeof(instr->ptr));
         SET_DEST(jit_insn_load_relative(jit_func, JIT_VALUE(instr->ptr), 0, JIT_TYPE(base_type)));
         break;
     }
     case ir_opcode_store: {
-        INSTR_AS(ir_instr_store)
+        IR_INSTR_AS(store)
         jit_insn_store_relative(jit_func, JIT_VALUE(instr->ptr), 0, JIT_VALUE(instr->value));
         break;
     }
     case ir_opcode_constant: {
-        INSTR_AS(ir_instr_constant)
+        IR_INSTR_AS(constant)
         ir_type dest_type = ir_typeof(_instr->dest);
         jit_value_t ret;
         switch (dest_type->kind) {
@@ -219,7 +216,7 @@ void _emit_instr(jit_function_t jit_func,
         break;
     }
     case ir_opcode_cast: {
-        INSTR_AS(ir_instr_cast)
+        IR_INSTR_AS(cast)
         ir_type dest_type = ir_typeof(_instr->dest);
         SET_DEST(jit_insn_convert(jit_func, JIT_VALUE(instr->value), JIT_TYPE(dest_type), 0));
         break;
@@ -229,20 +226,23 @@ void _emit_instr(jit_function_t jit_func,
         break;
     }
     case ir_opcode_set_value: {
-        INSTR_AS(ir_instr_set_value)
+        IR_INSTR_AS(set_value)
         if (jit_values[_instr->dest->index] == NULL) { \
             jit_values[_instr->dest->index] = jit_value_create(jit_func, JIT_TYPE(ir_typeof(_instr->dest)));
         }
         jit_insn_store(jit_func, jit_values[_instr->dest->index], JIT_VALUE(instr->src));
         break;
     }
+    case ir_opcode_label_here: {
+        break;
+    }
     case ir_opcode_branch: {
-        INSTR_AS(ir_instr_branch)
+        IR_INSTR_AS(branch)
         jit_insn_branch(jit_func, JIT_LABEL(instr->target));
         break;
     }
     case ir_opcode_branch_cond: {
-        INSTR_AS(ir_instr_branch_cond)
+        IR_INSTR_AS(branch_cond)
         jit_value_t cond = JIT_VALUE(instr->cond);
         // TODO: Make this more efficient when one of the labels is for the following block.
         jit_insn_branch_if(jit_func, cond, JIT_LABEL(instr->if_true));
@@ -250,7 +250,7 @@ void _emit_instr(jit_function_t jit_func,
         break;
     }
     case ir_opcode_jumptable: {
-        INSTR_AS(ir_instr_jumptable)
+        IR_INSTR_AS(jumptable)
         int num_labels = instr->table_size;
         jit_label_t *labels = (jit_label_t*)malloc(sizeof(jit_label_t) * num_labels);
         int i;
@@ -266,7 +266,7 @@ void _emit_instr(jit_function_t jit_func,
         break;
     }
     case ir_opcode_ret: {
-        INSTR_AS(ir_instr_ret)
+        IR_INSTR_AS(ret)
         jit_insn_return(jit_func, instr->value ? JIT_VALUE(instr->value) : NULL);
         break;
     }

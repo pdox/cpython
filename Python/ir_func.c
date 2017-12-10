@@ -7,9 +7,6 @@
 #include <stdlib.h>
 #include "ir.h"
 
-#define INSTR_AS(new_instr_type) \
-        new_instr_type instr = (new_instr_type)_instr;
-
 ir_func ir_func_new(ir_context context, ir_type sig) {
     size_t i;
     IR_ALLOC(func, ir_func, sizeof(ir_value) * sig->param_count)
@@ -49,13 +46,7 @@ const char* _ir_label_qualname(ir_func func, const char *name) {
 
 char* ir_block_repr(char *p, ir_block b) {
     ir_instr instr;
-    ir_label label;
     p += sprintf(p, "    block %ld (%p)\n", (long)b->index, b);
-    for (label = b->label_list; label != NULL; label = label->next) {
-        p += sprintf(p, "    ");
-        p = ir_label_repr(p, label);
-        p += sprintf(p, ":\n");
-    }
     for (instr = b->first_instr; instr != NULL; instr = instr->next) {
         p = ir_instr_repr(p, instr);
     }
@@ -71,29 +62,37 @@ void ir_func_verify(ir_func func) {
 
         ir_instr _instr;
         ir_instr _instr_prev = NULL;
+        int in_label_section = 1;
         int found_branch = 0;
         for (_instr = b->first_instr; _instr != NULL; _instr = _instr->next) {
             assert(_instr_prev == _instr->prev);
             _instr_prev = _instr;
 
+            if (_instr->opcode == ir_opcode_label_here) {
+                assert(in_label_section == 1 && "Label inside block");
+            } else {
+                in_label_section = 0;
+            }
+
             if (ir_instr_opcode_is_flow_control(_instr->opcode)) {
-                assert(_instr == b->last_instr);
+                assert(_instr == b->last_instr &&
+                       "Flow control inside block");
                 assert(_instr->next == NULL);
                 found_branch = 1;
                 switch (_instr->opcode) {
                 case ir_opcode_branch: {
-                    INSTR_AS(ir_instr_branch)
+                    IR_INSTR_AS(branch)
                     assert(instr->target->block != NULL);
                     break;
                 }
                 case ir_opcode_branch_cond: {
-                    INSTR_AS(ir_instr_branch_cond)
+                    IR_INSTR_AS(branch_cond)
                     assert(instr->if_true->block != NULL);
                     assert(instr->if_false->block != NULL);
                     break;
                 }
                 case ir_opcode_jumptable: {
-                    INSTR_AS(ir_instr_jumptable)
+                    IR_INSTR_AS(jumptable)
                     size_t i;
                     for (i = 0; i < instr->table_size; i++) {
                         assert(instr->table[i]->block != NULL);

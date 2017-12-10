@@ -53,6 +53,9 @@ typedef enum {
     /* set register. Not present in SSA form */
     ir_opcode_set_value,   // existing_value = value;
 
+    /* labels */
+    ir_opcode_label_here,  // label:
+
     /* flow control */
     ir_opcode_branch,      // goto label;
     ir_opcode_branch_cond, // cond ? goto if_true : goto if_false;
@@ -65,14 +68,24 @@ typedef enum {
     ir_opcode_incref,
     ir_opcode_decref,
     ir_opcode_stackadj,
-    ir_opcode_peek,
+    ir_opcode_stack_peek,
+    ir_opcode_stack_put,
     ir_opcode_check_eval_breaker,
 } ir_opcode;
+
+#define IR_INSTR_AS(kind) \
+    ir_instr_##kind instr = (ir_instr_##kind) _instr;
 
 static inline
 int ir_instr_opcode_is_flow_control(ir_opcode opcode) {
     return opcode >= ir_opcode_branch &&
            opcode <= ir_opcode_ret;
+}
+
+static inline
+int ir_opcode_is_python_specific(ir_opcode opcode) {
+    return opcode >= ir_opcode_getlocal &&
+           opcode <= ir_opcode_check_eval_breaker;
 }
 
 IR_PROTOTYPE(ir_instr)
@@ -84,20 +97,26 @@ struct ir_instr_t {
                       type is considered ir_type_void in this case. */
 };
 
+/* Forward declaration. Actual code is at the bottom of this file. */
+static inline
+void _ir_instr_insert(ir_func func, ir_instr _instr);
+
+static inline
+void _ir_instr_remove(ir_func func, ir_instr _instr);
+
 #define IR_INSTR_HEADER    ir_instr_t base;
 #define IR_INSTR_ALLOC(_type, _extra_size) \
     _type instr = (_type) _ir_alloc(func->context, sizeof(_type ## _t) + (_extra_size), alignof(_type##_t));
 
 #define IR_INSTR_INSERT(_opcode, _ret_type) \
-    _ir_func_append(func, (ir_instr)instr, (_opcode), ir_value_new(func, (_ret_type)))
+    _ir_instr_insert_helper(func, (ir_instr)instr, (_opcode), ir_value_new(func, (_ret_type)))
 
 /* Append an instruction to the current block of the current function (internal use only) */
 static inline
-ir_value _ir_func_append(ir_func func, ir_instr instr, ir_opcode opcode, ir_value dest) {
+ir_value _ir_instr_insert_helper(ir_func func, ir_instr instr, ir_opcode opcode, ir_value dest) {
     instr->opcode = opcode;
     instr->dest = dest;
-    ir_block b = _ir_func_current_block(func);
-    IR_LL_INSERT_LAST(b->first_instr, b->last_instr, instr);
+    _ir_instr_insert(func, instr);
     return dest;
 }
 
@@ -543,8 +562,22 @@ void ir_set_value(ir_func func, ir_value dest, ir_value src) {
     IR_INSTR_ALLOC(ir_instr_set_value, 0)
     assert(ir_type_equal(ir_typeof(dest), ir_typeof(src)));
     instr->src = src;
-    /* Bypass automatic value creation by calling _ir_func_append directly */
-    _ir_func_append(func, (ir_instr)instr, ir_opcode_set_value, dest);
+    /* Bypass automatic value creation by calling _ir_instr_insert_helper directly */
+    _ir_instr_insert_helper(func, (ir_instr)instr, ir_opcode_set_value, dest);
+}
+
+/*****************************************************************************/
+IR_PROTOTYPE(ir_instr_label_here)
+struct ir_instr_label_here_t {
+    IR_INSTR_HEADER
+    ir_label label;
+};
+
+static inline
+void ir_label_here(ir_func func, ir_label label) {
+    IR_INSTR_ALLOC(ir_instr_label_here, 0);
+    instr->label = label;
+    IR_INSTR_INSERT(ir_opcode_label_here, ir_type_void);
 }
 
 /*****************************************************************************/
@@ -560,7 +593,6 @@ void ir_branch(ir_func func, ir_label target) {
     IR_INSTR_ALLOC(ir_instr_branch, 0)
     instr->target = target;
     IR_INSTR_INSERT(ir_opcode_branch, ir_type_void);
-    _ir_func_end_block(func);
 }
 
 /*****************************************************************************/
@@ -580,7 +612,6 @@ void ir_branch_cond(ir_func func, ir_value cond, ir_label if_true, ir_label if_f
     instr->if_true = if_true;
     instr->if_false = if_false;
     IR_INSTR_INSERT(ir_opcode_branch_cond, ir_type_void);
-    _ir_func_end_block(func);
 }
 
 static inline
@@ -618,7 +649,6 @@ void ir_jumptable(ir_func func, ir_value index, ir_label *table, size_t table_si
     instr->table_size = table_size;
     memcpy(&instr->table[0], table, table_size * sizeof(ir_label));
     IR_INSTR_INSERT(ir_opcode_jumptable, ir_type_void);
-    _ir_func_end_block(func);
 }
 
 /*****************************************************************************/
@@ -634,7 +664,6 @@ void ir_ret(ir_func func, ir_value value) {
     IR_INSTR_ALLOC(ir_instr_ret, 0)
     instr->value = value;
     IR_INSTR_INSERT(ir_opcode_ret, ir_type_void);
-    _ir_func_end_block(func);
 }
 
 /*****************************************************************************/
@@ -674,8 +703,8 @@ void ir_setlocal(ir_func func, size_t index, ir_value value) {
 IR_PROTOTYPE(ir_instr_incref)
 struct ir_instr_incref_t {
     IR_INSTR_HEADER
-    int is_xincref;
     ir_value obj;
+    int is_xincref;
 };
 
 static inline
@@ -691,8 +720,8 @@ void ir_incref(ir_func func, ir_value obj, int is_xincref) {
 IR_PROTOTYPE(ir_instr_decref)
 struct ir_instr_decref_t {
     IR_INSTR_HEADER
-    int is_xdecref;
     ir_value obj;
+    int is_xdecref;
 };
 
 static inline
@@ -720,17 +749,34 @@ void ir_stackadj(ir_func func, int amount) {
 
 /*****************************************************************************/
 
-IR_PROTOTYPE(ir_instr_peek)
-struct ir_instr_peek_t {
+IR_PROTOTYPE(ir_instr_stack_peek)
+struct ir_instr_stack_peek_t {
     IR_INSTR_HEADER
     int offset;
 };
 
 static inline
-ir_value ir_peek(ir_func func, int offset) {
-    IR_INSTR_ALLOC(ir_instr_peek, 0)
+ir_value ir_stack_peek(ir_func func, int offset) {
+    IR_INSTR_ALLOC(ir_instr_stack_peek, 0)
     instr->offset = offset;
-    return IR_INSTR_INSERT(ir_opcode_peek, ir_type_pyobject_ptr);
+    return IR_INSTR_INSERT(ir_opcode_stack_peek, ir_type_pyobject_ptr);
+}
+
+/*****************************************************************************/
+
+IR_PROTOTYPE(ir_instr_stack_put)
+struct ir_instr_stack_put_t {
+    IR_INSTR_HEADER
+    int offset;
+    ir_value value;
+};
+
+static inline
+ir_value ir_stack_put(ir_func func, int offset, ir_value value) {
+    IR_INSTR_ALLOC(ir_instr_stack_put, 0)
+    instr->offset = offset;
+    instr->value = value;
+    return IR_INSTR_INSERT(ir_opcode_stack_put, ir_type_void);
 }
 
 /*****************************************************************************/
@@ -749,3 +795,72 @@ void ir_check_eval_breaker(ir_func func, int next_instr_index) {
 }
 
 char* ir_instr_repr(char *p, ir_instr _instr);
+
+/*****************************************************************************/
+
+/* Insert an insertion into the function. This, along with _ir_instr_remove, should be
+   the only code which mutates the instruction linked list.
+ */
+static inline
+void _ir_instr_insert(ir_func func, ir_instr _instr) {
+    int is_label = (_instr->opcode == ir_opcode_label_here);
+    int terminates_block = ir_instr_opcode_is_flow_control(_instr->opcode);
+
+    if (is_label &&
+        func->current_block &&
+        func->current_block->current_instr != NULL &&
+        func->current_block->current_instr->opcode != ir_opcode_label_here) {
+        /* We're inserting a label into the middle of a block. Start a new one.
+           Leave the existing block with an unconditional branch.
+           Note that this is recursive!
+         */
+        IR_INSTR_AS(label_here);
+        ir_branch(func, instr->label);
+    }
+    if (terminates_block &&
+        func->current_block &&
+        func->current_block->current_instr != func->current_block->last_instr) {
+        /* We're adding a branch in the middle of an existing block. Yuck!
+           We have to split the block at the current instr, and then set the
+           insertion position to the top of the new block (at the last label).
+         */
+        assert(func->current_block->current_instr != NULL);
+        ir_block b = func->current_block;
+        _ir_func_new_block(func);
+        ir_block bnew = func->current_block;
+        assert(b->next == bnew);
+
+        /* Detach all instructions after the current one */
+        ir_instr from_instr = b->current_instr->next;
+        ir_instr to_instr = b->last_instr;
+        IR_LL_DETACH_CHAIN(b->first_instr, b->last_instr, from_instr, to_instr);
+
+        /* Attach into new block */
+        bnew->first_instr = from_instr;
+        bnew->current_instr = NULL;
+        bnew->last_instr = to_instr;
+
+        /* Move insertion position back to end of b */
+        func->current_block = b;
+        b->current_instr = b->last_instr;
+    }
+    if (func->current_block == NULL) {
+        _ir_func_new_block(func);
+    }
+    ir_block b = func->current_block;
+    if (is_label) {
+        IR_INSTR_AS(label_here);
+        assert(instr->label->block == NULL);
+        instr->label->block = b;
+    }
+    IR_LL_INSERT_AFTER(b->first_instr, b->last_instr, b->current_instr, _instr);
+    b->current_instr = _instr;
+    if (terminates_block) {
+        func->current_block = b->next;
+        assert(func->current_block == NULL || func->current_block->current_instr == NULL);
+    }
+}
+
+static inline
+void _ir_instr_remove(ir_func func, ir_instr instr) {
+}

@@ -326,7 +326,7 @@ PYTHON_OBJS=	\
                 Python/ir_func.o \
                 Python/ir_type_system.o \
                 Python/ir_instructions.o \
-                Python/ir_eval.o \
+                Python/ir_lower.o \
                 Python/ir_libjit.o \
 		Python/jit.o \
 		Python/compile.o \
@@ -1032,11 +1032,12 @@ PYTHON_HEADERS= \
 		$(srcdir)/Include/warnings.h \
 		$(srcdir)/Include/weakrefobject.h \
                 $(srcdir)/Include/ir.h \
+                $(srcdir)/Include/ir_macros.h \
                 $(srcdir)/Include/ir_context.h \
+                $(srcdir)/Include/ir_type_system.h \
                 $(srcdir)/Include/ir_func.h \
                 $(srcdir)/Include/ir_instructions.h \
-                $(srcdir)/Include/ir_macros.h \
-                $(srcdir)/Include/ir_type_system.h \
+                $(srcdir)/Include/ir_lower.h \
 		pyconfig.h \
 		$(PARSER_HEADERS) \
 		$(srcdir)/Include/Python-ast.h \

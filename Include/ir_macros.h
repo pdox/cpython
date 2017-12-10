@@ -7,6 +7,21 @@
 #define ALIGN_UP(p, a) ((void *)(((uintptr_t)(p) + (uintptr_t)((a) - 1)) & ~(uintptr_t)((a) - 1)))
 
 
+/* Remove 'a' from doubly-linked list */
+#define IR_LL_REMOVE(head, tail, a) do { \
+    if (a->prev) { \
+        a->prev->next = a->next; \
+    } else { \
+        head = a->next; \
+    } \
+    if (a->next) { \
+        a->next->prev = a->prev; \
+    } else { \
+        tail = a->prev; \
+    } \
+    a->prev = a->next = NULL; \
+} while (0)
+
 /* Insert 'b' into a linked list after existing node 'a'.
    If 'a' is NULL, inserts at front of list.
 

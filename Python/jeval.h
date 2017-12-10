@@ -142,60 +142,17 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 
 /* High-level Python macros */
 
-#define INCREF(objval) \
-    SET_REFCNT((objval), ADD(GET_REFCNT((objval)), CONSTANT_PYSSIZET(1)))
+#define INCREF(_objval)    ir_incref(jd->func, (_objval), 0)
+#define XINCREF(_objval)   ir_incref(jd->func, (_objval), 0)
 
-#define GET_REFCNT(objval) \
-    LOAD_FIELD((objval), PyObject, ob_refcnt, ir_type_pyssizet)
+#define DECREF(_objval)    ir_decref(jd->func, (_objval), 0)
+#define XDECREF(_objval)   ir_decref(jd->func, (_objval), 1)
 
-#define SET_REFCNT(objval, val) \
-    STORE_FIELD((objval), PyObject, ob_refcnt, ir_type_pyssizet, (val))
-
-#if defined(Py_DEBUG) || defined(Py_TRACE_REFS)
-#  define _DEALLOC(objval) do { \
-        CREATE_SIGNATURE(sig, ir_type_void, ir_type_pyobject_ptr); \
-        CALL_NATIVE(sig, _Py_Dealloc, (objval)); \
-    } while (0)
-#else
-#  define _DEALLOC(objval) do { \
-        CREATE_SIGNATURE(sig, ir_type_void, ir_type_pyobject_ptr); \
-        JVALUE _dealloc_type = LOAD_FIELD((objval), PyObject, ob_type, ir_type_pytypeobject_ptr); \
-        JVALUE _dealloc_func = LOAD_FIELD(_dealloc_type, PyTypeObject, tp_dealloc, sig); \
-        CALL_INDIRECT(sig, _dealloc_func, (objval)); \
-    } while (0)
-#endif
-
-#define DECREF(_objval) do { \
-    JVALUE _obj = (_objval); \
-    JLABEL do_dealloc = JLABEL_INIT("do_dealloc"); \
-    JLABEL return_point = JLABEL_INIT("return_point"); \
-    JVALUE new_refcount = SUBTRACT(GET_REFCNT(_obj), CONSTANT_PYSSIZET(1)); \
-    SET_REFCNT(_obj, new_refcount); \
-    BRANCH_IF_ZERO(new_refcount, do_dealloc); \
-    LABEL(return_point); \
-    BEGIN_REMOTE_SECTION(do_dealloc); \
-    _DEALLOC(_obj); \
-    BRANCH(return_point); \
-    END_REMOTE_SECTION(do_dealloc); \
-} while (0);
-
-#define XDECREF(_objval) do { \
-    JVALUE __obj = (_objval); \
-    JLABEL skip_if_null = JLABEL_INIT("skip_if_null"); \
-    BRANCH_IF_ZERO(__obj, skip_if_null); \
-    DECREF(__obj); \
-    LABEL(skip_if_null); \
-} while (0)
 
 /* Stack operations */
 
 #define STACKPTR()    (jd->stack_pointer)
 #define FRAMEPTR()    (jd->f)
-
-#define PUSH(objval) do { \
-    STORE(STACKPTR(), (objval)); \
-    STACKADJ(1); \
-} while (0)
 
 /* This does regular pointer arithmetic, equivalent to ptr + n in C.
    TODO: Figure out how to integrate this better into the IR
@@ -203,11 +160,10 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define POINTER_ADD(ptr, n) \
     ir_get_index_ptr(jd->func, ptr, CONSTANT_INT(n))
 
-#define STACKADJ(n)   SET_VALUE(STACKPTR(), POINTER_ADD(STACKPTR(), n))
+#define STACKADJ(n)   ir_stackadj(jd->func, (n))
 
-#define STACKADDR(n)  POINTER_ADD(STACKPTR(), -(n))
-#define PEEK(n)       LOAD(STACKADDR(n))
-#define PUT(n, v)     STORE(STACKADDR(n), (v))
+#define PEEK(n)       ir_stack_peek(jd->func, (n))
+#define PUT(n, v)     ir_stack_put(jd->func, (n), (v))
 
 #define TOP()     PEEK(1)
 #define SECOND()  PEEK(2)
@@ -218,6 +174,12 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define SET_SECOND(v)  PUT(2, (v))
 #define SET_THIRD(v)   PUT(3, (v))
 #define SET_FOURTH(v)  PUT(4, (v))
+
+#define PUSH(objval) do { \
+    PUT(0, (objval)); \
+    STACKADJ(1); \
+} while (0)
+
 #define POP()          (STACKADJ(-1), PEEK(0))
 
 #define LOAD_VALUE_STACK()  LOAD_FIELD(FRAMEPTR(), PyFrameObject, f_valuestack, ir_type_pyobject_ptr_ptr)
@@ -311,12 +273,12 @@ int do_raise(PyObject *, PyObject *);
         HANDLE_RV_INTERNAL(tmprv); \
     }
 
-#define GETLOCAL(i) \
-    LOAD_AT_INDEX(jd->fastlocals, CONSTANT_INT(i))
+#define GETLOCAL(i)  ir_getlocal(jd->func, (i))
 
+/* Notice that the SETLOCAL macro does more than just ir_setlocal! */
 #define SETLOCAL(i, val) do { \
     JVALUE tmp = GETLOCAL(i); \
-    STORE_AT_INDEX(jd->fastlocals, CONSTANT_INT(i), (val)); \
+    ir_setlocal(jd->func, (i), (val)); \
     XDECREF(tmp); \
 } while (0)
 
