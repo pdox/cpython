@@ -128,8 +128,7 @@ void ir_lower(ir_func func, ir_value fastlocals, ir_value stack_pointer, ir_labe
             _instr_next = _instr->next;
 
             /* Delete the original instruction */
-            assert(b->current_instr != _instr);
-            IR_LL_REMOVE(b->first_instr, b->last_instr, _instr);
+            _ir_instr_remove(func, b, _instr);
         }
     }
 }

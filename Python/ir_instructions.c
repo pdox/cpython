@@ -204,8 +204,12 @@ ir_instr_repr(char *p, ir_instr _instr) {
         }
         case ir_opcode_label_here: {
             IR_INSTR_AS(label_here)
-            p = ir_label_repr(p, instr->label);
-            p += sprintf(p, ":");
+            if (instr->label->name) {
+                p += sprintf(p, "%s:", instr->label->name);
+            } else {
+                p += sprintf(p, "unnamed label @ %p", instr->label);
+            }
+            break;
         }
         case ir_opcode_branch: {
             IR_INSTR_AS(branch)

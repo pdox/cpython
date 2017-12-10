@@ -118,7 +118,7 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
         move_entry *next;
         while (m != NULL) {
             next = m->next;
-            //ir_func_move_blocks_to_end(jd->func, m->from_label, m->to_label);
+            ir_func_move_blocks_to_end(jd->func, m->from_label, m->to_label);
             PyMem_RawFree(m);
             m = next;
         }

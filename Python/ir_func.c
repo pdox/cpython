@@ -153,7 +153,7 @@ void ir_func_move_blocks_to_end(ir_func func, ir_label from, ir_label to) {
     ir_block to_block = to->block;
     ir_block pre_to_block = to_block->prev;
 
-    assert(from_block && to_block);
+    assert(from_block && to_block && pre_to_block);
 
 #ifdef IR_DEBUG
     {

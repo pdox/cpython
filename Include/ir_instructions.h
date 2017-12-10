@@ -101,9 +101,6 @@ struct ir_instr_t {
 static inline
 void _ir_instr_insert(ir_func func, ir_instr _instr);
 
-static inline
-void _ir_instr_remove(ir_func func, ir_instr _instr);
-
 #define IR_INSTR_HEADER    ir_instr_t base;
 #define IR_INSTR_ALLOC(_type, _extra_size) \
     _type instr = (_type) _ir_alloc(func->context, sizeof(_type ## _t) + (_extra_size), alignof(_type##_t));
@@ -862,5 +859,7 @@ void _ir_instr_insert(ir_func func, ir_instr _instr) {
 }
 
 static inline
-void _ir_instr_remove(ir_func func, ir_instr instr) {
+void _ir_instr_remove(ir_func func, ir_block block, ir_instr instr) {
+    assert(block->current_instr != instr);
+    IR_LL_REMOVE(block->first_instr, block->last_instr, instr);
 }
