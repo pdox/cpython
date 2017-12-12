@@ -2,12 +2,6 @@
 #include "Include/internal/pystate.h"
 #include "ir.h"
 
-#if defined(Py_DEBUG) || defined(Py_TRACE_REFS)
-#  define INLINE_DEALLOC   0
-#else
-#  define INLINE_DEALLOC   1
-#endif
-
 static inline
 void _ir_lower_one_instr(
         ir_func func,
@@ -59,12 +53,12 @@ void _ir_lower_one_instr(
         IR_STORE_FIELD(func, obj, PyObject, ob_refcnt, ir_type_pyssizet, new_value);
         ir_branch_if(func, new_value, skip_dealloc);
         ir_value dealloc_func;
-        if (INLINE_DEALLOC) {
-            ir_value typeobj = IR_LOAD_FIELD(func, obj, PyObject, ob_type, ir_type_pytypeobject_ptr);
-            dealloc_func = IR_LOAD_FIELD(func, typeobj, PyTypeObject, tp_dealloc, dealloc_sig);
-        } else {
-            dealloc_func = ir_constant_from_ptr(func, dealloc_sig, _Py_Dealloc, "_Py_Dealloc");
-        }
+#if defined(Py_DEBUG) || defined(Py_TRACE_REFS)
+        dealloc_func = ir_constant_from_ptr(func, dealloc_sig, _Py_Dealloc, "_Py_Dealloc");
+#else
+        ir_value typeobj = IR_LOAD_FIELD(func, obj, PyObject, ob_type, ir_type_pytypeobject_ptr);
+        dealloc_func = IR_LOAD_FIELD(func, typeobj, PyTypeObject, tp_dealloc, dealloc_sig);
+#endif
         ir_value args[] = {obj};
         ir_call(func, dealloc_func, 1, args);
         ir_label_here(func, skip_dealloc);
