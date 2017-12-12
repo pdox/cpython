@@ -168,6 +168,9 @@ _PyJIT_CodeGen(PyCodeObject *co) {
     ir_func_verify(jd->func);
 #endif
     jd->entry = (PyJITEntryFunction)ir_libjit_compile(jd->func);
+    ir_context_destroy(jd->context);
+    jd->context = NULL;
+    jd->func = NULL;
     co->co_jit_data = jd;
     return 0;
 }
