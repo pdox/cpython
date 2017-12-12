@@ -24,34 +24,17 @@ DECLARE_SPECIAL(NEXT_OPCODE);
     JTYPE sigvar##_args[] = { __VA_ARGS__ }; \
     JTYPE sigvar = ir_create_function_type(jd->context, ret_type, sizeof(sigvar##_args)/sizeof(JTYPE), sigvar##_args);
 
-#define CALL_INDIRECT(sig, funcval, ...) \
-    do { \
-        JVALUE call_args[] = { __VA_ARGS__ }; \
-        JVALUE func_casted = ir_cast(jd->func, (sig), (funcval)); \
-        ir_call(jd->func, func_casted, sizeof(call_args)/sizeof(JVALUE), call_args); \
-    } while (0)
+#define CALL_INDIRECT(sig, funcval, ...) ({ \
+    JVALUE call_args[] = { __VA_ARGS__ }; \
+    JVALUE func_casted = ir_cast(jd->func, (sig), (funcval)); \
+    ir_call(jd->func, func_casted, sizeof(call_args)/sizeof(JVALUE), call_args); \
+    })
 
-#define CALL_INDIRECT_WITH_RET(retvar, sig, funcval, ...) \
-    JVALUE retvar; \
-    do { \
-        JVALUE call_args[] = { __VA_ARGS__ }; \
-        JVALUE func_casted = ir_cast(jd->func, sig, (funcval)); \
-        retvar = ir_call(jd->func, func_casted, sizeof(call_args)/sizeof(JVALUE), call_args); \
-    } while (0)
-
-#define CALL_NATIVE(sig, native_func, ...) do { \
+#define CALL_NATIVE(sig, native_func, ...) ({ \
     JVALUE call_args[] = { __VA_ARGS__ }; \
     JVALUE funcval = ir_constant_from_ptr(jd->func, (sig), native_func, #native_func); \
     ir_call(jd->func, funcval, sizeof(call_args)/sizeof(JVALUE), call_args); \
-} while (0)
-
-#define CALL_NATIVE_WITH_RET(retvar, sig, native_func, ...) \
-    JVALUE retvar; \
-    do { \
-        JVALUE call_args[] = { __VA_ARGS__ }; \
-        JVALUE funcval = ir_constant_from_ptr(jd->func, sig, native_func, #native_func); \
-        retvar = ir_call(jd->func, funcval, sizeof(call_args)/sizeof(JVALUE), call_args); \
-    } while (0)
+})
 
 #define HANDLE_RV(inval) do { \
     SET_VALUE(jd->rv, (inval)); \
@@ -96,12 +79,38 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 
 #define ADD(v1, v2)         ir_add(jd->func, (v1), (v2))
 #define SUBTRACT(v1, v2)    ir_sub(jd->func, (v1), (v2))
+
+#define BITWISE_AND(v1, v2) ir_and(jd->func, (v1), (v2))
+#define BITWISE_OR(v1, v2)  ir_or(jd->func, (v1), (v2))
+
+/* Logical AND with no short-circuiting */
+#define LOGICAL_AND_NSC(v1, v2) ir_and(jd->func, ir_bool(jd->func, (v1)), ir_bool(jd->func, (v2))
+
+/* Logical OR with no short-circuiting */
+#define LOGICAL_OR(v1, v2)  ir_or(jd->func, ir_bool(jd->func, (v1)), ir_bool(jd->func, (v2))
+
+/* Logical AND with short-circuiting */
+#define LOGICAL_AND_SC(v1, v2) ({ \
+    JLABEL logical_and_end = JLABEL_INIT("logical_and_end"); \
+    JVALUE ret = JVALUE_CREATE(ir_type_int); \
+    SET_VALUE(ret, BOOL(v1)); \
+    BRANCH_IF_NOT(ret, logical_and_end); \
+    SET_VALUE(ret, BOOL(v2)); \
+    LABEL(logical_and_end); \
+    ret; \
+})
+
 #define SHIFT_RIGHT(v1, v2) ir_shr(jd->func, (v1), (v2))
 #define CMP_LT(v1, v2)      ir_lt(jd->func, (v1), (v2))
 #define CMP_EQ(v1, v2)      ir_eq(jd->func, (v1), (v2))
 #define CMP_NE(v1, v2)      ir_ne(jd->func, (v1), (v2))
 #define CMP_GT(v1, v2)      ir_gt(jd->func, (v1), (v2))
+#define CMP_GE(v1, v2)      ir_ge(jd->func, (v1), (v2))
+#define CMP_LE(v1, v2)      ir_le(jd->func, (v1), (v2))
 #define TERNARY(v, if_true, if_false)   ir_ternary(jd->func, (v), (if_true), (if_false))
+
+#define BOOL(v)             ir_bool(jd->func, (v))
+#define NOTBOOL(v)          ir_notbool(jd->func, (v))
 
 /* Constant int value */
 #define CONSTANT_INT(n)   ir_constant_int(jd->func, (n), NULL)
@@ -204,6 +213,26 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define CHECK_EVAL_BREAKER() \
     BRANCH_IF(LOAD_EVAL_BREAKER(), jd->j_special[JIT_RC_NEXT_OPCODE]);
 
+#define IR_Py_TYPE(obj) \
+    LOAD_FIELD((obj), PyObject, ob_type, ir_type_pytypeobject_ptr)
+
+#define LOAD_TP_FLAGS(typeobj) \
+    LOAD_FIELD((typeobj), PyTypeObject, tp_flags, ir_type_ulong)
+
+#define IR_PyType_FastSubclass(typeobj, feature) \
+    BOOL(BITWISE_AND(LOAD_TP_FLAGS(typeobj), CONSTANT_ULONG(feature)))
+
+#define IR_PyTuple_Check(obj) \
+    IR_PyType_FastSubclass(IR_Py_TYPE(obj), Py_TPFLAGS_TUPLE_SUBCLASS)
+
+#define IR_PyType_Check(obj) \
+    IR_PyType_FastSubclass(IR_Py_TYPE(obj), Py_TPFLAGS_TYPE_SUBCLASS)
+
+#define IR_PyExceptionClass_Check(x) \
+    LOGICAL_AND_SC( \
+        IR_PyType_Check((x)), \
+        IR_PyType_FastSubclass(CAST(ir_type_pytypeobject_ptr, (x)), Py_TPFLAGS_BASE_EXC_SUBCLASS))
+
 #define CALL_PyErr_SetString(exc, msg) do { \
     CREATE_SIGNATURE(sig, ir_type_void, ir_type_void_ptr, ir_type_void_ptr); \
     CALL_NATIVE(sig, PyErr_SetString, CONSTANT_VOID_PTR(exc), CONSTANT_VOID_PTR(msg)); \
@@ -246,7 +275,7 @@ int do_raise(PyObject *, PyObject *);
     void _PyJIT_EMIT_TARGET_##op (JITData *jd, int next_instr_index, int opcode, int oparg) { \
         STORE_FIELD(jd->ctx, EvalContext, stack_pointer, ir_type_pyobject_ptr_ptr, STACKPTR()); \
         CREATE_SIGNATURE(instr_sig, ir_type_int, ir_type_evalcontext_ptr, ir_type_pyframeobject_ptr, ir_type_int, ir_type_int, ir_type_int, ir_type_int); \
-        CALL_NATIVE_WITH_RET(tmprv, instr_sig, opcode_function_table[opcode], jd->ctx, jd->f, CONSTANT_INT(next_instr_index), CONSTANT_INT(opcode), CONSTANT_INT(oparg), /*jumpev=*/ CONSTANT_INT(0)); \
+        JVALUE tmprv = CALL_NATIVE(instr_sig, opcode_function_table[opcode], jd->ctx, jd->f, CONSTANT_INT(next_instr_index), CONSTANT_INT(opcode), CONSTANT_INT(oparg), /*jumpev=*/ CONSTANT_INT(0)); \
         SET_VALUE(STACKPTR(), LOAD_FIELD(jd->ctx, EvalContext, stack_pointer, ir_type_pyobject_ptr_ptr)); \
         HANDLE_RV_INTERNAL(tmprv); \
     }
@@ -273,7 +302,7 @@ int do_raise(PyObject *, PyObject *);
     void _PyJIT_EMIT_SPECIAL_##op (JITData *jd) { \
         STORE_FIELD(jd->ctx, EvalContext, stack_pointer, ir_type_pyobject_ptr_ptr, STACKPTR()); \
         CREATE_SIGNATURE(sig, ir_type_int, ir_type_evalcontext_ptr, ir_type_pyframeobject_ptr, ir_type_int, ir_type_int); \
-        CALL_NATIVE_WITH_RET(tmprv, sig, _PyEval_FUNC_JIT_TARGET_II_##op, jd->ctx, jd->f, GET_CTX_NEXT_INSTR_INDEX(), /*jumpev=*/ CONSTANT_INT(0)); \
+        JVALUE tmprv = CALL_NATIVE(sig, _PyEval_FUNC_JIT_TARGET_II_##op, jd->ctx, jd->f, GET_CTX_NEXT_INSTR_INDEX(), /*jumpev=*/ CONSTANT_INT(0)); \
         SET_VALUE(STACKPTR(), LOAD_FIELD(jd->ctx, EvalContext, stack_pointer, ir_type_pyobject_ptr_ptr)); \
         HANDLE_RV_INTERNAL(tmprv); \
     }
@@ -448,7 +477,7 @@ EMITTER_FOR(DUP_TOP_TWO) {
     EMITTER_FOR_BASE(_ ## op) { \
         JVALUE objval = TOP(); \
         CREATE_SIGNATURE(sig, ir_type_pyobject_ptr, ir_type_pyobject_ptr); \
-        CALL_NATIVE_WITH_RET(res, sig, func, objval); \
+        JVALUE res = CALL_NATIVE(sig, func, objval); \
         DECREF(objval); \
         SET_TOP(res); \
         BRANCH_IF_NOT(res, jd->j_special[JIT_RC_ERROR]); \
@@ -463,7 +492,7 @@ EMITTER_FOR(UNARY_NOT) {
     JLABEL real_error = JLABEL_INIT("real_error");
     JVALUE value = TOP();
     CREATE_SIGNATURE(sig, ir_type_int, ir_type_pyobject_ptr);
-    CALL_NATIVE_WITH_RET(err, sig, PyObject_IsTrue, value);
+    JVALUE err = CALL_NATIVE(sig, PyObject_IsTrue, value);
     DECREF(value);
 
     /* Jump if err < 0 (unlikely) */
@@ -486,7 +515,7 @@ EMITTER_FOR(BINARY_POWER) {
     JVALUE exp = POP();
     JVALUE base = TOP();
     CREATE_SIGNATURE(sig, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr); \
-    CALL_NATIVE_WITH_RET(res, sig, PyNumber_Power, base, exp, CONSTANT_PYOBJ(Py_None));
+    JVALUE res = CALL_NATIVE(sig, PyNumber_Power, base, exp, CONSTANT_PYOBJ(Py_None));
     DECREF(base);
     DECREF(exp);
     SET_TOP(res);
@@ -499,7 +528,7 @@ EMITTER_FOR(BINARY_POWER) {
         JVALUE right = POP(); \
         JVALUE left = TOP(); \
         CREATE_SIGNATURE(sig, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr); \
-        CALL_NATIVE_WITH_RET(res, sig, func, left, right); \
+        JVALUE res = CALL_NATIVE(sig, func, left, right); \
         DECREF(left); \
         DECREF(right); \
         SET_TOP(res); \
@@ -526,7 +555,7 @@ EMITTER_FOR(LIST_APPEND) {
     JVALUE v = POP();
     JVALUE list = PEEK(oparg);
     CREATE_SIGNATURE(sig, ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
-    CALL_NATIVE_WITH_RET(err, sig, PyList_Append, list, v);
+    JVALUE err = CALL_NATIVE(sig, PyList_Append, list, v);
     DECREF(v);
     BRANCH_SPECIAL_IF(err, ERROR);
     CHECK_EVAL_BREAKER();
@@ -536,7 +565,7 @@ EMITTER_FOR(SET_ADD) {
     JVALUE v = POP();
     JVALUE set = PEEK(oparg);
     CREATE_SIGNATURE(sig, ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
-    CALL_NATIVE_WITH_RET(err, sig, PySet_Add, set, v);
+    JVALUE err = CALL_NATIVE(sig, PySet_Add, set, v);
     DECREF(v);
     BRANCH_SPECIAL_IF(err, ERROR);
     CHECK_EVAL_BREAKER();
@@ -546,7 +575,7 @@ EMITTER_FOR(INPLACE_POWER) {
     JVALUE exp = POP();
     JVALUE base = TOP();
     CREATE_SIGNATURE(sig, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr); \
-    CALL_NATIVE_WITH_RET(res, sig, PyNumber_InPlacePower, base, exp, CONSTANT_PYOBJ(Py_None));
+    JVALUE res = CALL_NATIVE(sig, PyNumber_InPlacePower, base, exp, CONSTANT_PYOBJ(Py_None));
     DECREF(base);
     DECREF(exp);
     SET_TOP(res);
@@ -574,7 +603,7 @@ EMITTER_FOR(STORE_SUBSCR) {
     STACKADJ(-3);
     /* container[sub] = v */
     CREATE_SIGNATURE(sig, ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
-    CALL_NATIVE_WITH_RET(err, sig, PyObject_SetItem, container, sub, v);
+    JVALUE err = CALL_NATIVE(sig, PyObject_SetItem, container, sub, v);
     DECREF(v);
     DECREF(container);
     DECREF(sub);
@@ -590,7 +619,7 @@ EMITTER_FOR(DELETE_SUBSCR) {
     STACKADJ(-2);
     /* del container[sub] */
     CREATE_SIGNATURE(sig, ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
-    CALL_NATIVE_WITH_RET(err, sig, PyObject_DelItem, container, sub);
+    JVALUE err = CALL_NATIVE(sig, PyObject_DelItem, container, sub);
     DECREF(container);
     DECREF(sub);
     BRANCH_SPECIAL_IF(err, ERROR);
@@ -602,10 +631,10 @@ EMITTER_FOR(PRINT_EXPR) {
     JVALUE value = POP();
     JLABEL hook_null = JLABEL_INIT("hook_null");
     CREATE_SIGNATURE(sig1, ir_type_pyobject_ptr, ir_type_void_ptr);
-    CALL_NATIVE_WITH_RET(hook, sig1, _PySys_GetObjectId, CONSTANT_VOID_PTR(&PyId_displayhook));
+    JVALUE hook = CALL_NATIVE(sig1, _PySys_GetObjectId, CONSTANT_VOID_PTR(&PyId_displayhook));
     BRANCH_IF_NOT(hook, hook_null);
     CREATE_SIGNATURE(sig2, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
-    CALL_NATIVE_WITH_RET(res, sig2, PyObject_CallFunctionObjArgs, hook, value, CONSTANT_PYOBJ(NULL));
+    JVALUE res = CALL_NATIVE(sig2, PyObject_CallFunctionObjArgs, hook, value, CONSTANT_PYOBJ(NULL));
     DECREF(value);
     BRANCH_SPECIAL_IF_ZERO(res, ERROR);
     DECREF(res);
@@ -629,7 +658,7 @@ EMITTER_FOR(RAISE_VARARGS) {
         exc = POP();   /* fall through */
     case 0: {
         CREATE_SIGNATURE(sig, ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
-        CALL_NATIVE_WITH_RET(ret, sig, do_raise, exc, cause);
+        JVALUE ret = CALL_NATIVE(sig, do_raise, exc, cause);
         BRANCH_IF_NOT(ret, fin);
         SET_WHY(WHY_EXCEPTION);
         BRANCH_SPECIAL(FAST_BLOCK_END);
@@ -668,7 +697,7 @@ EMITTER_FOR(STORE_ATTR) {
     JVALUE v = SECOND();
     STACKADJ(-2);
     CREATE_SIGNATURE(sig, ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
-    CALL_NATIVE_WITH_RET(err, sig, PyObject_SetAttr, owner, CONSTANT_PYOBJ(name), v);
+    JVALUE err = CALL_NATIVE(sig, PyObject_SetAttr, owner, CONSTANT_PYOBJ(name), v);
     DECREF(v);
     DECREF(owner);
     BRANCH_IF(err, jd->j_special[JIT_RC_ERROR]);
@@ -705,14 +734,120 @@ EMITTER_FOR(LOAD_ATTR) {
     PyObject *name = GETNAME(oparg);
     JVALUE owner = TOP();
     CREATE_SIGNATURE(sig, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
-    CALL_NATIVE_WITH_RET(res, sig, PyObject_GetAttr, owner, CONSTANT_PYOBJ(name));
+    JVALUE res = CALL_NATIVE(sig, PyObject_GetAttr, owner, CONSTANT_PYOBJ(name));
     DECREF(owner);
     SET_TOP(res);
     BRANCH_IF_NOT(res, jd->j_special[JIT_RC_ERROR]);
     CHECK_EVAL_BREAKER();
 }
 
-EMIT_AS_SUBROUTINE(COMPARE_OP)
+/* Copied from ceval cmp_outcome */
+#define CANNOT_CATCH_MSG "catching classes that do not inherit from "\
+                         "BaseException is not allowed"
+
+int
+_compare_op_exc_match_helper(PyObject *v, PyObject *w) {
+    Py_ssize_t i, length;
+    length = PyTuple_Size(w);
+    for (i = 0; i < length; i += 1) {
+        PyObject *exc = PyTuple_GET_ITEM(w, i);
+        if (!PyExceptionClass_Check(exc)) {
+            PyErr_SetString(PyExc_TypeError,
+                            CANNOT_CATCH_MSG "1");
+            return 0;
+        }
+    }
+    return 1;
+}
+
+EMITTER_FOR(COMPARE_OP) {
+    JVALUE right = POP();
+    JVALUE left = TOP();
+    JVALUE res = JVALUE_CREATE(ir_type_pyobject_ptr);
+
+    /* Each of these must set 'res' */
+    switch (oparg) {
+    case PyCmp_IS: {
+        SET_VALUE(res, TERNARY(CMP_EQ(left, right), CONSTANT_PYOBJ(Py_True), CONSTANT_PYOBJ(Py_False)));
+        INCREF(res);
+        break;
+    }
+    case PyCmp_IS_NOT: {
+        SET_VALUE(res, TERNARY(CMP_NE(left, right), CONSTANT_PYOBJ(Py_True), CONSTANT_PYOBJ(Py_False)));
+        INCREF(res);
+        break;
+    }
+    case PyCmp_IN:
+    case PyCmp_NOT_IN: {
+        JLABEL no_exception = JLABEL_INIT("no_exception");
+        JLABEL after_no_exception = JLABEL_INIT("after_no_exception");
+        CREATE_SIGNATURE(sig, ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
+        JVALUE tmp = CALL_NATIVE(sig, PySequence_Contains, right, left);
+
+        /* Check for < 0 */
+        BRANCH_IF(CMP_GE(tmp, CONSTANT_INT(0)), no_exception);
+
+        /* Handle exception (tmp < 0) case */
+        SET_VALUE(res, CONSTANT_PYOBJ(NULL));
+        BRANCH(after_no_exception);
+
+        /* Handle no exception case (tmp >= 0) */
+        LABEL(no_exception);
+        if (oparg == PyCmp_IN) {
+            SET_VALUE(res, TERNARY(tmp, CONSTANT_PYOBJ(Py_True), CONSTANT_PYOBJ(Py_False)));
+        } else {
+            SET_VALUE(res, TERNARY(tmp, CONSTANT_PYOBJ(Py_False), CONSTANT_PYOBJ(Py_True)));
+        }
+        INCREF(res);
+        LABEL(after_no_exception);
+        break;
+    }
+    case PyCmp_EXC_MATCH: {
+        JLABEL do_exc_match = JLABEL_INIT("do_exc_match");
+        JLABEL after_exc_match = JLABEL_INIT("after_exc_match");
+        JLABEL handle_tuple = JLABEL_INIT("handle_tuple");
+        /* Handle common case (exception class) first */
+        BRANCH_IF(IR_PyExceptionClass_Check(right), do_exc_match);
+        BRANCH_IF(IR_PyTuple_Check(right), handle_tuple);
+
+        /* Error case: neither exception class nor tuple */
+        CALL_PyErr_SetString(PyExc_TypeError, CANNOT_CATCH_MSG "2");
+        SET_VALUE(res, CONSTANT_PYOBJ(NULL));
+        BRANCH(after_exc_match);
+
+        /* Tuple case */
+        LABEL(handle_tuple);
+        CREATE_SIGNATURE(sig, ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
+        JVALUE tmp = CALL_NATIVE(sig, _compare_op_exc_match_helper, left, right);
+        /* This returns 0 to indicate error, 1 to indicate OK */
+        BRANCH_IF(tmp, do_exc_match);
+        SET_VALUE(res, CONSTANT_PYOBJ(NULL));
+        BRANCH(after_exc_match);
+
+        /* Finally, run PyErr_GivenExceptionMatches */
+        LABEL(do_exc_match);
+        CREATE_SIGNATURE(sig2, ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
+        JVALUE exc_matches = CALL_NATIVE(sig2, PyErr_GivenExceptionMatches, left, right);
+        SET_VALUE(res, TERNARY(exc_matches, CONSTANT_PYOBJ(Py_True), CONSTANT_PYOBJ(Py_False)));
+        INCREF(res);
+
+        LABEL(after_exc_match);
+        break;
+    }
+    default: {
+        CREATE_SIGNATURE(sig, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_int);
+        SET_VALUE(res, CALL_NATIVE(sig, PyObject_RichCompare, left, right, CONSTANT_INT(oparg)));
+        break;
+    }
+    }
+
+    DECREF(left);
+    DECREF(right);
+    SET_TOP(res);
+    BRANCH_IF_NOT(res, jd->j_special[JIT_RC_ERROR]);
+    CHECK_EVAL_BREAKER();
+}
+
 EMIT_AS_SUBROUTINE(IMPORT_NAME)
 EMIT_AS_SUBROUTINE(IMPORT_STAR)
 EMIT_AS_SUBROUTINE(IMPORT_FROM)
@@ -738,7 +873,7 @@ EMITTER_FOR(POP_JUMP_IF_FALSE) {
     LABEL(skip2);
     /* Generic case */
     CREATE_SIGNATURE(sig, ir_type_int, ir_type_pyobject_ptr);
-    CALL_NATIVE_WITH_RET(err, sig, PyObject_IsTrue, cond);
+    JVALUE err = CALL_NATIVE(sig, PyObject_IsTrue, cond);
     DECREF(cond);
     BRANCH_IF(CMP_GT(err, CONSTANT_INT(0)), fin);
     BRANCH_IF(CMP_LT(err, CONSTANT_INT(0)), jd->j_special[JIT_RC_ERROR]);
@@ -765,7 +900,7 @@ EMITTER_FOR(POP_JUMP_IF_TRUE) {
     LABEL(skip2);
     /* Generic case */
     CREATE_SIGNATURE(sig, ir_type_int, ir_type_pyobject_ptr);
-    CALL_NATIVE_WITH_RET(err, sig, PyObject_IsTrue, cond);
+    JVALUE err = CALL_NATIVE(sig, PyObject_IsTrue, cond);
     DECREF(cond);
     BRANCH_IF(CMP_EQ(err, CONSTANT_INT(0)), fin);
     BRANCH_IF(CMP_LT(err, CONSTANT_INT(0)), jd->j_special[JIT_RC_ERROR]);
@@ -794,7 +929,7 @@ EMITTER_FOR(JUMP_IF_FALSE_OR_POP) {
     /* Generic case */
     LABEL(skip2);
     CREATE_SIGNATURE(sig, ir_type_int, ir_type_pyobject_ptr);
-    CALL_NATIVE_WITH_RET(err, sig, PyObject_IsTrue, cond);
+    JVALUE err = CALL_NATIVE(sig, PyObject_IsTrue, cond);
     BRANCH_IF(CMP_EQ(err, CONSTANT_INT(0)), do_jump);
     BRANCH_IF(CMP_LT(err, CONSTANT_INT(0)), jd->j_special[JIT_RC_ERROR]);
     /* err > 0 case */
@@ -828,7 +963,7 @@ EMITTER_FOR(JUMP_IF_TRUE_OR_POP) {
     /* Generic case */
     LABEL(skip2);
     CREATE_SIGNATURE(sig, ir_type_int, ir_type_pyobject_ptr);
-    CALL_NATIVE_WITH_RET(err, sig, PyObject_IsTrue, cond);
+    JVALUE err = CALL_NATIVE(sig, PyObject_IsTrue, cond);
     BRANCH_IF(CMP_GT(err, CONSTANT_INT(0)), do_jump);
     BRANCH_IF(CMP_LT(err, CONSTANT_INT(0)), jd->j_special[JIT_RC_ERROR]);
     /* err == 0 case */
@@ -857,10 +992,10 @@ EMITTER_FOR(FOR_ITER) {
     JLABEL cleanup = JLABEL_INIT("cleanup");
     JLABEL next_instruction = JLABEL_INIT("next_instruction");
     JVALUE iter_obj = TOP();
-    JVALUE type_obj = LOAD_FIELD(iter_obj, PyObject, ob_type, ir_type_pytypeobject_ptr);
+    JVALUE type_obj = IR_Py_TYPE(iter_obj);
     JVALUE tp_iternext = LOAD_FIELD(type_obj, PyTypeObject, tp_iternext, ir_type_void_ptr);
     CREATE_SIGNATURE(sig, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
-    CALL_INDIRECT_WITH_RET(next, sig, tp_iternext, iter_obj);
+    JVALUE next = CALL_INDIRECT(sig, tp_iternext, iter_obj);
     BRANCH_IF_NOT(next, handle_null);
     PUSH(next);
     BRANCH(next_instruction);
@@ -869,7 +1004,7 @@ EMITTER_FOR(FOR_ITER) {
     LABEL(handle_null);
     BRANCH_IF_NOT(PYERR_OCCURRED(), cleanup);
     CREATE_SIGNATURE(sig2, ir_type_int, ir_type_pyobject_ptr);
-    CALL_NATIVE_WITH_RET(ret, sig2, PyErr_ExceptionMatches, CONSTANT_PYOBJ(PyExc_StopIteration));
+    JVALUE ret = CALL_NATIVE(sig2, PyErr_ExceptionMatches, CONSTANT_PYOBJ(PyExc_StopIteration));
     BRANCH_IF_NOT(ret, jd->j_special[JIT_RC_ERROR]);
     CREATE_SIGNATURE(sig3, ir_type_void);
     CALL_NATIVE(sig3, PyErr_Clear);
@@ -889,7 +1024,7 @@ EMITTER_FOR(BREAK_LOOP) {
 
 EMITTER_FOR(CONTINUE_LOOP) {
     CREATE_SIGNATURE(sig, ir_type_pyobject_ptr, ir_type_long);
-    CALL_NATIVE_WITH_RET(tmp, sig, PyLong_FromLong, CONSTANT_LONG(oparg));
+    JVALUE tmp = CALL_NATIVE(sig, PyLong_FromLong, CONSTANT_LONG(oparg));
     SET_RETVAL(tmp);
     BRANCH_SPECIAL_IF_ZERO(tmp, ERROR);
     SET_WHY(WHY_CONTINUE);
@@ -933,7 +1068,7 @@ EMITTER_FOR(LOAD_METHOD) {
     JVALUE meth = JVALUE_CREATE(ir_type_pyobject_ptr);
     SET_VALUE(meth, CONSTANT_PYOBJ(NULL));
     CREATE_SIGNATURE(sig, ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr_ptr);
-    CALL_NATIVE_WITH_RET(meth_found, sig, _PyObject_GetMethod, obj, CONSTANT_PYOBJ(name), ADDRESS_OF(meth));
+    JVALUE meth_found = CALL_NATIVE(sig, _PyObject_GetMethod, obj, CONSTANT_PYOBJ(name), ADDRESS_OF(meth));
 
     /* If meth == NULL, most likely attribute wasn't found. */
     BRANCH_IF_NOT(meth, jd->j_special[JIT_RC_ERROR]);

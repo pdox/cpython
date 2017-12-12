@@ -116,12 +116,12 @@ void _emit_instr(jit_function_t jit_func,
 
     case ir_opcode_notbool: {
         IR_INSTR_AS(boolean)
-        SET_DEST(jit_insn_to_bool(jit_func, JIT_VALUE(instr->value)));
+        SET_DEST(jit_insn_to_not_bool(jit_func, JIT_VALUE(instr->value)));
         break;
     }
     case ir_opcode_bool: {
         IR_INSTR_AS(boolean)
-        SET_DEST(jit_insn_to_not_bool(jit_func, JIT_VALUE(instr->value)));
+        SET_DEST(jit_insn_to_bool(jit_func, JIT_VALUE(instr->value)));
         break;
     }
 
