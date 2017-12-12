@@ -114,6 +114,9 @@ static inline
 ir_value _ir_instr_insert_helper(ir_func func, ir_instr instr, ir_opcode opcode, ir_value dest) {
     instr->opcode = opcode;
     instr->dest = dest;
+    if (dest) {
+        dest->def = (opcode == ir_opcode_set_value) ? NULL : instr;
+    }
     _ir_instr_insert(func, instr);
     return dest;
 }

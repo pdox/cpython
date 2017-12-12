@@ -6,7 +6,8 @@ IR_PROTOTYPE(ir_func)
 
 struct ir_value_t {
     ir_type type;
-    ir_instr def;    /* Only set when in SSA form */
+    ir_instr def;    /* Set when a value is created by an instruction, and
+                        never changed by set_value */
     ir_imm rtv;      /* Runtime value. Only used during interpretation */
     size_t index;   /* Used when register numbering */
 };

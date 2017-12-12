@@ -164,8 +164,14 @@ void _emit_instr(jit_function_t jit_func,
         for (i = 0; i < num_args; i++) {
             args[i] = JIT_VALUE(instr->arg[i]);
         }
-        jit_value_t ret = 
-            jit_insn_call_indirect(jit_func, JIT_VALUE(instr->target), JIT_TYPE(ir_typeof(instr->target)), args, num_args, JIT_CALL_NOTHROW);
+        jit_value_t ret;
+        /* Optimization: if we're calling a constant function pointer, use jit_insn_call_native */
+        if (instr->target->def != NULL && instr->target->def->opcode == ir_opcode_constant) {
+            void *native_func = ((ir_instr_constant)(instr->target->def))->imm.ptr;
+            ret = jit_insn_call_native(jit_func, NULL, native_func, JIT_TYPE(ir_typeof(instr->target)), args, num_args, JIT_CALL_NOTHROW);
+        } else {
+            ret = jit_insn_call_indirect(jit_func, JIT_VALUE(instr->target), JIT_TYPE(ir_typeof(instr->target)), args, num_args, JIT_CALL_NOTHROW);
+        }
         free(args);
         if (_instr->dest) {
             SET_DEST(ret);
@@ -243,15 +249,22 @@ void _emit_instr(jit_function_t jit_func,
     }
     case ir_opcode_branch: {
         IR_INSTR_AS(branch)
-        jit_insn_branch(jit_func, JIT_LABEL(instr->target));
+        /* Optimization: Don't emit branch if we're jumping to the next block, just fall through. */
+        if (instr->target->block != block->next) {
+            jit_insn_branch(jit_func, JIT_LABEL(instr->target));
+        }
         break;
     }
     case ir_opcode_branch_cond: {
         IR_INSTR_AS(branch_cond)
         jit_value_t cond = JIT_VALUE(instr->cond);
-        // TODO: Make this more efficient when one of the labels is for the following block.
-        jit_insn_branch_if(jit_func, cond, JIT_LABEL(instr->if_true));
-        jit_insn_branch_if_not(jit_func, cond, JIT_LABEL(instr->if_false));
+        /* Optimization: Omit branch if we're jumping to the next block. */
+        if (instr->if_true->block != block->next) {
+            jit_insn_branch_if(jit_func, cond, JIT_LABEL(instr->if_true));
+        }
+        if (instr->if_false->block != block->next) {
+            jit_insn_branch_if_not(jit_func, cond, JIT_LABEL(instr->if_false));
+        }
         break;
     }
     case ir_opcode_jumptable: {
