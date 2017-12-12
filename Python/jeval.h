@@ -24,10 +24,9 @@ DECLARE_SPECIAL(NEXT_OPCODE);
     JTYPE sigvar##_args[] = { __VA_ARGS__ }; \
     JTYPE sigvar = ir_create_function_type(jd->context, ret_type, sizeof(sigvar##_args)/sizeof(JTYPE), sigvar##_args);
 
-#define CALL_INDIRECT(sig, funcval, ...) ({ \
+#define CALL_INDIRECT(funcval, ...) ({ \
     JVALUE call_args[] = { __VA_ARGS__ }; \
-    JVALUE func_casted = ir_cast(jd->func, (sig), (funcval)); \
-    ir_call(jd->func, func_casted, sizeof(call_args)/sizeof(JVALUE), call_args); \
+    ir_call(jd->func, (funcval), sizeof(call_args)/sizeof(JVALUE), call_args); \
     })
 
 #define CALL_NATIVE(sig, native_func, ...) ({ \
@@ -128,6 +127,7 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define CONSTANT_PTR(type, p)    ir_constant_from_ptr(jd->func, (type), (p), #p)
 #define CONSTANT_PYOBJ(p)        ir_constant_pyobject_ptr(jd->func, (p), #p)
 #define CONSTANT_VOID_PTR(p)     ir_constant_void_ptr(jd->func, (p), #p)
+#define CONSTANT_CHAR_PTR(p)     ir_constant_char_ptr(jd->func, (p), #p)
 
 #define CAST(fieldtype, val) ir_cast(jd->func, (fieldtype), (val))
 
@@ -236,6 +236,17 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define CALL_PyErr_SetString(exc, msg) do { \
     CREATE_SIGNATURE(sig, ir_type_void, ir_type_void_ptr, ir_type_void_ptr); \
     CALL_NATIVE(sig, PyErr_SetString, CONSTANT_VOID_PTR(exc), CONSTANT_VOID_PTR(msg)); \
+} while (0)
+
+#define CALL_PyErr_Format(exc, format, ...) do { \
+    ir_value _values[] = { CONSTANT_PYOBJ(exc), CONSTANT_CHAR_PTR(format), __VA_ARGS__ }; \
+    ir_type _types[sizeof(_values)/sizeof(ir_value)]; \
+    for (size_t _i = 0; _i < sizeof(_values)/sizeof(ir_value); _i++) { \
+        _types[_i] = ir_typeof(_values[_i]); \
+    } \
+    JTYPE _sig = ir_create_function_type(jd->context, ir_type_pyobject_ptr, sizeof(_types)/sizeof(ir_type), _types); \
+    JVALUE _funcval = ir_constant_from_ptr(jd->func, (_sig), PyErr_Format, "PyErr_Format"); \
+    ir_call(jd->func, _funcval, sizeof(_values)/sizeof(ir_value), _values); \
 } while (0)
 
 #define INIT_INFO(op) \
@@ -738,7 +749,58 @@ EMITTER_FOR(RETURN_VALUE) {
     BRANCH_SPECIAL(FAST_BLOCK_END);
 }
 
-EMIT_AS_SUBROUTINE(GET_AITER)
+EMITTER_FOR(GET_AITER) {
+    JLABEL getter_is_null = JLABEL_INIT("getter_is_null");
+    JLABEL invalid_iter = JLABEL_INIT("invalid_iter");
+    JLABEL iter_is_null = JLABEL_INIT("iter_is_null");
+    JVALUE obj = TOP();
+    JVALUE obj_type = IR_Py_TYPE(obj);
+    JVALUE tp_as_async = LOAD_FIELD(obj_type, PyTypeObject, tp_as_async, ir_type_pyasyncmethods_ptr);
+    BRANCH_IF_NOT(tp_as_async, getter_is_null);
+    CREATE_SIGNATURE(unaryfunc_sig, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
+    JVALUE am_aiter = LOAD_FIELD(tp_as_async, PyAsyncMethods, am_aiter, unaryfunc_sig);
+    BRANCH_IF_NOT(am_aiter, getter_is_null);
+    JVALUE iter = CALL_INDIRECT(am_aiter, obj);
+    DECREF(obj);
+    BRANCH_IF_NOT(iter, iter_is_null);
+    JVALUE iter_type = IR_Py_TYPE(iter);
+    JVALUE iter_tp_as_async = LOAD_FIELD(iter_type, PyTypeObject, tp_as_async, ir_type_pyasyncmethods_ptr);
+    BRANCH_IF_NOT(iter_tp_as_async, invalid_iter);
+    JVALUE iter_am_anext = LOAD_FIELD(iter_tp_as_async, PyAsyncMethods, am_anext, unaryfunc_sig);
+    BRANCH_IF_NOT(iter_am_anext, invalid_iter);
+
+    /* Good iterator, normal dispatch */
+    SET_TOP(iter);
+    CHECK_EVAL_BREAKER();
+
+    BEGIN_REMOTE_SECTION(iter_is_null);
+    SET_TOP(CONSTANT_PYOBJ(NULL));
+    BRANCH(jd->j_special[JIT_RC_ERROR]);
+    END_REMOTE_SECTION(iter_is_null);
+
+    BEGIN_REMOTE_SECTION(getter_is_null);
+    SET_TOP(CONSTANT_PYOBJ(NULL));
+    CALL_PyErr_Format(
+        PyExc_TypeError,
+        "'async for' requires an object with "
+        "__aiter__ method, got %.100s",
+        LOAD_FIELD(obj_type, PyTypeObject, tp_name, ir_type_char_ptr));
+    DECREF(obj);
+    BRANCH(jd->j_special[JIT_RC_ERROR]);
+    END_REMOTE_SECTION(getter_is_null);
+
+    BEGIN_REMOTE_SECTION(invalid_iter);
+    SET_TOP(CONSTANT_PYOBJ(NULL));
+    CALL_PyErr_Format(
+        PyExc_TypeError,
+        "'async for' received an object from __aiter__ "
+        "that does not implement __anext__: %.100s",
+        LOAD_FIELD(iter_type, PyTypeObject, tp_name, ir_type_char_ptr));
+    DECREF(iter);
+    BRANCH(jd->j_special[JIT_RC_ERROR]);
+    END_REMOTE_SECTION(invalid_iter);
+}
+
 EMIT_AS_SUBROUTINE(GET_ANEXT)
 EMIT_AS_SUBROUTINE(GET_AWAITABLE)
 EMIT_AS_SUBROUTINE(YIELD_FROM)
@@ -1054,9 +1116,9 @@ EMITTER_FOR(FOR_ITER) {
     JLABEL next_instruction = JLABEL_INIT("next_instruction");
     JVALUE iter_obj = TOP();
     JVALUE type_obj = IR_Py_TYPE(iter_obj);
-    JVALUE tp_iternext = LOAD_FIELD(type_obj, PyTypeObject, tp_iternext, ir_type_void_ptr);
-    CREATE_SIGNATURE(sig, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
-    JVALUE next = CALL_INDIRECT(sig, tp_iternext, iter_obj);
+    CREATE_SIGNATURE(unaryfunc_sig, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
+    JVALUE tp_iternext = LOAD_FIELD(type_obj, PyTypeObject, tp_iternext, unaryfunc_sig);
+    JVALUE next = CALL_INDIRECT(tp_iternext, iter_obj);
     BRANCH_IF_NOT(next, handle_null);
     PUSH(next);
     BRANCH(next_instruction);

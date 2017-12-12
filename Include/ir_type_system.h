@@ -70,55 +70,27 @@ int ir_type_is_void(ir_type type) {
     return type->kind == ir_type_kind_void;
 }
 
-#define IR_BASE_TYPE_DECL(name) \
+/* Declare all base types */
+
+#define PROCESS(name) \
     extern ir_type_t _ir_type_ ## name; \
     static const ir_type ir_type_ ## name = &(_ir_type_ ## name);
+#include "ir_all_types.def"
+#undef PROCESS
 
-/* Integral types */
-IR_BASE_TYPE_DECL(char)
-IR_BASE_TYPE_DECL(uchar)
-IR_BASE_TYPE_DECL(short)
-IR_BASE_TYPE_DECL(ushort)
-IR_BASE_TYPE_DECL(int)
-IR_BASE_TYPE_DECL(uint)
-IR_BASE_TYPE_DECL(long)
-IR_BASE_TYPE_DECL(ulong)
-IR_BASE_TYPE_DECL(longlong)
-IR_BASE_TYPE_DECL(ulonglong)
-IR_BASE_TYPE_DECL(intptr)
-IR_BASE_TYPE_DECL(uintptr)
-IR_BASE_TYPE_DECL(pyssizet);
+/* Declare pointers to all base types */
+#define PROCESS(name) \
+    extern ir_type_t _ir_type_ ## name ## _ptr; \
+    static const ir_type ir_type_ ## name ## _ptr = &(_ir_type_ ## name ## _ptr);
+#include "ir_all_types.def"
+#undef PROCESS
 
-/* Base types */
-IR_BASE_TYPE_DECL(void)
-IR_BASE_TYPE_DECL(pyobject);
-IR_BASE_TYPE_DECL(pytypeobject);
-IR_BASE_TYPE_DECL(pyframeobject);
-IR_BASE_TYPE_DECL(evalcontext);
-IR_BASE_TYPE_DECL(pythreadstate);
-
-/* Pointer types */
-IR_BASE_TYPE_DECL(void_ptr)
-IR_BASE_TYPE_DECL(pyobject_ptr);
-IR_BASE_TYPE_DECL(pyobject_ptr_ptr);
-IR_BASE_TYPE_DECL(pytypeobject_ptr);
-IR_BASE_TYPE_DECL(pyframeobject_ptr);
-IR_BASE_TYPE_DECL(evalcontext_ptr);
-IR_BASE_TYPE_DECL(pythreadstate_ptr);
-
-IR_BASE_TYPE_DECL(char_ptr);
-IR_BASE_TYPE_DECL(uchar_ptr);
-IR_BASE_TYPE_DECL(short_ptr);
-IR_BASE_TYPE_DECL(ushort_ptr);
-IR_BASE_TYPE_DECL(int_ptr);
-IR_BASE_TYPE_DECL(uint_ptr);
-IR_BASE_TYPE_DECL(long_ptr);
-IR_BASE_TYPE_DECL(ulong_ptr);
-IR_BASE_TYPE_DECL(longlong_ptr);
-IR_BASE_TYPE_DECL(ulonglong_ptr);
-IR_BASE_TYPE_DECL(intptr_ptr);
-IR_BASE_TYPE_DECL(uintptr_ptr);
-IR_BASE_TYPE_DECL(pyssizet_ptr);
+/* And pointers to pointers to all base types! */
+#define PROCESS(name) \
+    extern ir_type_t _ir_type_ ## name ## _ptr_ptr; \
+    static const ir_type ir_type_ ## name ## _ptr_ptr = &(_ir_type_ ## name ## _ptr_ptr);
+#include "ir_all_types.def"
+#undef PROCESS
 
 /* Typed immediate value */
 typedef union {

@@ -1,4 +1,4 @@
-/* This is an X-macro which invokes PROCESS for all built-in types */
+/* This is an X-macro which invokes PROCESS for all built-in base types */
 
 PROCESS(void)
 
@@ -17,8 +17,8 @@ PROCESS(uintptr)
 PROCESS(pyssizet)
 
 PROCESS(pyobject)
-PROCESS(pyobject_ptr)
 PROCESS(pytypeobject)
 PROCESS(pyframeobject)
 PROCESS(evalcontext)
 PROCESS(pythreadstate)
+PROCESS(pyasyncmethods)

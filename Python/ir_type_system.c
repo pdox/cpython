@@ -7,7 +7,7 @@
 /* Define void */
 ir_type_t _ir_type_void = {"void", ir_type_kind_void, 0, 0, {NULL}};
 
-/* Define global integral types */
+/* Define integral types */
 #define PROCESS(name, ctype, ps, id, va_arg_type) \
     ir_type_t _ir_type_ ## name = {#ctype, ir_type_kind_ ## name, sizeof(ctype), 0, {NULL}};
 #include "ir_integral_types.def"
@@ -22,6 +22,12 @@ ir_type_t _ir_type_void = {"void", ir_type_kind_void, 0, 0, {NULL}};
 /* Define pointer types for all built-in types */
 #define PROCESS(base_type) \
     ir_type_t _ir_type_ ## base_type ## _ptr = {NULL, ir_type_kind_pointer, sizeof(void*), 1, {&_ir_type_ ## base_type}};
+#include "ir_all_types.def"
+#undef PROCESS
+
+/* Define pointer to pointers for all built-in types */
+#define PROCESS(base_type) \
+    ir_type_t _ir_type_ ## base_type ## _ptr_ptr = {NULL, ir_type_kind_pointer, sizeof(void*), 1, {&_ir_type_ ## base_type ## _ptr}};
 #include "ir_all_types.def"
 #undef PROCESS
 
