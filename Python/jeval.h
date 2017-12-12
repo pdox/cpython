@@ -611,7 +611,68 @@ EMITTER_FOR(STORE_SUBSCR) {
     CHECK_EVAL_BREAKER();
 }
 
-EMIT_AS_SUBROUTINE(STORE_ANNOTATION)
+/* This is most of the work of STORE_ANNOTATION, taken from ceval,
+   but modified so that it:
+   i) returns 1 on error, 0 on success
+   ii) doesn't decref "ann".
+   */
+int _store_annotation_helper(PyFrameObject *f, PyObject *name, PyObject *ann) {
+    _Py_IDENTIFIER(__annotations__);
+    PyObject *ann_dict;
+    int err;
+    if (f->f_locals == NULL) {
+        PyErr_Format(PyExc_SystemError,
+                     "no locals found when storing annotation");
+        return 1;
+    }
+    /* first try to get __annotations__ from locals... */
+    if (PyDict_CheckExact(f->f_locals)) {
+        ann_dict = _PyDict_GetItemId(f->f_locals,
+                                     &PyId___annotations__);
+        if (ann_dict == NULL) {
+            PyErr_SetString(PyExc_NameError,
+                            "__annotations__ not found");
+            return 1;
+        }
+        Py_INCREF(ann_dict);
+    }
+    else {
+        PyObject *ann_str = _PyUnicode_FromId(&PyId___annotations__);
+        if (ann_str == NULL) {
+            return 1;
+        }
+        ann_dict = PyObject_GetItem(f->f_locals, ann_str);
+        if (ann_dict == NULL) {
+            if (PyErr_ExceptionMatches(PyExc_KeyError)) {
+                PyErr_SetString(PyExc_NameError,
+                                "__annotations__ not found");
+            }
+            return 1;
+        }
+    }
+    /* ...if succeeded, __annotations__[name] = ann */
+    if (PyDict_CheckExact(ann_dict)) {
+        err = PyDict_SetItem(ann_dict, name, ann);
+    }
+    else {
+        err = PyObject_SetItem(ann_dict, name, ann);
+    }
+    Py_DECREF(ann_dict);
+    if (err != 0) {
+        return 1;
+    }
+    return 0;
+}
+
+EMITTER_FOR(STORE_ANNOTATION) {
+    PyObject *name = GETNAME(oparg);
+    JVALUE ann = POP();
+    CREATE_SIGNATURE(sig, ir_type_int, ir_type_pyframeobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
+    JVALUE err = CALL_NATIVE(sig, _store_annotation_helper, jd->f, CONSTANT_PYOBJ(name), ann);
+    DECREF(ann);
+    BRANCH_IF(err, jd->j_special[JIT_RC_ERROR]);
+    CHECK_EVAL_BREAKER();
+}
 
 EMITTER_FOR(DELETE_SUBSCR) {
     JVALUE sub = TOP();
