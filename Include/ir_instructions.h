@@ -40,6 +40,7 @@ typedef enum {
     ir_opcode_get_index_ptr,   // &ptr[i]
     ir_opcode_load,            // *ptr
     ir_opcode_store,           // *ptr = value;
+    ir_opcode_address_of,      // &value
 
     /* assign constant value */
     ir_opcode_constant, // new_value = $imm;
@@ -467,6 +468,23 @@ void _ir_store_field(ir_func func, ir_value ptr, size_t offset, ir_type member_t
 }
 
 /*****************************************************************************/
+
+IR_PROTOTYPE(ir_instr_address_of)
+struct ir_instr_address_of_t {
+    IR_INSTR_HEADER
+    ir_value value;
+};
+
+static inline
+ir_value ir_address_of(ir_func func, ir_value value) {
+    IR_INSTR_ALLOC(ir_instr_address_of, 0)
+    instr->value = value;
+    ir_type ret_type = ir_create_pointer_type(func->context, ir_typeof(value));
+    return IR_INSTR_INSERT(ir_opcode_address_of, ret_type);
+}
+
+/*****************************************************************************/
+
 
 IR_PROTOTYPE(ir_instr_constant)
 struct ir_instr_constant_t {

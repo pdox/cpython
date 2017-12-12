@@ -118,6 +118,7 @@ IR_BASE_TYPE_DECL(longlong_ptr);
 IR_BASE_TYPE_DECL(ulonglong_ptr);
 IR_BASE_TYPE_DECL(intptr_ptr);
 IR_BASE_TYPE_DECL(uintptr_ptr);
+IR_BASE_TYPE_DECL(pyssizet_ptr);
 
 /* Typed immediate value */
 typedef union {

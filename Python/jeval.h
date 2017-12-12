@@ -15,6 +15,9 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define JLABEL            ir_label
 #define JLABEL_INIT(name) ir_label_new(jd->func, name)
 
+#define JVALUE_CREATE(irtype)    ir_value_new(jd->func, (irtype))
+#define ADDRESS_OF(val)          ir_address_of(jd->func, (val))
+
 #define SET_VALUE(dest, src)     ir_set_value(jd->func, (dest), (src))
 
 #define CREATE_SIGNATURE(sigvar, ret_type, ...) \
@@ -62,7 +65,7 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 
 #define LABEL(label)                ir_label_here(jd->func, (label))
 #define BRANCH(label)               ir_branch(jd->func, (label))
-#define BRANCH_IF_ZERO(val, label)  ir_branch_if_not(jd->func, (val), (label))
+#define BRANCH_IF_NOT(val, label)   ir_branch_if_not(jd->func, (val), (label))
 #define BRANCH_IF(val, label)       ir_branch_if(jd->func, (val), (label))
 
 #define BRANCH_SPECIAL(name) \
@@ -70,7 +73,7 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define BRANCH_SPECIAL_IF(val, name) \
     BRANCH_IF((val), jd->j_special[JIT_RC_ ## name])
 #define BRANCH_SPECIAL_IF_ZERO(val, name) \
-    BRANCH_IF_ZERO((val), jd->j_special[JIT_RC_ ## name])
+    BRANCH_IF_NOT((val), jd->j_special[JIT_RC_ ## name])
 
 #define MOVE_TO_END(_from_label, _to_label) do { \
     move_entry *m = PyMem_RawMalloc(sizeof(move_entry)); \
@@ -188,6 +191,8 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define STACK_LEVEL() \
     CAST(ir_type_int, SHIFT_RIGHT(SUBTRACT(STACKPTR(), LOAD_VALUE_STACK()), CONSTANT_INT(3)))
 
+#define GETNAME(i)   PyTuple_GET_ITEM(jd->co->co_names, (i));
+
 // TODO: This needs to be adjusted depending on the configuration of _Py_atomic_int
 #define LOAD_EVAL_BREAKER() \
     LOAD(CONSTANT_PTR(ir_type_int_ptr, &_PyRuntime.ceval.eval_breaker._value))
@@ -284,7 +289,7 @@ int do_raise(PyObject *, PyObject *);
 
 #define EMIT_JUMP(check_eval_breaker) do { \
     if (check_eval_breaker) { \
-        BRANCH_IF_ZERO(LOAD_EVAL_BREAKER(), jd->jmptab[next_instr_index]); \
+        BRANCH_IF_NOT(LOAD_EVAL_BREAKER(), jd->jmptab[next_instr_index]); \
         SET_CTX_NEXT_INSTR_INDEX(CONSTANT_INT(next_instr_index)); \
         BRANCH(jd->j_special_internal[JIT_RC_NEXT_OPCODE]); \
     } else { \
@@ -378,7 +383,7 @@ void handle_load_fast_unbound_local(EvalContext *ctx, int opcode, int oparg) {
 EMITTER_FOR(LOAD_FAST) {
     JLABEL load_fast_error = JLABEL_INIT("load_fast_error");
     JVALUE v = GETLOCAL(oparg);
-    BRANCH_IF_ZERO(v, load_fast_error);
+    BRANCH_IF_NOT(v, load_fast_error);
     INCREF(v);
     PUSH(v);
 
@@ -446,7 +451,7 @@ EMITTER_FOR(DUP_TOP_TWO) {
         CALL_NATIVE_WITH_RET(res, sig, func, objval); \
         DECREF(objval); \
         SET_TOP(res); \
-        BRANCH_IF_ZERO(res, jd->j_special[JIT_RC_ERROR]); \
+        BRANCH_IF_NOT(res, jd->j_special[JIT_RC_ERROR]); \
         CHECK_EVAL_BREAKER(); \
     }
 
@@ -498,7 +503,7 @@ EMITTER_FOR(BINARY_POWER) {
         DECREF(left); \
         DECREF(right); \
         SET_TOP(res); \
-        BRANCH_IF_ZERO(res, jd->j_special[JIT_RC_ERROR]); \
+        BRANCH_IF_NOT(res, jd->j_special[JIT_RC_ERROR]); \
         CHECK_EVAL_BREAKER(); \
     }
 
@@ -598,7 +603,7 @@ EMITTER_FOR(PRINT_EXPR) {
     JLABEL hook_null = JLABEL_INIT("hook_null");
     CREATE_SIGNATURE(sig1, ir_type_pyobject_ptr, ir_type_void_ptr);
     CALL_NATIVE_WITH_RET(hook, sig1, _PySys_GetObjectId, CONSTANT_VOID_PTR(&PyId_displayhook));
-    BRANCH_IF_ZERO(hook, hook_null);
+    BRANCH_IF_NOT(hook, hook_null);
     CREATE_SIGNATURE(sig2, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
     CALL_NATIVE_WITH_RET(res, sig2, PyObject_CallFunctionObjArgs, hook, value, CONSTANT_PYOBJ(NULL));
     DECREF(value);
@@ -625,7 +630,7 @@ EMITTER_FOR(RAISE_VARARGS) {
     case 0: {
         CREATE_SIGNATURE(sig, ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
         CALL_NATIVE_WITH_RET(ret, sig, do_raise, exc, cause);
-        BRANCH_IF_ZERO(ret, fin);
+        BRANCH_IF_NOT(ret, fin);
         SET_WHY(WHY_EXCEPTION);
         BRANCH_SPECIAL(FAST_BLOCK_END);
     }
@@ -658,7 +663,7 @@ EMIT_AS_SUBROUTINE(UNPACK_SEQUENCE)
 EMIT_AS_SUBROUTINE(UNPACK_EX)
 
 EMITTER_FOR(STORE_ATTR) {
-    PyObject *name = PyTuple_GET_ITEM(jd->co->co_names, oparg);
+    PyObject *name = GETNAME(oparg)
     JVALUE owner = TOP();
     JVALUE v = SECOND();
     STACKADJ(-2);
@@ -697,13 +702,13 @@ EMIT_AS_SUBROUTINE(BUILD_MAP_UNPACK_WITH_CALL)
 EMIT_AS_SUBROUTINE(MAP_ADD)
 
 EMITTER_FOR(LOAD_ATTR) {
-    PyObject *name = PyTuple_GET_ITEM(jd->co->co_names, oparg);
+    PyObject *name = GETNAME(oparg);
     JVALUE owner = TOP();
     CREATE_SIGNATURE(sig, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
     CALL_NATIVE_WITH_RET(res, sig, PyObject_GetAttr, owner, CONSTANT_PYOBJ(name));
     DECREF(owner);
     SET_TOP(res);
-    BRANCH_IF_ZERO(res, jd->j_special[JIT_RC_ERROR]);
+    BRANCH_IF_NOT(res, jd->j_special[JIT_RC_ERROR]);
     CHECK_EVAL_BREAKER();
 }
 
@@ -856,16 +861,16 @@ EMITTER_FOR(FOR_ITER) {
     JVALUE tp_iternext = LOAD_FIELD(type_obj, PyTypeObject, tp_iternext, ir_type_void_ptr);
     CREATE_SIGNATURE(sig, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
     CALL_INDIRECT_WITH_RET(next, sig, tp_iternext, iter_obj);
-    BRANCH_IF_ZERO(next, handle_null);
+    BRANCH_IF_NOT(next, handle_null);
     PUSH(next);
     BRANCH(next_instruction);
 
     /* Handle NULL case */
     LABEL(handle_null);
-    BRANCH_IF_ZERO(PYERR_OCCURRED(), cleanup);
+    BRANCH_IF_NOT(PYERR_OCCURRED(), cleanup);
     CREATE_SIGNATURE(sig2, ir_type_int, ir_type_pyobject_ptr);
     CALL_NATIVE_WITH_RET(ret, sig2, PyErr_ExceptionMatches, CONSTANT_PYOBJ(PyExc_StopIteration));
-    BRANCH_IF_ZERO(ret, jd->j_special[JIT_RC_ERROR]);
+    BRANCH_IF_NOT(ret, jd->j_special[JIT_RC_ERROR]);
     CREATE_SIGNATURE(sig3, ir_type_void);
     CALL_NATIVE(sig3, PyErr_Clear);
 
@@ -918,11 +923,45 @@ EMIT_AS_SUBROUTINE(SETUP_ASYNC_WITH)
 EMIT_AS_SUBROUTINE(SETUP_WITH)
 EMIT_AS_SUBROUTINE(WITH_CLEANUP_START)
 EMIT_AS_SUBROUTINE(WITH_CLEANUP_FINISH)
-EMIT_AS_SUBROUTINE(LOAD_METHOD)
+
+/* Private API for the LOAD_METHOD opcode. */
+extern int _PyObject_GetMethod(PyObject *, PyObject *, PyObject **);
+
+EMITTER_FOR(LOAD_METHOD) {
+    PyObject *name = GETNAME(oparg);
+    JVALUE obj = TOP();
+    JVALUE meth = JVALUE_CREATE(ir_type_pyobject_ptr);
+    SET_VALUE(meth, CONSTANT_PYOBJ(NULL));
+    CREATE_SIGNATURE(sig, ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr_ptr);
+    CALL_NATIVE_WITH_RET(meth_found, sig, _PyObject_GetMethod, obj, CONSTANT_PYOBJ(name), ADDRESS_OF(meth));
+
+    /* If meth == NULL, most likely attribute wasn't found. */
+    BRANCH_IF_NOT(meth, jd->j_special[JIT_RC_ERROR]);
+
+    JLABEL fin = JLABEL_INIT("fin");
+    JLABEL if_meth_found = JLABEL_INIT("if_meth_found");
+    BRANCH_IF(meth_found, if_meth_found);
+
+    /* !meth_found case */
+    SET_TOP(CONSTANT_PYOBJ(NULL));
+    DECREF(obj);
+    PUSH(meth);
+    BRANCH(fin);
+
+    /* meth_found case */
+    LABEL(if_meth_found);
+    SET_TOP(meth);
+    PUSH(obj); // self
+
+    LABEL(fin);
+    CHECK_EVAL_BREAKER();
+}
+
 EMIT_AS_SUBROUTINE(CALL_METHOD)
 EMIT_AS_SUBROUTINE(CALL_FUNCTION)
 EMIT_AS_SUBROUTINE(CALL_FUNCTION_KW)
 EMIT_AS_SUBROUTINE(CALL_FUNCTION_EX)
+
 EMIT_AS_SUBROUTINE(MAKE_FUNCTION)
 EMIT_AS_SUBROUTINE(BUILD_SLICE)
 EMIT_AS_SUBROUTINE(FORMAT_VALUE)
