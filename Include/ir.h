@@ -39,6 +39,7 @@ IR_PROTOTYPE(ir_func)
 #include "ir_instructions.h"
 #include "ir_lower.h"
 #include "ir_libjit.h"
+#include "ir_llvm.h"
 
 #ifdef __cplusplus
 }

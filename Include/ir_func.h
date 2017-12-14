@@ -64,7 +64,7 @@ ir_value ir_func_get_argument(ir_func func, size_t i) {
 }
 
 #define IR_FUNC_ALLOC(_varname, _type, _extra) \
-    _type _varname = (_type)_ir_alloc(func->context, sizeof(_type ## _t) + (_extra), alignof(_type ## _t));
+    _type _varname = (_type)_ir_alloc(func->context, sizeof(_type ## _t) + (_extra), _alignof(_type ## _t));
 
 static inline
 void _ir_func_new_block(ir_func func) {

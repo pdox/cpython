@@ -1,22 +1,23 @@
 typedef enum {
     ir_type_kind_void,
 
-    /* Integral types
-       If you change this section, update ir_type_is_integral() below
-     */
+    /* If you change these, make sure to update the ir_type_is_* functions below */
+    /* Signed integral types */
     ir_type_kind_char,
-    ir_type_kind_uchar,
     ir_type_kind_short,
-    ir_type_kind_ushort,
     ir_type_kind_int,
-    ir_type_kind_uint,
     ir_type_kind_long,
-    ir_type_kind_ulong,
     ir_type_kind_longlong,
-    ir_type_kind_ulonglong,
     ir_type_kind_intptr,
-    ir_type_kind_uintptr,
     ir_type_kind_pyssizet,
+
+    /* Unsigned integral types */
+    ir_type_kind_uchar,
+    ir_type_kind_ushort,
+    ir_type_kind_uint,
+    ir_type_kind_ulong,
+    ir_type_kind_ulonglong,
+    ir_type_kind_uintptr,
 
     /* Pointer type */
     ir_type_kind_pointer,
@@ -32,7 +33,7 @@ IR_PROTOTYPE(ir_type)
 struct ir_type_t {
     const char *name;
     ir_type_kind kind;
-    int size;
+    size_t size;
     size_t param_count;
     ir_type param[1];
 };
@@ -40,14 +41,20 @@ struct ir_type_t {
 static inline
 int ir_type_is_integral(ir_type type) {
     return type->kind >= ir_type_kind_char &&
+           type->kind <= ir_type_kind_uintptr;
+}
+
+static inline
+int ir_type_is_signed(ir_type type) {
+    assert(ir_type_is_integral(type));
+    return type->kind >= ir_type_kind_char &&
            type->kind <= ir_type_kind_pyssizet;
 }
 
-
 static inline
 int ir_type_promotes_to_int(ir_type type) {
-    return type->kind >= ir_type_kind_char &&
-           type->kind <= ir_type_kind_ushort;
+    assert(ir_type_is_integral(type));
+    return type->size < sizeof(int);
 }
 
 static inline

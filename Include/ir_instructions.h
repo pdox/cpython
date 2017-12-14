@@ -12,8 +12,6 @@ typedef enum {
     ir_opcode_and,  // a & b
     ir_opcode_or,   // a | b
     ir_opcode_xor,  // a ^ b
-
-    /* shift ops (see ir_opcode_is_shift) */
     ir_opcode_shl,  // a << b
     ir_opcode_shr,  // a >> b
 
@@ -47,9 +45,6 @@ typedef enum {
 
     /* cast to register of another type */
     ir_opcode_cast,     // new_value = (cast_type)val;
-
-    /* phi node. Only present in SSA form */
-    ir_opcode_phi,
 
     /* set register. Not present in SSA form */
     ir_opcode_set_value,   // existing_value = value;
@@ -104,7 +99,7 @@ void _ir_instr_insert(ir_func func, ir_instr _instr);
 
 #define IR_INSTR_HEADER    ir_instr_t base;
 #define IR_INSTR_ALLOC(_type, _extra_size) \
-    _type instr = (_type) _ir_alloc(func->context, sizeof(_type ## _t) + (_extra_size), alignof(_type##_t));
+    _type instr = (_type) _ir_alloc(func->context, sizeof(_type ## _t) + (_extra_size), _alignof(_type##_t));
 
 #define IR_INSTR_INSERT(_opcode, _ret_type) \
     _ir_instr_insert_helper(func, (ir_instr)instr, (_opcode), ir_value_new(func, (_ret_type)))
@@ -206,42 +201,8 @@ BINOP_METHOD(ir_rem, ir_opcode_rem)
 BINOP_METHOD(ir_and, ir_opcode_and)
 BINOP_METHOD(ir_or, ir_opcode_or)
 BINOP_METHOD(ir_xor, ir_opcode_xor)
-
-/*****************************************************************************/
-
-IR_PROTOTYPE(ir_instr_shift)
-struct ir_instr_shift_t {
-    IR_INSTR_HEADER
-    ir_value value;
-    ir_value count;
-};
-
-
-static inline
-int ir_opcode_is_shift(ir_opcode opcode) {
-    return opcode >= ir_opcode_shl &&
-           opcode <= ir_opcode_shr;
-}
-
-static inline
-ir_value _ir_insert_shift(ir_func func, ir_opcode opcode, ir_value value, ir_value count) {
-    IR_INSTR_ALLOC(ir_instr_shift, 0)
-    /* Perform int promotion as necessary */
-    value = ir_promote(func, value);
-    count = ir_promote(func, count);
-    instr->value = value;
-    instr->count = count;
-    return IR_INSTR_INSERT(opcode, ir_typeof(value));
-}
-
-#define SHIFT_METHOD(name, opcode) \
-    static inline \
-    ir_value name (ir_func func, ir_value value, ir_value count) { \
-        return _ir_insert_shift(func, opcode, value, count); \
-    }
-
-SHIFT_METHOD(ir_shl, ir_opcode_shl)
-SHIFT_METHOD(ir_shr, ir_opcode_shr)
+BINOP_METHOD(ir_shl, ir_opcode_shl);
+BINOP_METHOD(ir_shr, ir_opcode_shr);
 
 /*****************************************************************************/
 
@@ -499,7 +460,7 @@ struct ir_instr_constant_t {
 #define IR_CONSTANT_METHOD(_name, _type, _ctype, _fieldname) \
     static inline \
     ir_value _name (ir_func func, _ctype value, const char *debug_name) { \
-        ir_instr_constant_t *instr = (ir_instr_constant_t*)_ir_alloc(func->context, sizeof(ir_instr_constant_t), alignof(ir_instr_constant_t)); \
+        ir_instr_constant_t *instr = (ir_instr_constant_t*)_ir_alloc(func->context, sizeof(ir_instr_constant_t), _alignof(ir_instr_constant_t)); \
         (instr->imm) . _fieldname = value; \
         instr->debug_name = debug_name ? _ir_strdup(func->context, debug_name) : NULL; \
         return IR_INSTR_INSERT(ir_opcode_constant, _type); \
@@ -550,23 +511,6 @@ ir_value ir_cast(ir_func func, ir_type type, ir_value value) {
     instr->value = value;
     return IR_INSTR_INSERT(ir_opcode_cast, type);
 }
-
-/*****************************************************************************/
-
-IR_PROTOTYPE(ir_phi_entry)
-struct ir_phi_entry_t {
-    ir_block from_block;
-    ir_value from_reg;
-};
-
-IR_PROTOTYPE(ir_instr_phi)
-struct ir_instr_phi_t {
-    IR_INSTR_HEADER
-    unsigned int entry_count;
-    ir_phi_entry_t entry[1];
-};
-
-// TODO: Implement phi
 
 /*****************************************************************************/
 

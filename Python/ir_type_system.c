@@ -34,11 +34,24 @@ ir_type_t _ir_type_void = {"void", ir_type_kind_void, 0, 0, {NULL}};
 int ir_type_equal(ir_type a, ir_type b) {
     if (a == b)
         return 1;
+    if (a->kind != b->kind)
+        return 0;
+    if (a->kind == ir_type_kind_void || ir_type_is_integral(a)) {
+        /* void and integral types are fully determined by their 'kind' */
+        return 1;
+    }
+    /* struct types are identified by name */
+    if (a->kind == ir_type_kind_struct) {
+        return strcmp(a->name, b->name) == 0;
+    }
 
-    if (a->kind != b->kind ||
-        a->size != b->size ||
-        a->param_count != b->param_count ||
-        a->kind == ir_type_kind_struct) {
+    /* pointer types identified by base type */
+    if (a->kind == ir_type_kind_pointer) {
+        return ir_type_equal(a->param[0], b->param[0]);
+    }
+
+    assert(a->kind == ir_type_kind_function);
+    if (a->param_count != b->param_count) {
         return 0;
     }
     size_t i;

@@ -26,10 +26,10 @@ void _ir_alloc_more(ir_context context, size_t min_size);
 /* Allocate memory (as part of this context). Used internally. */
 static inline
 void* _ir_alloc(ir_context context, size_t size, size_t alignment) {
-    char *pos = ALIGN_UP(context->mem->pos, alignment);
+    char *pos = (char*)ALIGN_UP(context->mem->pos, alignment);
     if (pos + size > context->mem->end) {
         _ir_alloc_more(context, alignment + size);
-        pos = ALIGN_UP(context->mem->pos, alignment);
+        pos = (char*)ALIGN_UP(context->mem->pos, alignment);
     }
     assert(pos + size <= context->mem->end);
     context->mem->pos = pos + size;
@@ -38,10 +38,10 @@ void* _ir_alloc(ir_context context, size_t size, size_t alignment) {
 
 static inline
 char* _ir_strdup(ir_context context, const char *s) {
-    char *ret = _ir_alloc(context, strlen(s) + 1, 1);
+    char *ret = (char*)_ir_alloc(context, strlen(s) + 1, 1);
     strcpy(ret, s);
     return ret;
 }
 
 #define IR_ALLOC(varname, name, extra_size) \
-    name varname = (name) _ir_alloc(context, sizeof(name ## _t) + (extra_size), alignof(name##_t));
+    name varname = (name) _ir_alloc(context, sizeof(name ## _t) + (extra_size), _alignof(name##_t));

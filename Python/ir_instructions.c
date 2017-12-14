@@ -21,7 +21,6 @@ _ir_opcode_repr(ir_opcode opcode) {
     OPCODE_CASE(and)
     OPCODE_CASE(or)
     OPCODE_CASE(xor)
-
     OPCODE_CASE(shl)
     OPCODE_CASE(shr)
 
@@ -45,7 +44,6 @@ _ir_opcode_repr(ir_opcode opcode) {
 
     OPCODE_CASE(constant)
     OPCODE_CASE(cast)
-    OPCODE_CASE(phi)
     OPCODE_CASE(set_value)
     OPCODE_CASE(label_here)
     OPCODE_CASE(branch)
@@ -95,24 +93,24 @@ ir_instr_repr(char *p, ir_instr _instr) {
         case ir_opcode_and:
         case ir_opcode_or:
         case ir_opcode_xor:
-        case ir_opcode_lt:
-        case ir_opcode_gt:
-        case ir_opcode_eq:
-        case ir_opcode_ne:
-        case ir_opcode_le:
-        case ir_opcode_ge: {
+        case ir_opcode_shl:
+        case ir_opcode_shr: {
             IR_INSTR_AS(binop)
             p = ir_value_repr(p, instr->left);
             p += sprintf(p, ", ");
             p = ir_value_repr(p, instr->right);
             break;
         }
-        case ir_opcode_shl:
-        case ir_opcode_shr: {
-            IR_INSTR_AS(shift)
-            p = ir_value_repr(p, instr->value);
+        case ir_opcode_lt:
+        case ir_opcode_gt:
+        case ir_opcode_eq:
+        case ir_opcode_ne:
+        case ir_opcode_le:
+        case ir_opcode_ge: {
+            IR_INSTR_AS(comparison)
+            p = ir_value_repr(p, instr->left);
             p += sprintf(p, ", ");
-            p = ir_value_repr(p, instr->count);
+            p = ir_value_repr(p, instr->right);
             break;
         }
         case ir_opcode_notbool:
@@ -198,10 +196,6 @@ ir_instr_repr(char *p, ir_instr _instr) {
         case ir_opcode_cast: {
             IR_INSTR_AS(cast)
             p = ir_value_repr(p, instr->value);
-            break;
-        }
-        case ir_opcode_phi: {
-            abort();
             break;
         }
         case ir_opcode_set_value: {

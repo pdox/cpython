@@ -121,7 +121,7 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define CONSTANT_PYSSIZET(n) ir_constant_pyssizet(jd->func, (n), NULL)
 
 /* Constant uintptr_t value */
-#define CONSTANT_NINT(n)  ir_constant_uintptr(jd->func, (n), NULL)
+#define CONSTANT_UINTPTR(n)  ir_constant_uintptr(jd->func, (n), NULL)
 
 /* Constant pointer value */
 #define CONSTANT_PTR(type, p)    ir_constant_from_ptr(jd->func, (type), (p), #p)
@@ -198,7 +198,11 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 
 /* Computes: (int)(((uintptr_t)stack_pointer - (uintptr_t)f_valuestack)/sizeof(PyObject*))  */
 #define STACK_LEVEL() \
-    CAST(ir_type_int, SHIFT_RIGHT(SUBTRACT(STACKPTR(), LOAD_VALUE_STACK()), CONSTANT_INT(3)))
+    CAST(ir_type_int, \
+      SHIFT_RIGHT( \
+        SUBTRACT(CAST(ir_type_uintptr, STACKPTR()), \
+                 CAST(ir_type_uintptr, LOAD_VALUE_STACK())), \
+        CONSTANT_UINTPTR(3)))
 
 #define GETNAME(i)   PyTuple_GET_ITEM(jd->co->co_names, (i));
 

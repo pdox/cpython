@@ -95,8 +95,8 @@ PY_CFLAGS_NODIST=$(CONFIGURE_CFLAGS_NODIST) $(CFLAGS_NODIST)
 # Both CPPFLAGS and LDFLAGS need to contain the shell's value for setup.py to
 # be able to build extension modules using the directories specified in the
 # environment variables
-PY_CPPFLAGS=	$(BASECPPFLAGS) -I. -I$(srcdir)/Include $(CONFIGURE_CPPFLAGS) $(CPPFLAGS) -I/home/pdox/libjit-install/include
-PY_LDFLAGS=	$(CONFIGURE_LDFLAGS) $(LDFLAGS)
+PY_CPPFLAGS=	$(BASECPPFLAGS) -I. -I$(srcdir)/Include $(CONFIGURE_CPPFLAGS) $(CPPFLAGS) -I/home/pdox/libjit-install/include -I/home/pdox/llvm-install/include
+PY_LDFLAGS=	$(CONFIGURE_LDFLAGS) $(LDFLAGS) -L/home/pdox/llvm-install/lib
 NO_AS_NEEDED=	@NO_AS_NEEDED@
 LDLAST=		@LDLAST@
 SGI_ABI=	@SGI_ABI@
@@ -107,6 +107,7 @@ ARFLAGS=	@ARFLAGS@
 CFLAGSFORSHARED=@CFLAGSFORSHARED@
 # C flags used for building the interpreter object files
 PY_CORE_CFLAGS=	$(PY_CFLAGS) $(PY_CFLAGS_NODIST) $(PY_CPPFLAGS) $(CFLAGSFORSHARED) -DPy_BUILD_CORE
+PY_CORE_CXXFLAGS= $(PY_CPPFLAGS) -g -O0 -DPy_BUILD_CORE -std=gnu++11
 # Strict or non-strict aliasing flags used to compile dtoa.c, see above
 CFLAGS_ALIASING=@CFLAGS_ALIASING@
 
@@ -213,7 +214,7 @@ LDLIBRARYDIR=   @LDLIBRARYDIR@
 INSTSONAME=	@INSTSONAME@
 
 
-LIBS=		/home/pdox/libjit/jit/.libs/*.o @LIBS@
+LIBS=		/home/pdox/libjit/jit/.libs/*.o @LIBS@ -lLLVMLTO -lLLVMPasses -lLLVMObjCARCOpts -lLLVMMIRParser -lLLVMSymbolize -lLLVMDebugInfoPDB -lLLVMDebugInfoDWARF -lLLVMCoverage -lLLVMTableGen -lLLVMDlltoolDriver -lLLVMOrcJIT -lLLVMXCoreDisassembler -lLLVMXCoreCodeGen -lLLVMXCoreDesc -lLLVMXCoreInfo -lLLVMXCoreAsmPrinter -lLLVMSystemZDisassembler -lLLVMSystemZCodeGen -lLLVMSystemZAsmParser -lLLVMSystemZDesc -lLLVMSystemZInfo -lLLVMSystemZAsmPrinter -lLLVMSparcDisassembler -lLLVMSparcCodeGen -lLLVMSparcAsmParser -lLLVMSparcDesc -lLLVMSparcInfo -lLLVMSparcAsmPrinter -lLLVMPowerPCDisassembler -lLLVMPowerPCCodeGen -lLLVMPowerPCAsmParser -lLLVMPowerPCDesc -lLLVMPowerPCInfo -lLLVMPowerPCAsmPrinter -lLLVMNVPTXCodeGen -lLLVMNVPTXDesc -lLLVMNVPTXInfo -lLLVMNVPTXAsmPrinter -lLLVMMSP430CodeGen -lLLVMMSP430Desc -lLLVMMSP430Info -lLLVMMSP430AsmPrinter -lLLVMMipsDisassembler -lLLVMMipsCodeGen -lLLVMMipsAsmParser -lLLVMMipsDesc -lLLVMMipsInfo -lLLVMMipsAsmPrinter -lLLVMLanaiDisassembler -lLLVMLanaiCodeGen -lLLVMLanaiAsmParser -lLLVMLanaiDesc -lLLVMLanaiAsmPrinter -lLLVMLanaiInfo -lLLVMHexagonDisassembler -lLLVMHexagonCodeGen -lLLVMHexagonAsmParser -lLLVMHexagonDesc -lLLVMHexagonInfo -lLLVMBPFDisassembler -lLLVMBPFCodeGen -lLLVMBPFAsmParser -lLLVMBPFDesc -lLLVMBPFInfo -lLLVMBPFAsmPrinter -lLLVMARMDisassembler -lLLVMARMCodeGen -lLLVMARMAsmParser -lLLVMARMDesc -lLLVMARMInfo -lLLVMARMAsmPrinter -lLLVMARMUtils -lLLVMAMDGPUDisassembler -lLLVMAMDGPUCodeGen -lLLVMAMDGPUAsmParser -lLLVMAMDGPUDesc -lLLVMAMDGPUInfo -lLLVMAMDGPUAsmPrinter -lLLVMAMDGPUUtils -lLLVMAArch64Disassembler -lLLVMAArch64CodeGen -lLLVMAArch64AsmParser -lLLVMAArch64Desc -lLLVMAArch64Info -lLLVMAArch64AsmPrinter -lLLVMAArch64Utils -lLLVMObjectYAML -lLLVMLibDriver -lLLVMOption -lLLVMWindowsManifest -lLLVMFuzzMutate -lLLVMX86Disassembler -lLLVMX86AsmParser -lLLVMX86CodeGen -lLLVMGlobalISel -lLLVMSelectionDAG -lLLVMAsmPrinter -lLLVMDebugInfoCodeView -lLLVMDebugInfoMSF -lLLVMX86Desc -lLLVMMCDisassembler -lLLVMX86Info -lLLVMX86AsmPrinter -lLLVMX86Utils -lLLVMMCJIT -lLLVMLineEditor -lLLVMInterpreter -lLLVMExecutionEngine -lLLVMRuntimeDyld -lLLVMCodeGen -lLLVMTarget -lLLVMCoroutines -lLLVMipo -lLLVMInstrumentation -lLLVMVectorize -lLLVMScalarOpts -lLLVMLinker -lLLVMIRReader -lLLVMAsmParser -lLLVMInstCombine -lLLVMTransformUtils -lLLVMBitWriter -lLLVMAnalysis -lLLVMProfileData -lLLVMObject -lLLVMMCParser -lLLVMMC -lLLVMBitReader -lLLVMCore -lLLVMBinaryFormat -lLLVMSupport -lLLVMDemangle -ltinfo -lz
 LIBM=		@LIBM@
 LIBC=		@LIBC@
 SYSLIBS=	$(LIBM) $(LIBC)
@@ -328,6 +329,7 @@ PYTHON_OBJS=	\
                 Python/ir_instructions.o \
                 Python/ir_lower.o \
                 Python/ir_libjit.o \
+                Python/ir_llvm.o \
 		Python/jit.o \
 		Python/compile.o \
 		Python/codecs.o \
@@ -1608,6 +1610,9 @@ config.status:	$(srcdir)/configure
 # Some make's put the object file in the current directory
 .c.o:
 	$(CC) -c $(PY_CORE_CFLAGS) -o $@ $<
+
+.cpp.o:
+	$(CXX) -c $(PY_CORE_CXXFLAGS) -o $@ $<
 
 # bpo-30104: dtoa.c uses union to cast double to unsigned long[2]. clang 4.0
 # with -O2 or higher and strict aliasing miscompiles the ratio() function

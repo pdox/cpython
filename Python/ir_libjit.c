@@ -102,17 +102,9 @@ void _emit_instr(jit_function_t jit_func,
     EMIT_BINOP(and)
     EMIT_BINOP(or)
     EMIT_BINOP(xor)
+    EMIT_BINOP(shl)
+    EMIT_BINOP(shr)
 #undef EMIT_BINOP
-
-#define EMIT_SHIFT(name) \
-    case ir_opcode_ ## name: { \
-        IR_INSTR_AS(shift) \
-        SET_DEST(jit_insn_ ## name (jit_func, JIT_VALUE(instr->value), JIT_VALUE(instr->count))); \
-        break; \
-    }
-    EMIT_SHIFT(shl)
-    EMIT_SHIFT(shr)
-#undef EMIT_SHIFT
 
     case ir_opcode_notbool: {
         IR_INSTR_AS(boolean)
@@ -230,10 +222,6 @@ void _emit_instr(jit_function_t jit_func,
         IR_INSTR_AS(cast)
         ir_type dest_type = ir_typeof(_instr->dest);
         SET_DEST(jit_insn_convert(jit_func, JIT_VALUE(instr->value), JIT_TYPE(dest_type), 0));
-        break;
-    }
-    case ir_opcode_phi: {
-        abort();
         break;
     }
     case ir_opcode_set_value: {
