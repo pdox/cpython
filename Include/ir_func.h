@@ -183,8 +183,8 @@ void ir_func_verify(ir_func func);
 /* Move all blocks from 'from' (inclusive) to 'to' (exclusive) to the end of the function. */
 void ir_func_move_blocks_to_end(ir_func func, ir_label from, ir_label to);
 
-/* Dump function IR to stderr */
-void ir_func_dump(ir_func func);
+/* Dump function IR to string */
+char *ir_func_dump(ir_func func);
 
 /* Print representation of value to buffer */
 char *ir_value_repr(char *p, ir_value value);

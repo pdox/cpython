@@ -114,8 +114,8 @@ void ir_func_verify(ir_func func) {
     }
 }
 
-void ir_func_dump(ir_func func) {
-    char *buf = (char*)malloc(1024*1024);
+char* ir_func_dump(ir_func func) {
+    char *buf = (char*)malloc(10*1024*1024);
     char *p = buf;
     ssize_t num_values = ir_func_largest_value_index(func);
     ssize_t num_blocks = ir_func_largest_block_index(func);
@@ -139,8 +139,7 @@ void ir_func_dump(ir_func func) {
         p = ir_block_repr(p, b);
         p += sprintf(p, "\n");
     }
-    fprintf(stderr, "%s", buf);
-    free(buf);
+    return buf;
 }
 
 char *ir_value_repr(char *p, ir_value value) {

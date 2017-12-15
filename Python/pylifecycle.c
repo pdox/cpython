@@ -108,6 +108,9 @@ _Py_IsFinalizing(void)
 
 /* Global configuration variable declarations are in pydebug.h */
 /* XXX (ncoghlan): move those declarations to pylifecycle.h? */
+int Py_JITFlag;
+int Py_JITDebugFlag;
+char *Py_JITDebugFunc;
 int Py_DebugFlag; /* Needed by parser.c */
 int Py_VerboseFlag; /* Needed by import.c */
 int Py_QuietFlag; /* Needed by sysmodule.c */
@@ -613,7 +616,12 @@ void _Py_InitializeCore(const _PyCoreConfig *config)
     _emit_stderr_warning_for_legacy_locale();
 #endif
 #endif
-
+    if ((p = Py_GETENV("PYJIT")) && *p != '\0')
+        set_flag(&Py_JITFlag, p);
+    if ((p = Py_GETENV("PYJITDEBUG")) && *p != '\0')
+        set_flag(&Py_JITDebugFlag, p);
+    if ((p = Py_GETENV("PYJITDEBUGFUNC")) && *p != '\0')
+        Py_JITDebugFunc = strdup(p);
     if ((p = Py_GETENV("PYTHONDEBUG")) && *p != '\0')
         set_flag(&Py_DebugFlag, p);
     if ((p = Py_GETENV("PYTHONVERBOSE")) && *p != '\0')

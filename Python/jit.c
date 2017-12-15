@@ -9,6 +9,9 @@
 #include "ir.h"
 #include "internal/jit.h"
 
+extern int Py_JITFlag;
+extern int Py_JITDebugFlag;
+
 typedef int (*PyJITTargetFunction)(EvalContext *ctx, PyFrameObject *f, int next_instr_index, int opcode, int oparg, int jumpev);
 
 int _PyEval_FUNC_JIT__unknown_opcode(EvalContext *ctx, PyFrameObject *f, int next_instr_index, int opcode, int oparg, int jumpev) {
@@ -126,6 +129,16 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     }
 }
 
+void _dumpir(const char *description, const char *filename, ir_func func) {
+    FILE *fp = fopen(filename, "w");
+    char* dump = ir_func_dump(func);
+    assert(fp && dump);
+    fprintf(fp, "%s", dump);
+    fclose(fp);
+    free(dump);
+    fprintf(stderr, "%s IR dumped to %s\n", description, filename);
+}
+
 static int
 _PyJIT_CodeGen(PyCodeObject *co) {
     char namebuf[32];
@@ -159,16 +172,23 @@ _PyJIT_CodeGen(PyCodeObject *co) {
 #ifdef IR_DEBUG
     ir_func_verify(jd->func);
 #endif
-    //fprintf(stderr, "BEFORE LOWER:\n");
-    //ir_func_dump(jd->func);
+    if (Py_JITDebugFlag > 0) {
+        _dumpir("Before lowering", "/tmp/before.ir", jd->func);
+    }
     ir_lower(jd->func, jd->fastlocals, jd->stack_pointer, jd->j_special[JIT_RC_NEXT_OPCODE]);
-    //fprintf(stderr, "AFTER LOWER:\n");
-    //ir_func_dump(jd->func);
+    if (Py_JITDebugFlag > 0) {
+        _dumpir("After lowering", "/tmp/after.ir", jd->func);
+    }
 #ifdef IR_DEBUG
     ir_func_verify(jd->func);
 #endif
-    //jd->entry = (PyJITEntryFunction)ir_libjit_compile(jd->func);
-    jd->entry = (PyJITEntryFunction)ir_llvm_compile(jd->func);
+    if (Py_JITFlag == 1) {
+        jd->entry = (PyJITEntryFunction)ir_libjit_compile(jd->func);
+    } else if (Py_JITFlag == 2) {
+        jd->entry = (PyJITEntryFunction)ir_llvm_compile(jd->func);
+    } else {
+        Py_FatalError("invalid PYJIT value");
+    }
     ir_context_destroy(jd->context);
     jd->context = NULL;
     jd->func = NULL;

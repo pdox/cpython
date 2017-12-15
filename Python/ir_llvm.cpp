@@ -415,15 +415,6 @@ void _emit_instr(
     } // switch
 }
 
-void llvm_module_to_file(const llvm::Module& module, const char* filename) {
-  std::string str;
-  llvm::raw_string_ostream os(str);
-  module.print(os, nullptr);
-
-  std::ofstream of(filename);
-  of << os.str();
-}
-
 void dump_llvm_error(llvm::Error E) {
     llvm::handleAllErrors(std::move(E), [&](const llvm::ErrorInfoBase &EI) {
          llvm::errs() << "Fatal Error: ";
@@ -520,10 +511,6 @@ ir_llvm_compile(ir_func func) {
     }
     free(llvm_blocks);
     free(llvm_values);
-
-    //const char* post_opt_file = "/tmp/jit.ll";
-    //llvm_module_to_file(*module, post_opt_file);
-    //std::cout << "Module dumped to " << post_opt_file << "\n";
 
 #ifdef IR_DEBUG
     if (llvm::verifyFunction(*llvm_func, &llvm::errs())) {

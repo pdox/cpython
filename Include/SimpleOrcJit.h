@@ -20,6 +20,18 @@
 
 #define DEBUG_TYPE "jitfromscratch"
 
+extern int Py_JITDebugFlag;
+
+static inline
+void llvm_module_to_file(const llvm::Module& module, const char* filename) {
+  std::string str;
+  llvm::raw_string_ostream os(str);
+  module.print(os, nullptr);
+
+  std::ofstream of(filename);
+  of << os.str();
+}
+
 class SimpleOrcJit {
   using ModulePtr_t = std::unique_ptr<llvm::Module>;
   using IRCompiler_t = llvm::orc::SimpleCompiler;
@@ -93,7 +105,12 @@ private:
 
   ModuleSharedPtr_t optimizeModule(ModuleSharedPtr_t module) {
     using namespace llvm;
-/*
+
+    if (Py_JITDebugFlag > 0) {
+        llvm_module_to_file(*module, "/tmp/before.ll");
+        std::cout << "Module dumped to /tmp/before.ll" << std::endl;
+    }
+
     PassManagerBuilder PMBuilder;
     PMBuilder.LoopVectorize = true;
     PMBuilder.SLPVectorize = true;
@@ -118,7 +135,12 @@ private:
       outs() << "Optimized module:\n\n";
       outs() << *module.get() << "\n\n";
     });
-*/
+
+    if (Py_JITDebugFlag > 0) {
+        llvm_module_to_file(*module, "/tmp/after.ll");
+        std::cout << "Module dumped to /tmp/after.ll" << std::endl;
+    }
+
     return module;
   }
 

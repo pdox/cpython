@@ -1040,6 +1040,7 @@ PYTHON_HEADERS= \
                 $(srcdir)/Include/ir_func.h \
                 $(srcdir)/Include/ir_instructions.h \
                 $(srcdir)/Include/ir_lower.h \
+                $(srcdir)/Include/SimpleOrcJit.h \
 		pyconfig.h \
 		$(PARSER_HEADERS) \
 		$(srcdir)/Include/Python-ast.h \

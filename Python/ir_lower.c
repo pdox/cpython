@@ -27,7 +27,7 @@ void _ir_lower_one_instr(
     case ir_opcode_incref: {
         IR_INSTR_AS(incref)
         ir_value obj = instr->obj;
-        ir_label skip_incref;
+        ir_label skip_incref = NULL;
         if (instr->is_xincref) {
             skip_incref = ir_label_new(func, "x_skip_incref");
             ir_branch_if_not(func, obj, skip_incref);
@@ -36,7 +36,7 @@ void _ir_lower_one_instr(
         ir_value old_value = ir_load(func, addr);
         ir_value new_value = ir_add(func, old_value, ir_constant_pyssizet(func, 1, NULL));
         ir_store(func, addr, new_value);
-        if (instr->is_xincref) {
+        if (skip_incref) {
             ir_label_here(func, skip_incref);
         }
         break;
