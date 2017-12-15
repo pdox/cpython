@@ -30,7 +30,7 @@ void _ir_lower_one_instr(
         ir_label skip_incref = NULL;
         if (instr->is_xincref) {
             skip_incref = ir_label_new(func, "x_skip_incref");
-            ir_branch_if_not(func, obj, skip_incref);
+            ir_branch_if_not(func, obj, skip_incref, IR_UNLIKELY);
         }
         ir_value addr = ir_get_element_ptr(func, obj, offsetof(PyObject, ob_refcnt), ir_type_pyssizet, "ob_refcnt");
         ir_value old_value = ir_load(func, addr);
@@ -46,12 +46,12 @@ void _ir_lower_one_instr(
         ir_label skip_dealloc = ir_label_new(func, "decref_skip_dealloc");
         ir_value obj = instr->obj;
         if (instr->is_xdecref) {
-            ir_branch_if_not(func, obj, skip_dealloc);
+            ir_branch_if_not(func, obj, skip_dealloc, IR_UNLIKELY);
         }
         ir_value old_value = IR_LOAD_FIELD(func, obj, PyObject, ob_refcnt, ir_type_pyssizet);
         ir_value new_value = ir_sub(func, old_value, ir_constant_pyssizet(func, 1, NULL));
         IR_STORE_FIELD(func, obj, PyObject, ob_refcnt, ir_type_pyssizet, new_value);
-        ir_branch_if(func, new_value, skip_dealloc);
+        ir_branch_if(func, new_value, skip_dealloc, IR_SEMILIKELY);
         ir_value dealloc_func;
 #if defined(Py_DEBUG) || defined(Py_TRACE_REFS)
         dealloc_func = ir_constant_from_ptr(func, dealloc_sig, _Py_Dealloc, "_Py_Dealloc");
@@ -89,7 +89,7 @@ void _ir_lower_one_instr(
         //IR_INSTR_AS(check_eval_breaker)
         ir_value eval_breaker_addr = ir_constant_from_ptr(func, ir_type_int_ptr, &_PyRuntime.ceval.eval_breaker._value, "&_PyRuntime.ceval.eval_breaker._value");
         ir_value eval_breaker_value = ir_load(func, eval_breaker_addr);
-        ir_branch_if(func, eval_breaker_value, eval_breaker_label);
+        ir_branch_if(func, eval_breaker_value, eval_breaker_label, IR_UNLIKELY);
         break;
     }
     default:

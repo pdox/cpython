@@ -35,27 +35,27 @@ DECLARE_SPECIAL(NEXT_OPCODE);
     ir_call(jd->func, funcval, sizeof(call_args)/sizeof(JVALUE), call_args); \
 })
 
-#define HANDLE_RV(inval) do { \
-    SET_VALUE(jd->rv, (inval)); \
-    ir_branch_if(jd->func, jd->rv, jd->j_special[0]); \
-} while (0)
-
 #define HANDLE_RV_INTERNAL(inval) do { \
     SET_VALUE(jd->rv, (inval)); \
-    ir_branch_if(jd->func, jd->rv, jd->j_special_internal[0]); \
+    ir_branch_if(jd->func, jd->rv, jd->j_special_internal[0], IR_UNLIKELY); \
 } while (0)
 
 #define LABEL(label)                ir_label_here(jd->func, (label))
 #define BRANCH(label)               ir_branch(jd->func, (label))
-#define BRANCH_IF_NOT(val, label)   ir_branch_if_not(jd->func, (val), (label))
-#define BRANCH_IF(val, label)       ir_branch_if(jd->func, (val), (label))
+#define BRANCH_IF_NOT(val, label, likelyhood)    ir_branch_if_not(jd->func, (val), (label), likelyhood)
+#define BRANCH_IF(val, label, likelyhood)        ir_branch_if(jd->func, (val), (label), likelyhood)
 
-#define BRANCH_SPECIAL(name) \
-    BRANCH(jd->j_special[JIT_RC_ ## name])
+#define BRANCH_SPECIAL(name)     BRANCH(jd->j_special[JIT_RC_ ## name])
+
+/* TODO: Deprecate these */
 #define BRANCH_SPECIAL_IF(val, name) \
-    BRANCH_IF((val), jd->j_special[JIT_RC_ ## name])
-#define BRANCH_SPECIAL_IF_ZERO(val, name) \
-    BRANCH_IF_NOT((val), jd->j_special[JIT_RC_ ## name])
+    BRANCH_IF((val), jd->j_special[JIT_RC_ ## name], IR_UNLIKELY)
+#define BRANCH_SPECIAL_IF_NOT(val, name) \
+    BRANCH_IF_NOT((val), jd->j_special[JIT_RC_ ## name], IR_UNLIKELY)
+
+#define GOTO_ERROR()             BRANCH_SPECIAL(ERROR)
+#define GOTO_ERROR_IF(val)       BRANCH_SPECIAL_IF((val), ERROR)
+#define GOTO_ERROR_IF_NOT(val)   BRANCH_SPECIAL_IF_NOT((val), ERROR)
 
 #define MOVE_TO_END(_from_label, _to_label) do { \
     move_entry *m = PyMem_RawMalloc(sizeof(move_entry)); \
@@ -93,7 +93,7 @@ DECLARE_SPECIAL(NEXT_OPCODE);
     JLABEL logical_and_end = JLABEL_INIT("logical_and_end"); \
     JVALUE ret = JVALUE_CREATE(ir_type_int); \
     SET_VALUE(ret, BOOL(v1)); \
-    BRANCH_IF_NOT(ret, logical_and_end); \
+    BRANCH_IF_NOT(ret, logical_and_end, IR_SEMILIKELY); \
     SET_VALUE(ret, BOOL(v2)); \
     LABEL(logical_and_end); \
     ret; \
@@ -215,7 +215,7 @@ DECLARE_SPECIAL(NEXT_OPCODE);
    is computed using f_lasti.
  */
 #define CHECK_EVAL_BREAKER() \
-    BRANCH_IF(LOAD_EVAL_BREAKER(), jd->j_special[JIT_RC_NEXT_OPCODE]);
+    BRANCH_IF(LOAD_EVAL_BREAKER(), jd->j_special[JIT_RC_NEXT_OPCODE], IR_UNLIKELY)
 
 #define IR_Py_TYPE(obj) \
     LOAD_FIELD((obj), PyObject, ob_type, ir_type_pytypeobject_ptr)
@@ -333,7 +333,7 @@ int do_raise(PyObject *, PyObject *);
 
 #define EMIT_JUMP(check_eval_breaker) do { \
     if (check_eval_breaker) { \
-        BRANCH_IF_NOT(LOAD_EVAL_BREAKER(), jd->jmptab[next_instr_index]); \
+        BRANCH_IF_NOT(LOAD_EVAL_BREAKER(), jd->jmptab[next_instr_index], IR_LIKELY); \
         SET_CTX_NEXT_INSTR_INDEX(CONSTANT_INT(next_instr_index)); \
         BRANCH(jd->j_special_internal[JIT_RC_NEXT_OPCODE]); \
     } else { \
@@ -427,7 +427,7 @@ void handle_load_fast_unbound_local(EvalContext *ctx, int opcode, int oparg) {
 EMITTER_FOR(LOAD_FAST) {
     JLABEL load_fast_error = JLABEL_INIT("load_fast_error");
     JVALUE v = GETLOCAL(oparg);
-    BRANCH_IF_NOT(v, load_fast_error);
+    BRANCH_IF_NOT(v, load_fast_error, IR_UNLIKELY);
     INCREF(v);
     PUSH(v);
 
@@ -495,7 +495,7 @@ EMITTER_FOR(DUP_TOP_TWO) {
         JVALUE res = CALL_NATIVE(sig, func, objval); \
         DECREF(objval); \
         SET_TOP(res); \
-        BRANCH_IF_NOT(res, jd->j_special[JIT_RC_ERROR]); \
+        GOTO_ERROR_IF_NOT(res); \
         CHECK_EVAL_BREAKER(); \
     }
 
@@ -511,7 +511,7 @@ EMITTER_FOR(UNARY_NOT) {
     DECREF(value);
 
     /* Jump if err < 0 (unlikely) */
-    BRANCH_IF(CMP_LT(err, CONSTANT_INT(0)), real_error);
+    BRANCH_IF(CMP_LT(err, CONSTANT_INT(0)), real_error, IR_UNLIKELY);
 
     /* Handle err > 0 case */
     JVALUE obj = TERNARY(err, CONSTANT_PYOBJ(Py_False), CONSTANT_PYOBJ(Py_True));
@@ -534,7 +534,7 @@ EMITTER_FOR(BINARY_POWER) {
     DECREF(base);
     DECREF(exp);
     SET_TOP(res);
-    BRANCH_SPECIAL_IF_ZERO(res, ERROR);
+    GOTO_ERROR_IF_NOT(res);
     CHECK_EVAL_BREAKER();
 }
 
@@ -547,7 +547,7 @@ EMITTER_FOR(BINARY_POWER) {
         DECREF(left); \
         DECREF(right); \
         SET_TOP(res); \
-        BRANCH_IF_NOT(res, jd->j_special[JIT_RC_ERROR]); \
+        GOTO_ERROR_IF_NOT(res); \
         CHECK_EVAL_BREAKER(); \
     }
 
@@ -572,7 +572,7 @@ EMITTER_FOR(LIST_APPEND) {
     CREATE_SIGNATURE(sig, ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
     JVALUE err = CALL_NATIVE(sig, PyList_Append, list, v);
     DECREF(v);
-    BRANCH_SPECIAL_IF(err, ERROR);
+    GOTO_ERROR_IF(err);
     CHECK_EVAL_BREAKER();
 }
 
@@ -582,7 +582,7 @@ EMITTER_FOR(SET_ADD) {
     CREATE_SIGNATURE(sig, ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
     JVALUE err = CALL_NATIVE(sig, PySet_Add, set, v);
     DECREF(v);
-    BRANCH_SPECIAL_IF(err, ERROR);
+    GOTO_ERROR_IF(err);
     CHECK_EVAL_BREAKER();
 }
 
@@ -594,7 +594,7 @@ EMITTER_FOR(INPLACE_POWER) {
     DECREF(base);
     DECREF(exp);
     SET_TOP(res);
-    BRANCH_SPECIAL_IF_ZERO(res, ERROR);
+    GOTO_ERROR_IF_NOT(res);
     CHECK_EVAL_BREAKER();
 }
 
@@ -622,7 +622,7 @@ EMITTER_FOR(STORE_SUBSCR) {
     DECREF(v);
     DECREF(container);
     DECREF(sub);
-    BRANCH_SPECIAL_IF(err, ERROR);
+    GOTO_ERROR_IF(err);
     CHECK_EVAL_BREAKER();
 }
 
@@ -685,7 +685,7 @@ EMITTER_FOR(STORE_ANNOTATION) {
     CREATE_SIGNATURE(sig, ir_type_int, ir_type_pyframeobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
     JVALUE err = CALL_NATIVE(sig, _store_annotation_helper, jd->f, CONSTANT_PYOBJ(name), ann);
     DECREF(ann);
-    BRANCH_IF(err, jd->j_special[JIT_RC_ERROR]);
+    GOTO_ERROR_IF(err);
     CHECK_EVAL_BREAKER();
 }
 
@@ -698,7 +698,7 @@ EMITTER_FOR(DELETE_SUBSCR) {
     JVALUE err = CALL_NATIVE(sig, PyObject_DelItem, container, sub);
     DECREF(container);
     DECREF(sub);
-    BRANCH_SPECIAL_IF(err, ERROR);
+    GOTO_ERROR_IF(err);
     CHECK_EVAL_BREAKER();
 }
 
@@ -708,18 +708,18 @@ EMITTER_FOR(PRINT_EXPR) {
     JLABEL hook_null = JLABEL_INIT("hook_null");
     CREATE_SIGNATURE(sig1, ir_type_pyobject_ptr, ir_type_void_ptr);
     JVALUE hook = CALL_NATIVE(sig1, _PySys_GetObjectId, CONSTANT_VOID_PTR(&PyId_displayhook));
-    BRANCH_IF_NOT(hook, hook_null);
+    BRANCH_IF_NOT(hook, hook_null, IR_UNLIKELY);
     CREATE_SIGNATURE(sig2, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
     JVALUE res = CALL_NATIVE(sig2, PyObject_CallFunctionObjArgs, hook, value, CONSTANT_PYOBJ(NULL));
     DECREF(value);
-    BRANCH_SPECIAL_IF_ZERO(res, ERROR);
+    GOTO_ERROR_IF_NOT(res);
     DECREF(res);
     CHECK_EVAL_BREAKER();
 
     BEGIN_REMOTE_SECTION(hook_null);
     CALL_PyErr_SetString(PyExc_RuntimeError, "lost sys.displayhook");
     DECREF(value);
-    BRANCH_SPECIAL(ERROR);
+    GOTO_ERROR();
     END_REMOTE_SECTION(hook_null);
 }
 
@@ -735,7 +735,7 @@ EMITTER_FOR(RAISE_VARARGS) {
     case 0: {
         CREATE_SIGNATURE(sig, ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
         JVALUE ret = CALL_NATIVE(sig, do_raise, exc, cause);
-        BRANCH_IF_NOT(ret, fin);
+        BRANCH_IF_NOT(ret, fin, IR_UNLIKELY);
         SET_WHY(WHY_EXCEPTION);
         BRANCH_SPECIAL(FAST_BLOCK_END);
     }
@@ -744,7 +744,7 @@ EMITTER_FOR(RAISE_VARARGS) {
         break;
     }
     LABEL(fin);
-    BRANCH_SPECIAL(ERROR);
+    GOTO_ERROR();
 }
 
 EMITTER_FOR(RETURN_VALUE) {
@@ -760,18 +760,18 @@ EMITTER_FOR(GET_AITER) {
     JVALUE obj = TOP();
     JVALUE obj_type = IR_Py_TYPE(obj);
     JVALUE tp_as_async = LOAD_FIELD(obj_type, PyTypeObject, tp_as_async, ir_type_pyasyncmethods_ptr);
-    BRANCH_IF_NOT(tp_as_async, getter_is_null);
+    BRANCH_IF_NOT(tp_as_async, getter_is_null, IR_UNLIKELY);
     CREATE_SIGNATURE(unaryfunc_sig, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
     JVALUE am_aiter = LOAD_FIELD(tp_as_async, PyAsyncMethods, am_aiter, unaryfunc_sig);
-    BRANCH_IF_NOT(am_aiter, getter_is_null);
+    BRANCH_IF_NOT(am_aiter, getter_is_null, IR_UNLIKELY);
     JVALUE iter = CALL_INDIRECT(am_aiter, obj);
     DECREF(obj);
-    BRANCH_IF_NOT(iter, iter_is_null);
+    BRANCH_IF_NOT(iter, iter_is_null, IR_UNLIKELY);
     JVALUE iter_type = IR_Py_TYPE(iter);
     JVALUE iter_tp_as_async = LOAD_FIELD(iter_type, PyTypeObject, tp_as_async, ir_type_pyasyncmethods_ptr);
-    BRANCH_IF_NOT(iter_tp_as_async, invalid_iter);
+    BRANCH_IF_NOT(iter_tp_as_async, invalid_iter, IR_UNLIKELY);
     JVALUE iter_am_anext = LOAD_FIELD(iter_tp_as_async, PyAsyncMethods, am_anext, unaryfunc_sig);
-    BRANCH_IF_NOT(iter_am_anext, invalid_iter);
+    BRANCH_IF_NOT(iter_am_anext, invalid_iter, IR_UNLIKELY);
 
     /* Good iterator, normal dispatch */
     SET_TOP(iter);
@@ -827,7 +827,7 @@ EMITTER_FOR(STORE_ATTR) {
     JVALUE err = CALL_NATIVE(sig, PyObject_SetAttr, owner, CONSTANT_PYOBJ(name), v);
     DECREF(v);
     DECREF(owner);
-    BRANCH_IF(err, jd->j_special[JIT_RC_ERROR]);
+    GOTO_ERROR_IF(err);
     CHECK_EVAL_BREAKER();
 }
 
@@ -864,7 +864,7 @@ EMITTER_FOR(LOAD_ATTR) {
     JVALUE res = CALL_NATIVE(sig, PyObject_GetAttr, owner, CONSTANT_PYOBJ(name));
     DECREF(owner);
     SET_TOP(res);
-    BRANCH_IF_NOT(res, jd->j_special[JIT_RC_ERROR]);
+    GOTO_ERROR_IF_NOT(res);
     CHECK_EVAL_BREAKER();
 }
 
@@ -912,7 +912,7 @@ EMITTER_FOR(COMPARE_OP) {
         JVALUE tmp = CALL_NATIVE(sig, PySequence_Contains, right, left);
 
         /* Check for < 0 */
-        BRANCH_IF(CMP_GE(tmp, CONSTANT_INT(0)), no_exception);
+        BRANCH_IF(CMP_GE(tmp, CONSTANT_INT(0)), no_exception, IR_LIKELY);
 
         /* Handle exception (tmp < 0) case */
         SET_VALUE(res, CONSTANT_PYOBJ(NULL));
@@ -934,8 +934,8 @@ EMITTER_FOR(COMPARE_OP) {
         JLABEL after_exc_match = JLABEL_INIT("after_exc_match");
         JLABEL handle_tuple = JLABEL_INIT("handle_tuple");
         /* Handle common case (exception class) first */
-        BRANCH_IF(IR_PyExceptionClass_Check(right), do_exc_match);
-        BRANCH_IF(IR_PyTuple_Check(right), handle_tuple);
+        BRANCH_IF(IR_PyExceptionClass_Check(right), do_exc_match, IR_LIKELY);
+        BRANCH_IF(IR_PyTuple_Check(right), handle_tuple, IR_LIKELY);
 
         /* Error case: neither exception class nor tuple */
         CALL_PyErr_SetString(PyExc_TypeError, CANNOT_CATCH_MSG "2");
@@ -947,7 +947,7 @@ EMITTER_FOR(COMPARE_OP) {
         CREATE_SIGNATURE(sig, ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
         JVALUE tmp = CALL_NATIVE(sig, _compare_op_exc_match_helper, left, right);
         /* This returns 0 to indicate error, 1 to indicate OK */
-        BRANCH_IF(tmp, do_exc_match);
+        BRANCH_IF(tmp, do_exc_match, IR_LIKELY);
         SET_VALUE(res, CONSTANT_PYOBJ(NULL));
         BRANCH(after_exc_match);
 
@@ -971,7 +971,7 @@ EMITTER_FOR(COMPARE_OP) {
     DECREF(left);
     DECREF(right);
     SET_TOP(res);
-    BRANCH_IF_NOT(res, jd->j_special[JIT_RC_ERROR]);
+    GOTO_ERROR_IF_NOT(res);
     CHECK_EVAL_BREAKER();
 }
 
@@ -988,12 +988,12 @@ EMITTER_FOR(POP_JUMP_IF_FALSE) {
     JLABEL skip2 = JLABEL_INIT("skip2");
     JLABEL fin = JLABEL_INIT("fin");
     JVALUE cond = POP();
-    BRANCH_IF(CMP_NE(cond, CONSTANT_PYOBJ(Py_True)), skip1);
+    BRANCH_IF(CMP_NE(cond, CONSTANT_PYOBJ(Py_True)), skip1, IR_SEMILIKELY);
     /* Py_True case */
     DECREF(cond);
     BRANCH(fin);
     LABEL(skip1);
-    BRANCH_IF(CMP_NE(cond, CONSTANT_PYOBJ(Py_False)), skip2);
+    BRANCH_IF(CMP_NE(cond, CONSTANT_PYOBJ(Py_False)), skip2, IR_SEMILIKELY);
     /* Py_False case */
     DECREF(cond);
     JUMPTO(oparg, 0);
@@ -1002,8 +1002,8 @@ EMITTER_FOR(POP_JUMP_IF_FALSE) {
     CREATE_SIGNATURE(sig, ir_type_int, ir_type_pyobject_ptr);
     JVALUE err = CALL_NATIVE(sig, PyObject_IsTrue, cond);
     DECREF(cond);
-    BRANCH_IF(CMP_GT(err, CONSTANT_INT(0)), fin);
-    BRANCH_IF(CMP_LT(err, CONSTANT_INT(0)), jd->j_special[JIT_RC_ERROR]);
+    BRANCH_IF(CMP_GT(err, CONSTANT_INT(0)), fin, IR_SEMILIKELY);
+    GOTO_ERROR_IF(CMP_LT(err, CONSTANT_INT(0)));
     /* err == 0 case */
     JUMPTO(oparg, 1);
     LABEL(fin);
@@ -1015,12 +1015,12 @@ EMITTER_FOR(POP_JUMP_IF_TRUE) {
     JLABEL skip2 = JLABEL_INIT("skip2");
     JLABEL fin = JLABEL_INIT("fin");
     JVALUE cond = POP();
-    BRANCH_IF(CMP_NE(cond, CONSTANT_PYOBJ(Py_False)), skip1);
+    BRANCH_IF(CMP_NE(cond, CONSTANT_PYOBJ(Py_False)), skip1, IR_SEMILIKELY);
     /* Py_False case */
     DECREF(cond);
     BRANCH(fin);
     LABEL(skip1);
-    BRANCH_IF(CMP_NE(cond, CONSTANT_PYOBJ(Py_True)), skip2);
+    BRANCH_IF(CMP_NE(cond, CONSTANT_PYOBJ(Py_True)), skip2, IR_SEMILIKELY);
     /* Py_True case */
     DECREF(cond);
     JUMPTO(oparg, 0);
@@ -1029,8 +1029,8 @@ EMITTER_FOR(POP_JUMP_IF_TRUE) {
     CREATE_SIGNATURE(sig, ir_type_int, ir_type_pyobject_ptr);
     JVALUE err = CALL_NATIVE(sig, PyObject_IsTrue, cond);
     DECREF(cond);
-    BRANCH_IF(CMP_EQ(err, CONSTANT_INT(0)), fin);
-    BRANCH_IF(CMP_LT(err, CONSTANT_INT(0)), jd->j_special[JIT_RC_ERROR]);
+    BRANCH_IF(CMP_EQ(err, CONSTANT_INT(0)), fin, IR_SEMILIKELY);
+    GOTO_ERROR_IF(CMP_LT(err, CONSTANT_INT(0)));
     /* err > 0 case */
     JUMPTO(oparg, 1);
     LABEL(fin);
@@ -1044,21 +1044,21 @@ EMITTER_FOR(JUMP_IF_FALSE_OR_POP) {
     JLABEL fast_dispatch = JLABEL_INIT("fast_dispatch");
     JLABEL do_jump = JLABEL_INIT("do_jump");
     JVALUE cond = TOP();
-    BRANCH_IF(CMP_NE(cond, CONSTANT_PYOBJ(Py_True)), skip1);
+    BRANCH_IF(CMP_NE(cond, CONSTANT_PYOBJ(Py_True)), skip1, IR_SEMILIKELY);
     /* Py_True case */
     STACKADJ(-1);
     DECREF(cond);
     BRANCH(fast_dispatch);
     LABEL(skip1);
-    BRANCH_IF(CMP_NE(cond, CONSTANT_PYOBJ(Py_False)), skip2);
+    BRANCH_IF(CMP_NE(cond, CONSTANT_PYOBJ(Py_False)), skip2, IR_SEMILIKELY);
     /* Py_False case */
     JUMPTO(oparg, 0);
     /* Generic case */
     LABEL(skip2);
     CREATE_SIGNATURE(sig, ir_type_int, ir_type_pyobject_ptr);
     JVALUE err = CALL_NATIVE(sig, PyObject_IsTrue, cond);
-    BRANCH_IF(CMP_EQ(err, CONSTANT_INT(0)), do_jump);
-    BRANCH_IF(CMP_LT(err, CONSTANT_INT(0)), jd->j_special[JIT_RC_ERROR]);
+    BRANCH_IF(CMP_EQ(err, CONSTANT_INT(0)), do_jump, IR_SEMILIKELY);
+    GOTO_ERROR_IF(CMP_LT(err, CONSTANT_INT(0)));
     /* err > 0 case */
     STACKADJ(-1);
     DECREF(cond);
@@ -1078,21 +1078,21 @@ EMITTER_FOR(JUMP_IF_TRUE_OR_POP) {
     JLABEL fast_dispatch = JLABEL_INIT("fast_dispatch");
     JLABEL do_jump = JLABEL_INIT("do_jump");
     JVALUE cond = TOP();
-    BRANCH_IF(CMP_NE(cond, CONSTANT_PYOBJ(Py_False)), skip1);
+    BRANCH_IF(CMP_NE(cond, CONSTANT_PYOBJ(Py_False)), skip1, IR_SEMILIKELY);
     /* Py_False case */
     STACKADJ(-1);
     DECREF(cond);
     BRANCH(fast_dispatch);
     LABEL(skip1);
-    BRANCH_IF(CMP_NE(cond, CONSTANT_PYOBJ(Py_True)), skip2);
+    BRANCH_IF(CMP_NE(cond, CONSTANT_PYOBJ(Py_True)), skip2, IR_SEMILIKELY);
     /* Py_True case */
     JUMPTO(oparg, 0);
     /* Generic case */
     LABEL(skip2);
     CREATE_SIGNATURE(sig, ir_type_int, ir_type_pyobject_ptr);
     JVALUE err = CALL_NATIVE(sig, PyObject_IsTrue, cond);
-    BRANCH_IF(CMP_GT(err, CONSTANT_INT(0)), do_jump);
-    BRANCH_IF(CMP_LT(err, CONSTANT_INT(0)), jd->j_special[JIT_RC_ERROR]);
+    BRANCH_IF(CMP_GT(err, CONSTANT_INT(0)), do_jump, IR_SEMILIKELY);
+    GOTO_ERROR_IF(CMP_LT(err, CONSTANT_INT(0)));
     /* err == 0 case */
     STACKADJ(-1);
     DECREF(cond);
@@ -1123,16 +1123,16 @@ EMITTER_FOR(FOR_ITER) {
     CREATE_SIGNATURE(unaryfunc_sig, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
     JVALUE tp_iternext = LOAD_FIELD(type_obj, PyTypeObject, tp_iternext, unaryfunc_sig);
     JVALUE next = CALL_INDIRECT(tp_iternext, iter_obj);
-    BRANCH_IF_NOT(next, handle_null);
+    BRANCH_IF_NOT(next, handle_null, IR_SOMETIMES);
     PUSH(next);
     BRANCH(next_instruction);
 
     /* Handle NULL case */
     LABEL(handle_null);
-    BRANCH_IF_NOT(PYERR_OCCURRED(), cleanup);
+    BRANCH_IF_NOT(PYERR_OCCURRED(), cleanup, IR_LIKELY);
     CREATE_SIGNATURE(sig2, ir_type_int, ir_type_pyobject_ptr);
     JVALUE ret = CALL_NATIVE(sig2, PyErr_ExceptionMatches, CONSTANT_PYOBJ(PyExc_StopIteration));
-    BRANCH_IF_NOT(ret, jd->j_special[JIT_RC_ERROR]);
+    GOTO_ERROR_IF_NOT(ret); /* This may actually be likely? */
     CREATE_SIGNATURE(sig3, ir_type_void);
     CALL_NATIVE(sig3, PyErr_Clear);
 
@@ -1153,7 +1153,7 @@ EMITTER_FOR(CONTINUE_LOOP) {
     CREATE_SIGNATURE(sig, ir_type_pyobject_ptr, ir_type_long);
     JVALUE tmp = CALL_NATIVE(sig, PyLong_FromLong, CONSTANT_LONG(oparg));
     SET_RETVAL(tmp);
-    BRANCH_SPECIAL_IF_ZERO(tmp, ERROR);
+    GOTO_ERROR_IF_NOT(tmp);
     SET_WHY(WHY_CONTINUE);
     BRANCH_SPECIAL(FAST_BLOCK_END);
 }
@@ -1198,11 +1198,11 @@ EMITTER_FOR(LOAD_METHOD) {
     JVALUE meth_found = CALL_NATIVE(sig, _PyObject_GetMethod, obj, CONSTANT_PYOBJ(name), ADDRESS_OF(meth));
 
     /* If meth == NULL, most likely attribute wasn't found. */
-    BRANCH_IF_NOT(meth, jd->j_special[JIT_RC_ERROR]);
+    GOTO_ERROR_IF_NOT(meth);
 
     JLABEL fin = JLABEL_INIT("fin");
     JLABEL if_meth_found = JLABEL_INIT("if_meth_found");
-    BRANCH_IF(meth_found, if_meth_found);
+    BRANCH_IF(meth_found, if_meth_found, IR_LIKELY);
 
     /* !meth_found case */
     SET_TOP(CONSTANT_PYOBJ(NULL));

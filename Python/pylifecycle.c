@@ -617,9 +617,9 @@ void _Py_InitializeCore(const _PyCoreConfig *config)
 #endif
 #endif
     if ((p = Py_GETENV("PYJIT")) && *p != '\0')
-        set_flag(&Py_JITFlag, p);
+        Py_JITFlag = atoi(p);
     if ((p = Py_GETENV("PYJITDEBUG")) && *p != '\0')
-        set_flag(&Py_JITDebugFlag, p);
+        Py_JITDebugFlag = atoi(p);
     if ((p = Py_GETENV("PYJITDEBUGFUNC")) && *p != '\0')
         Py_JITDebugFunc = strdup(p);
     if ((p = Py_GETENV("PYTHONDEBUG")) && *p != '\0')

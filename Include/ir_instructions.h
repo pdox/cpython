@@ -566,32 +566,45 @@ struct ir_instr_branch_cond_t {
     ir_value cond;
     ir_label if_true;
     ir_label if_false;
+    int if_true_weight;
+    int if_false_weight;
 };
 
 static inline
-void ir_branch_cond(ir_func func, ir_value cond, ir_label if_true, ir_label if_false) {
+void ir_branch_cond(ir_func func, ir_value cond, ir_label if_true, ir_label if_false,
+                    int if_true_weight, int if_false_weight) {
     IR_INSTR_ALLOC(ir_instr_branch_cond, 0)
     instr->cond = cond;
     instr->if_true = if_true;
     instr->if_false = if_false;
+    instr->if_true_weight = if_true_weight;
+    instr->if_false_weight = if_false_weight;
     IR_INSTR_INSERT(ir_opcode_branch_cond, ir_type_void);
 }
 
+/* Measures of likelyhood, based off a total of 2001 */
+#define IR_UNLIKELY            1
+#define IR_SOMETIMES         200
+#define IR_SEMILIKELY       1000
+#define IR_LIKELY           2000
+
 static inline
-void ir_branch_if(ir_func func, ir_value cond, ir_label if_true) {
+void ir_branch_if(ir_func func, ir_value cond, ir_label if_true, int likelyhood) {
     char namebuf[32];
+    assert(likelyhood > 0 && likelyhood <= 2000);
     sprintf(namebuf, "cond.if_false.%d", ++(func->num_cond_if_false_labels));
     ir_label next_block = ir_label_new(func, namebuf);
-    ir_branch_cond(func, cond, if_true, next_block);
+    ir_branch_cond(func, cond, if_true, next_block, likelyhood, 2001 - likelyhood);
     ir_label_here(func, next_block);
 }
 
 static inline
-void ir_branch_if_not(ir_func func, ir_value cond, ir_label if_not) {
+void ir_branch_if_not(ir_func func, ir_value cond, ir_label if_not, int likelyhood) {
     char namebuf[32];
+    assert(likelyhood > 0 && likelyhood <= 2000);
     sprintf(namebuf, "cond.if_true.%d", ++(func->num_cond_if_true_labels));
     ir_label next_block = ir_label_new(func, namebuf);
-    ir_branch_cond(func, cond, next_block, if_not);
+    ir_branch_cond(func, cond, next_block, if_not, 2001 - likelyhood, likelyhood);
     ir_label_here(func, next_block);
 }
 

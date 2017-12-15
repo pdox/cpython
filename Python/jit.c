@@ -58,6 +58,7 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     }
 
     // We have to do signal check immediately upon function entry.
+    //CHECK_EVAL_BREAKER();
     special_emitter_table[JIT_RC_NEXT_OPCODE](jd);
 
     if (is_gen) {

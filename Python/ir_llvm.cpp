@@ -5,6 +5,7 @@
 #include <fstream>
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/MDBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/TargetSelect.h"
@@ -379,7 +380,13 @@ void _emit_instr(
             builder.CreateICmpEQ(
                 LLVM_VALUE(instr->cond),
                 llvm::Constant::getNullValue(LLVM_TYPE(ir_typeof(instr->cond))));
-        builder.CreateCondBr(cond, LLVM_BLOCK(instr->if_false), LLVM_BLOCK(instr->if_true));
+        llvm::MDNode* branchWeights =
+            llvm::MDBuilder(context).createBranchWeights(instr->if_true_weight, instr->if_false_weight);
+        builder.CreateCondBr(
+            cond,
+            LLVM_BLOCK(instr->if_false),
+            LLVM_BLOCK(instr->if_true),
+            branchWeights);
         break;
     }
     case ir_opcode_jumptable: {
