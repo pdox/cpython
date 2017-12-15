@@ -45,6 +45,12 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
 
     jd->rv = ir_value_new(jd->func, ir_type_int);
 
+    /* libjit miscompiles if you don't set a value before using it.
+       Since we can't guarantee block ordering, be on the safe side and assign it on entry.
+       TODO: Fix this during compilation, in ir_libjit.c.
+     */
+    ir_set_value(jd->func, jd->rv, ir_constant_int(jd->func, 0, NULL));
+
     /* Arguments: ctx, f, sp */
     jd->ctx = ir_func_get_argument(jd->func, 0);
     jd->f = ir_func_get_argument(jd->func, 1);
@@ -57,9 +63,9 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
         jd->handlers[i] = NULL;
     }
 
-    // We have to do signal check immediately upon function entry.
-    //CHECK_EVAL_BREAKER();
-    special_emitter_table[JIT_RC_NEXT_OPCODE](jd);
+    // We need to do an eval breaker check immediately upon function entry.
+    // Jump to the internal label, because ctx->next_instr_index is set upon entry.
+    BRANCH_IF(LOAD_EVAL_BREAKER(), jd->j_special_internal[JIT_RC_NEXT_OPCODE], IR_UNLIKELY);
 
     if (is_gen) {
         /* jump to next_instr */
@@ -200,6 +206,12 @@ _PyJIT_CodeGen(PyCodeObject *co) {
 int _PyJIT_Execute(EvalContext *ctx, PyFrameObject *f, PyObject **sp) {
     JITData *jd;
     if (ctx->co->co_jit_data == NULL) {
+        if (Py_JITDebugFlag > 0) {
+            fprintf(stderr, "Entering CodeGen for %s from %s (f->f_code == %p)\n",
+                PyUnicode_AsUTF8(f->f_code->co_name),
+                PyUnicode_AsUTF8(f->f_code->co_filename),
+                f->f_code);
+        }
         if (_PyJIT_CodeGen(ctx->co) != 0) {
             return -1;
         }
