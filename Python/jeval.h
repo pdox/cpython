@@ -232,6 +232,9 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define IR_PyType_Check(obj) \
     IR_PyType_FastSubclass(IR_Py_TYPE(obj), Py_TPFLAGS_TYPE_SUBCLASS)
 
+#define IR_PyCoro_CheckExact(obj) \
+    CMP_EQ(IR_Py_TYPE(obj), CONSTANT_PTR(ir_type_pytypeobject_ptr, &PyCoro_Type))
+
 #define IR_PyExceptionClass_Check(x) \
     LOGICAL_AND_SC( \
         IR_PyType_Check((x)), \
@@ -805,8 +808,108 @@ EMITTER_FOR(GET_AITER) {
     END_REMOTE_SECTION(invalid_iter);
 }
 
-EMIT_AS_SUBROUTINE(GET_ANEXT)
-EMIT_AS_SUBROUTINE(GET_AWAITABLE)
+/* Handle the generic (not common) case for GET_ANEXT */
+static PyObject *
+_get_anext_helper(PyTypeObject *type, PyObject *aiter) {
+    PyObject *next_iter = NULL;
+    unaryfunc getter = NULL;
+    PyObject *awaitable;
+
+    if (type->tp_as_async != NULL){
+        getter = type->tp_as_async->am_anext;
+    }
+
+    if (getter != NULL) {
+        next_iter = (*getter)(aiter);
+        if (next_iter == NULL) {
+            return NULL;
+        }
+    }
+    else {
+        PyErr_Format(
+            PyExc_TypeError,
+            "'async for' requires an iterator with "
+            "__anext__ method, got %.100s",
+            type->tp_name);
+        return NULL;
+    }
+
+    awaitable = _PyCoro_GetAwaitableIter(next_iter);
+    if (awaitable == NULL) {
+        _PyErr_FormatFromCause(
+            PyExc_TypeError,
+            "'async for' received an invalid object "
+            "from __anext__: %.100s",
+            Py_TYPE(next_iter)->tp_name);
+        /* Fall through to decref and return NULL */
+    }
+    Py_DECREF(next_iter);
+    return awaitable;
+}
+
+EMITTER_FOR(GET_ANEXT) {
+    JLABEL skip_helper = JLABEL_INIT("skip_helper");
+    JLABEL fin = JLABEL_INIT("fin");
+    JVALUE aiter = TOP();
+    JVALUE type = IR_Py_TYPE(aiter);
+    JVALUE awaitable = JVALUE_CREATE(ir_type_pyobject_ptr);
+
+    /* Fast path. Really hacky. If aiter is PyAsyncGen_Type exactly, skip the
+       NULL checks and the call to _PyCoro_GetAwaitableIter.
+     */
+    JVALUE is_async_gen = CMP_EQ(type, CONSTANT_PTR(ir_type_pytypeobject_ptr, &PyAsyncGen_Type));
+    BRANCH_IF(is_async_gen, skip_helper, IR_LIKELY);
+
+    /* Slow path: use the helper */
+    CREATE_SIGNATURE(helper_sig, ir_type_pyobject_ptr, ir_type_pytypeobject_ptr, ir_type_pyobject_ptr);
+    SET_VALUE(awaitable, CALL_NATIVE(helper_sig, _get_anext_helper, type, aiter));
+    BRANCH(fin);
+
+    LABEL(skip_helper);
+    /* Fast path: PyAsyncGen_CheckExact(aiter) is true */
+    JVALUE tp_as_async = LOAD_FIELD(type, PyTypeObject, tp_as_async, ir_type_pyasyncmethods_ptr);
+    CREATE_SIGNATURE(unaryfunc_sig, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
+    JVALUE am_anext = LOAD_FIELD(tp_as_async, PyAsyncMethods, am_anext, unaryfunc_sig);
+    SET_VALUE(awaitable, CALL_INDIRECT(am_anext, aiter));
+    BRANCH(fin);
+
+    LABEL(fin);
+    GOTO_ERROR_IF_NOT(awaitable);
+    PUSH(awaitable);
+    CHECK_EVAL_BREAKER();
+}
+
+EMITTER_FOR(GET_AWAITABLE) {
+    JLABEL fin = JLABEL_INIT("fin");
+    JVALUE iterable = TOP();
+
+    // TODO: Inline _PyCoro_GetAwaitableIter
+    CREATE_SIGNATURE(sig, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
+    JVALUE iter = CALL_NATIVE(sig, _PyCoro_GetAwaitableIter, iterable);
+    DECREF(iterable);
+
+    // If this is a coroutine, ensure it isn't inside a yield from.
+    // TODO: Turn this into a flag check.
+    BRANCH_IF_NOT(iter, fin, IR_UNLIKELY);
+    BRANCH_IF_NOT(IR_PyCoro_CheckExact(iter), fin, IR_UNLIKELY);
+
+    CREATE_SIGNATURE(sig2, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
+    JVALUE yf = CALL_NATIVE(sig2, _PyGen_yf, iter);
+    BRANCH_IF_NOT(yf, fin, IR_LIKELY);
+    DECREF(yf);
+    DECREF(iter);
+    SET_VALUE(iter, CONSTANT_PYOBJ(NULL));
+    CALL_PyErr_SetString(
+            PyExc_RuntimeError,
+            "coroutine is being awaited already");
+    BRANCH(fin);
+
+    LABEL(fin);
+    SET_TOP(iter);
+    GOTO_ERROR_IF_NOT(iter);
+    CHECK_EVAL_BREAKER();
+}
+
 EMIT_AS_SUBROUTINE(YIELD_FROM)
 EMIT_AS_SUBROUTINE(YIELD_VALUE)
 EMIT_AS_SUBROUTINE(POP_EXCEPT)
