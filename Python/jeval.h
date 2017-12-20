@@ -244,6 +244,9 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define IR_Py_SIZE(objval) \
     LOAD_FIELD(CAST(ir_type_pyvarobject_ptr, (objval)), PyVarObject, ob_size, ir_type_pyssizet)
 
+#define IR_SET_Py_SIZE(objval, newval) \
+    STORE_FIELD(CAST(ir_type_pyvarobject_ptr, (objval)), PyVarObject, ob_size, ir_type_pyssizet, (newval))
+
 /* TODO: Add type-check assertions in debug mode */
 #define IR_PyTuple_GET_SIZE(objval) IR_Py_SIZE(objval)
 #define IR_PyList_GET_SIZE(objval)  IR_Py_SIZE(objval)
@@ -971,8 +974,9 @@ EMITTER_FOR(UNPACK_SEQUENCE) {
     JVALUE counter = JVALUE_CREATE(ir_type_int);
     SET_VALUE(counter, CONSTANT_INT(0));
     for (int i = 0; i < oparg; i++) {
-        PUT(1 + i, CALL_NATIVE(jd->sig_oo, PyIter_Next, it));
-        BRANCH_IF_NOT(PEEK(1 + i), exhausted_too_early, IR_UNLIKELY);
+        JVALUE item = CALL_NATIVE(jd->sig_oo, PyIter_Next, it);
+        PUT(1 + i, item);
+        BRANCH_IF_NOT(item, exhausted_too_early, IR_UNLIKELY);
         SET_VALUE(counter, ADD(counter, CONSTANT_INT(1)));
     }
     /* Check once more, to ensure the iterator is exhausted */
@@ -984,6 +988,7 @@ EMITTER_FOR(UNPACK_SEQUENCE) {
     BRANCH(dispatch);
 
     LABEL(exhausted_too_early);
+    DECREF(it);
     GOTO_ERROR_IF(PYERR_OCCURRED());
     CALL_PyErr_Format(PyExc_ValueError,
                       "not enough values to unpack (expected %d, got %d)",
@@ -1001,7 +1006,74 @@ EMITTER_FOR(UNPACK_SEQUENCE) {
     CHECK_EVAL_BREAKER();
 }
 
-EMIT_AS_SUBROUTINE(UNPACK_EX)
+EMITTER_FOR(UNPACK_EX) {
+    int before = oparg & 0xFF;
+    int after = oparg >> 8;
+    int total = before + 1 + after;
+    JVALUE seq = POP();
+    JLABEL dispatch = JLABEL_INIT("dispatch");
+
+    /* TODO: This could be specialized for tuple/list. */
+    JVALUE it = CALL_NATIVE(jd->sig_oo, PyObject_GetIter, seq);
+    DECREF(seq);
+    GOTO_ERROR_IF_NOT(it);
+
+    /* We need to push objects onto the stack in the opposite
+       order the iterator emits them, i.e. the first item the
+       iterator returns will be at the top when we are done.
+       So reserve the stack space, set them to NULL, and then
+       proceed with the iteration. */
+    JLABEL exhausted_too_early = JLABEL_INIT("exhausted_too_early");
+    STACKADJ(total);
+    for (int i = 0; i < total; i++) {
+        PUT(1 + i, CONSTANT_PYOBJ(NULL));
+    }
+    JVALUE counter = JVALUE_CREATE(ir_type_int);
+    SET_VALUE(counter, CONSTANT_INT(0));
+    for (int i = 0; i < before; i++) {
+        JVALUE item = CALL_NATIVE(jd->sig_oo, PyIter_Next, it);
+        PUT(1 + i, item);
+        BRANCH_IF_NOT(item, exhausted_too_early, IR_UNLIKELY);
+        SET_VALUE(counter, ADD(counter, CONSTANT_INT(1)));
+    }
+
+    /* Convert the remaining items to a list */
+    JVALUE l = CALL_NATIVE(jd->sig_oo, PySequence_List, it);
+    DECREF(it);
+    GOTO_ERROR_IF_NOT(l);
+    PUT(1 + before, l);
+
+    /* Verify we have enough items */
+    JLABEL not_enough_values = JLABEL_INIT("not_enough_values");
+    JVALUE ll = IR_PyList_GET_SIZE(l);
+    SET_VALUE(counter, ADD(counter, CAST(ir_type_int, ll)));
+    BRANCH_IF(CMP_LT(ll, CONSTANT_PYSSIZET(after)), not_enough_values, IR_UNLIKELY);
+
+    /* Move the "after-variable" args off the list */
+    JVALUE list_ob_item = IR_PyList_OB_ITEM(l);
+    for (int i = 0; i < after; i++) {
+        JVALUE item = LOAD_AT_INDEX(list_ob_item, SUBTRACT(ll, CONSTANT_PYSSIZET(after - i)));
+        PUT(2 + before + i, item);
+    }
+    /* Resize the list */
+    IR_SET_Py_SIZE(l, SUBTRACT(ll, CONSTANT_PYSSIZET(after)));
+    BRANCH(dispatch);
+
+    LABEL(exhausted_too_early);
+    DECREF(it);
+    GOTO_ERROR_IF(PYERR_OCCURRED());
+    BRANCH(not_enough_values);
+
+    LABEL(not_enough_values);
+    CALL_PyErr_Format(PyExc_ValueError,
+                      "not enough values to unpack "
+                      "(expected at least %d, got %d)",
+                      CONSTANT_INT(before + after), counter);
+    GOTO_ERROR();
+
+    LABEL(dispatch);
+    CHECK_EVAL_BREAKER();
+}
 
 EMITTER_FOR(STORE_ATTR) {
     PyObject *name = GETNAME(oparg)
