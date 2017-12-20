@@ -1100,12 +1100,52 @@ EMIT_AS_SUBROUTINE(STORE_GLOBAL)
 EMIT_AS_SUBROUTINE(DELETE_GLOBAL)
 EMIT_AS_SUBROUTINE(LOAD_NAME)
 EMIT_AS_SUBROUTINE(LOAD_GLOBAL)
-EMIT_AS_SUBROUTINE(DELETE_FAST)
-EMIT_AS_SUBROUTINE(DELETE_DEREF)
-EMIT_AS_SUBROUTINE(LOAD_CLOSURE)
-EMIT_AS_SUBROUTINE(LOAD_CLASSDEREF)
+
+EMITTER_FOR(DELETE_FAST) {
+    JLABEL no_error = JLABEL_INIT("no_error");
+    JVALUE v = GETLOCAL(oparg);
+    BRANCH_IF(v, no_error, IR_LIKELY);
+
+    /* Handle error (unbound) */
+    JTYPE sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr, ir_type_char_ptr, ir_type_pyobject_ptr);
+    PyObject *varname = PyTuple_GetItem(jd->co->co_varnames, oparg);
+    assert(varname);
+    CALL_NATIVE(
+        sig,
+        format_exc_check_arg,
+        CONSTANT_PYOBJ(PyExc_UnboundLocalError),
+        CONSTANT_PTR(ir_type_char_ptr, UNBOUNDLOCAL_ERROR_MSG),
+        CONSTANT_PTR(ir_type_pyobject_ptr, varname));
+    GOTO_ERROR();
+
+    LABEL(no_error);
+    SETLOCAL(oparg, CONSTANT_PYOBJ(NULL));
+    CHECK_EVAL_BREAKER();
+}
 
 extern void format_exc_unbound(PyCodeObject *co, int oparg);
+
+EMITTER_FOR(DELETE_DEREF) {
+    JLABEL fast_dispatch = JLABEL_INIT("fast_dispatch");
+    JLABEL cell_empty = JLABEL_INIT("cell_empty");
+    JVALUE cell = LOAD_FREEVAR(oparg);
+    JVALUE oldobj = IR_PyCell_GET(cell);
+    BRANCH_IF_NOT(oldobj, cell_empty, IR_UNLIKELY);
+    IR_PyCell_SET(cell, CONSTANT_PYOBJ(NULL));
+    DECREF(oldobj);
+    CHECK_EVAL_BREAKER();
+    BRANCH(fast_dispatch);
+
+    LABEL(cell_empty);
+    JTYPE sig = CREATE_SIGNATURE(ir_type_void, ir_type_void_ptr, ir_type_int);
+    CALL_NATIVE(sig, format_exc_unbound, CONSTANT_PTR(ir_type_void_ptr, jd->co), CONSTANT_INT(oparg));
+    GOTO_ERROR();
+
+    LABEL(fast_dispatch);
+}
+
+EMIT_AS_SUBROUTINE(LOAD_CLOSURE)
+EMIT_AS_SUBROUTINE(LOAD_CLASSDEREF)
 
 EMITTER_FOR(LOAD_DEREF) {
     JLABEL fast_dispatch = JLABEL_INIT("fast_dispatch");
