@@ -392,6 +392,8 @@ int do_raise(PyObject *, PyObject *);
 #define SET_RETVAL(val) \
     STORE_FIELD(jd->ctx, EvalContext, retval, ir_type_pyobject_ptr, (val))
 
+#define F_LOCALS() \
+    LOAD_FIELD(jd->f, PyFrameObject, f_locals, ir_type_pyobject_ptr)
 
 #define HANDLERS_FOR(op) \
     void emit_exceptional_handlers_for_##op (JITData *jd, int opcode)
@@ -444,6 +446,9 @@ EMITTER_FOR(INVALID_OPCODE) {
 
 EMITTER_FOR(NOP) {
 }
+
+#define NAME_ERROR_MSG \
+    "name '%.200s' is not defined"
 
 void format_exc_check_arg(PyObject *, const char *, PyObject *);
 #define UNBOUNDLOCAL_ERROR_MSG \
@@ -936,7 +941,7 @@ EMITTER_FOR(STORE_NAME) {
     JLABEL object_case = JLABEL_INIT("object_case");
     PyObject *name = GETNAME(oparg);
     JVALUE v = POP();
-    JVALUE ns = LOAD_FIELD(jd->f, PyFrameObject, f_locals, ir_type_pyobject_ptr);
+    JVALUE ns = F_LOCALS();
     BRANCH_IF_NOT(ns, no_locals_found, IR_UNLIKELY);
     BRANCH_IF_NOT(IR_PyDict_CheckExact(ns), object_case, IR_UNLIKELY);
     JVALUE err = JVALUE_CREATE(ir_type_int);
@@ -959,7 +964,36 @@ EMITTER_FOR(STORE_NAME) {
     CHECK_EVAL_BREAKER();
 }
 
-EMIT_AS_SUBROUTINE(DELETE_NAME)
+EMITTER_FOR(DELETE_NAME) {
+    JLABEL no_locals = JLABEL_INIT("no_locals");
+    JLABEL handle_err = JLABEL_INIT("handle_err");
+    JLABEL fast_dispatch = JLABEL_INIT("fast_dispatch");
+    PyObject *name = GETNAME(oparg);
+    assert(name);
+    JVALUE ns = F_LOCALS();
+    BRANCH_IF_NOT(ns, no_locals, IR_UNLIKELY);
+    JVALUE err = CALL_NATIVE(jd->sig_ioo, PyObject_DelItem, ns, CONSTANT_PYOBJ(name));
+    BRANCH_IF(err, handle_err, IR_UNLIKELY);
+    CHECK_EVAL_BREAKER();
+    BRANCH(fast_dispatch);
+
+    LABEL(no_locals);
+    CALL_PyErr_Format(PyExc_SystemError,
+                      "no locals when deleting %R", CONSTANT_PYOBJ(name));
+    GOTO_ERROR();
+
+    LABEL(handle_err);
+    JTYPE sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr, ir_type_char_ptr, ir_type_pyobject_ptr);
+    CALL_NATIVE(
+        sig,
+        format_exc_check_arg,
+        CONSTANT_PYOBJ(PyExc_NameError),
+        CONSTANT_PTR(ir_type_char_ptr, NAME_ERROR_MSG),
+        CONSTANT_PTR(ir_type_pyobject_ptr, name));
+    GOTO_ERROR();
+
+    LABEL(fast_dispatch);
+}
 
 EMITTER_FOR(UNPACK_SEQUENCE) {
     JVALUE seq = POP();
