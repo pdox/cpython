@@ -65,6 +65,23 @@ typedef struct _JITData {
     ir_value stack_pointer;
     ir_value fastlocals;
 
+    /* Some common function signature types:
+
+       v = void
+       i = int
+       z = Py_ssize_t
+       o = PyObject*
+       p = PyObject**
+
+       The first letter indicates the return type.
+    */
+    ir_type sig_oo;
+    ir_type sig_ooo;
+    ir_type sig_oooo;
+    ir_type sig_io;
+    ir_type sig_ioo;
+    ir_type sig_iooo;
+
     /* Blocks that will be moved to the end */
     move_entry *move_entry_list;
 
