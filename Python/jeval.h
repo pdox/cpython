@@ -241,6 +241,9 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define IR_PyDict_CheckExact(obj) \
     CMP_EQ(IR_Py_TYPE(obj), CONSTANT_PTR(ir_type_pytypeobject_ptr, &PyDict_Type))
 
+#define IR_PyUnicode_CheckExact(obj) \
+    CMP_EQ(IR_Py_TYPE(obj), CONSTANT_PTR(ir_type_pytypeobject_ptr, &PyUnicode_Type))
+
 #define IR_PyExceptionClass_Check(x) \
     LOGICAL_AND_SC( \
         IR_PyType_Check((x)), \
@@ -1615,5 +1618,63 @@ EMIT_AS_SUBROUTINE(CALL_FUNCTION_EX)
 
 EMIT_AS_SUBROUTINE(MAKE_FUNCTION)
 EMIT_AS_SUBROUTINE(BUILD_SLICE)
-EMIT_AS_SUBROUTINE(FORMAT_VALUE)
-EMIT_AS_SUBROUTINE(EXTENDED_ARG)
+EMITTER_FOR(FORMAT_VALUE) {
+    PyObject *(*conv_fn)(PyObject *);
+    int which_conversion = oparg & FVC_MASK;
+    int have_fmt_spec = (oparg & FVS_MASK) == FVS_HAVE_SPEC;
+
+    JVALUE fmt_spec = have_fmt_spec ? POP() : NULL;
+    JVALUE value = POP();
+
+    /* See if any conversion is specified. */
+    switch (which_conversion) {
+    case FVC_STR:   conv_fn = PyObject_Str;   break;
+    case FVC_REPR:  conv_fn = PyObject_Repr;  break;
+    case FVC_ASCII: conv_fn = PyObject_ASCII; break;
+
+    /* Must be 0 (meaning no conversion), since only four
+       values are allowed by (oparg & FVC_MASK). */
+    default:        conv_fn = NULL;           break;
+    }
+
+    /* If there's a conversion function, call it and replace
+       value with that result. Otherwise, just use value,
+       without conversion. */
+    if (conv_fn != NULL) {
+        JLABEL conv_ok = JLABEL_INIT("conv_ok");
+        JVALUE conv_value = CALL_NATIVE(jd->sig_oo, conv_fn, value);
+        DECREF(value);
+        BRANCH_IF(conv_value, conv_ok, IR_LIKELY);
+        /* Handle error (conv_fn returns NULL) */
+        if (have_fmt_spec) {
+            DECREF(fmt_spec);
+        }
+        GOTO_ERROR();
+        LABEL(conv_ok);
+        SET_VALUE(value, conv_value);
+    }
+
+    JLABEL skip_format = JLABEL_INIT("skip_format");
+    if (!have_fmt_spec) {
+        BRANCH_IF(IR_PyUnicode_CheckExact(value), skip_format, IR_LIKELY);
+    }
+
+    /* Actually call format() */
+    JVALUE result = CALL_NATIVE(
+         jd->sig_ooo, PyObject_Format, value, fmt_spec ? fmt_spec : CONSTANT_PYOBJ(NULL));
+    DECREF(value);
+    if (have_fmt_spec) {
+        DECREF(fmt_spec);
+    }
+    GOTO_ERROR_IF_NOT(result);
+    SET_VALUE(value, result);
+
+    /* Done */
+    LABEL(skip_format);
+    PUSH(value);
+    CHECK_EVAL_BREAKER();
+}
+
+EMITTER_FOR(EXTENDED_ARG) {
+    abort(); /* EXTENDED_ARG is handled by jit.c */
+}
