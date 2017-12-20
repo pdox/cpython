@@ -206,6 +206,8 @@ DECLARE_SPECIAL(NEXT_OPCODE);
         CONSTANT_UINTPTR(3)))
 
 #define GETNAME(i)   PyTuple_GET_ITEM(jd->co->co_names, (i));
+#define LOAD_FREEVAR(i) \
+    LOAD_AT_INDEX(jd->fastlocals, CONSTANT_INT(jd->co->co_nlocals + (i)))
 
 // TODO: This needs to be adjusted depending on the configuration of _Py_atomic_int
 #define LOAD_EVAL_BREAKER() \
@@ -253,6 +255,12 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 
 #define IR_PyList_OB_ITEM(obj) \
     LOAD_FIELD(CAST(ir_type_pylistobject_ptr, (obj)), PyListObject, ob_item, ir_type_pyobject_ptr_ptr)
+
+#define IR_PyCell_GET(cell) \
+    LOAD_FIELD(CAST(ir_type_pycellobject_ptr, (cell)), PyCellObject, ob_ref, ir_type_pyobject_ptr)
+
+#define IR_PyCell_SET(cell, newval) \
+    STORE_FIELD(CAST(ir_type_pycellobject_ptr, (cell)), PyCellObject, ob_ref, ir_type_pyobject_ptr, (newval))
 
 #define TYPE_CHECK(typeval, expected_type, branch_if_not, likelyhood) \
     BRANCH_IF(CMP_NE((typeval), CONSTANT_PTR(ir_type_pytypeobject_ptr, &(expected_type))), (branch_if_not), (likelyhood))
@@ -1096,8 +1104,37 @@ EMIT_AS_SUBROUTINE(DELETE_FAST)
 EMIT_AS_SUBROUTINE(DELETE_DEREF)
 EMIT_AS_SUBROUTINE(LOAD_CLOSURE)
 EMIT_AS_SUBROUTINE(LOAD_CLASSDEREF)
-EMIT_AS_SUBROUTINE(LOAD_DEREF)
-EMIT_AS_SUBROUTINE(STORE_DEREF)
+
+extern void format_exc_unbound(PyCodeObject *co, int oparg);
+
+EMITTER_FOR(LOAD_DEREF) {
+    JLABEL fast_dispatch = JLABEL_INIT("fast_dispatch");
+    JLABEL unbound_value = JLABEL_INIT("unbound_value");
+    JVALUE cell = LOAD_FREEVAR(oparg);
+    JVALUE value = IR_PyCell_GET(cell);
+    BRANCH_IF_NOT(value, unbound_value, IR_UNLIKELY);
+    INCREF(value);
+    PUSH(value);
+    CHECK_EVAL_BREAKER();
+    BRANCH(fast_dispatch);
+
+    LABEL(unbound_value);
+    JTYPE sig = CREATE_SIGNATURE(ir_type_void, ir_type_void_ptr, ir_type_int);
+    CALL_NATIVE(sig, format_exc_unbound, CONSTANT_PTR(ir_type_void_ptr, jd->co), CONSTANT_INT(oparg));
+    GOTO_ERROR();
+
+    LABEL(fast_dispatch);
+}
+
+EMITTER_FOR(STORE_DEREF) {
+    JVALUE v = POP();
+    JVALUE cell = LOAD_FREEVAR(oparg);
+    JVALUE oldobj = IR_PyCell_GET(cell);
+    IR_PyCell_SET(cell, v);
+    XDECREF(oldobj);
+    CHECK_EVAL_BREAKER();
+}
+
 EMIT_AS_SUBROUTINE(BUILD_STRING)
 EMIT_AS_SUBROUTINE(BUILD_TUPLE)
 EMIT_AS_SUBROUTINE(BUILD_LIST)
