@@ -238,6 +238,9 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define IR_PyCoro_CheckExact(obj) \
     CMP_EQ(IR_Py_TYPE(obj), CONSTANT_PTR(ir_type_pytypeobject_ptr, &PyCoro_Type))
 
+#define IR_PyDict_CheckExact(obj) \
+    CMP_EQ(IR_Py_TYPE(obj), CONSTANT_PTR(ir_type_pytypeobject_ptr, &PyDict_Type))
+
 #define IR_PyExceptionClass_Check(x) \
     LOGICAL_AND_SC( \
         IR_PyType_Check((x)), \
@@ -926,7 +929,36 @@ EMIT_AS_SUBROUTINE(POP_EXCEPT)
 EMIT_AS_SUBROUTINE(POP_BLOCK)
 EMIT_AS_SUBROUTINE(END_FINALLY)
 EMIT_AS_SUBROUTINE(LOAD_BUILD_CLASS)
-EMIT_AS_SUBROUTINE(STORE_NAME)
+
+EMITTER_FOR(STORE_NAME) {
+    JLABEL after_setitem = JLABEL_INIT("after_setitem");
+    JLABEL no_locals_found = JLABEL_INIT("no_locals_found");
+    JLABEL object_case = JLABEL_INIT("object_case");
+    PyObject *name = GETNAME(oparg);
+    JVALUE v = POP();
+    JVALUE ns = LOAD_FIELD(jd->f, PyFrameObject, f_locals, ir_type_pyobject_ptr);
+    BRANCH_IF_NOT(ns, no_locals_found, IR_UNLIKELY);
+    BRANCH_IF_NOT(IR_PyDict_CheckExact(ns), object_case, IR_UNLIKELY);
+    JVALUE err = JVALUE_CREATE(ir_type_int);
+    SET_VALUE(err, CALL_NATIVE(jd->sig_iooo, PyDict_SetItem, ns, CONSTANT_PYOBJ(name), v));
+    BRANCH(after_setitem);
+
+    LABEL(no_locals_found);
+    CALL_PyErr_Format(PyExc_SystemError,
+                      "no locals found when storing %R", CONSTANT_PYOBJ(name));
+    DECREF(v);
+    GOTO_ERROR();
+
+    LABEL(object_case);
+    SET_VALUE(err, CALL_NATIVE(jd->sig_iooo, PyObject_SetItem, ns, CONSTANT_PYOBJ(name), v));
+    BRANCH(after_setitem);
+
+    LABEL(after_setitem);
+    DECREF(v);
+    GOTO_ERROR_IF(err);
+    CHECK_EVAL_BREAKER();
+}
+
 EMIT_AS_SUBROUTINE(DELETE_NAME)
 
 EMITTER_FOR(UNPACK_SEQUENCE) {
