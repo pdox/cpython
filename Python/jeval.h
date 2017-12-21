@@ -276,6 +276,9 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define IR_PyCell_SET(cell, newval) \
     STORE_FIELD(CAST(ir_type_pycellobject_ptr, (cell)), PyCellObject, ob_ref, ir_type_pyobject_ptr, (newval))
 
+#define IR_PyErr_ExceptionMatches(exc) \
+    CALL_NATIVE(jd->sig_io, PyErr_ExceptionMatches, CONSTANT_PYOBJ(exc))
+
 #define TYPE_CHECK(typeval, expected_type, branch_if_not, likelyhood) \
     BRANCH_IF(CMP_NE((typeval), CONSTANT_PTR(ir_type_pytypeobject_ptr, &(expected_type))), (branch_if_not), (likelyhood))
 
@@ -1480,9 +1483,62 @@ EMITTER_FOR(BUILD_LIST) {
     CHECK_EVAL_BREAKER();
 }
 
-EMIT_AS_SUBROUTINE(BUILD_TUPLE_UNPACK_WITH_CALL)
-EMIT_AS_SUBROUTINE(BUILD_TUPLE_UNPACK)
-EMIT_AS_SUBROUTINE(BUILD_LIST_UNPACK)
+/* from ceval.c */
+extern int check_args_iterable(PyObject *, PyObject *);
+
+static void _build_unpack_common(JITData *jd, int opcode, int oparg) {
+    int convert_to_tuple = opcode != BUILD_LIST_UNPACK;
+    JLABEL handle_error = JLABEL_INIT("handle_error");
+    JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyssizet);
+    JVALUE sum = CALL_NATIVE(sig, PyList_New, CONSTANT_PYSSIZET(0));
+    GOTO_ERROR_IF_NOT(sum);
+    JVALUE badobj = JVALUE_CREATE(ir_type_pyobject_ptr);
+    for (int i = oparg; i > 0; i--) {
+        JVALUE item = PEEK(i);
+        SET_VALUE(badobj, item);
+        JVALUE none_val = CALL_NATIVE(jd->sig_ooo, _PyList_Extend, sum, item);
+        BRANCH_IF_NOT(none_val, handle_error, IR_UNLIKELY);
+        DECREF(none_val);
+    }
+    JVALUE result;
+    if (convert_to_tuple) {
+        JVALUE tup = CALL_NATIVE(jd->sig_oo, PyList_AsTuple, sum);
+        DECREF(sum);
+        GOTO_ERROR_IF_NOT(tup);
+        result = tup;
+    } else {
+        result = sum;
+    }
+    for (int i = oparg; i > 0; i--) {
+        DECREF(PEEK(i));
+    }
+    STACKADJ(-oparg);
+    PUSH(result);
+    CHECK_EVAL_BREAKER();
+
+    BEGIN_REMOTE_SECTION(handle_error);
+    DECREF(sum);
+    if (opcode == BUILD_TUPLE_UNPACK_WITH_CALL) {
+        JLABEL skip = JLABEL_INIT("skip");
+        BRANCH_IF_NOT(IR_PyErr_ExceptionMatches(PyExc_TypeError), skip, IR_SEMILIKELY);
+        CALL_NATIVE(jd->sig_ioo, check_args_iterable, PEEK(1 + oparg), badobj);
+        LABEL(skip);
+    }
+    GOTO_ERROR();
+    END_REMOTE_SECTION(handle_error);
+}
+
+EMITTER_FOR(BUILD_TUPLE_UNPACK_WITH_CALL) {
+    _build_unpack_common(jd, opcode, oparg);
+}
+
+EMITTER_FOR(BUILD_TUPLE_UNPACK) {
+    _build_unpack_common(jd, opcode, oparg);
+}
+
+EMITTER_FOR(BUILD_LIST_UNPACK) {
+    _build_unpack_common(jd, opcode, oparg);
+}
 
 EMITTER_FOR(BUILD_SET) {
     JLABEL handle_error = JLABEL_INIT("handle_error");
