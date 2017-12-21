@@ -1215,8 +1215,68 @@ EMITTER_FOR(STORE_ATTR) {
 
 EMIT_AS_SUBROUTINE(DELETE_ATTR)
 EMIT_AS_SUBROUTINE(STORE_GLOBAL)
+
 EMIT_AS_SUBROUTINE(DELETE_GLOBAL)
-EMIT_AS_SUBROUTINE(LOAD_NAME)
+
+static PyObject *
+_load_name_helper(PyObject *name, PyFrameObject *f) {
+    PyObject *locals = f->f_locals;
+    PyObject *v;
+    if (locals == NULL) {
+        PyErr_Format(PyExc_SystemError,
+                     "no locals when loading %R", name);
+        return NULL;
+    }
+    if (PyDict_CheckExact(locals)) {
+        v = PyDict_GetItem(locals, name);
+        Py_XINCREF(v);
+    }
+    else {
+        v = PyObject_GetItem(locals, name);
+        if (v == NULL) {
+            if (!PyErr_ExceptionMatches(PyExc_KeyError))
+                return NULL;
+            PyErr_Clear();
+        }
+    }
+    if (v == NULL) {
+        v = PyDict_GetItem(f->f_globals, name);
+        Py_XINCREF(v);
+        if (v == NULL) {
+            if (PyDict_CheckExact(f->f_builtins)) {
+                v = PyDict_GetItem(f->f_builtins, name);
+                if (v == NULL) {
+                    format_exc_check_arg(
+                                PyExc_NameError,
+                                NAME_ERROR_MSG, name);
+                    return NULL;
+                }
+                Py_INCREF(v);
+            }
+            else {
+                v = PyObject_GetItem(f->f_builtins, name);
+                if (v == NULL) {
+                    if (PyErr_ExceptionMatches(PyExc_KeyError))
+                        format_exc_check_arg(
+                                    PyExc_NameError,
+                                    NAME_ERROR_MSG, name);
+                    return NULL;
+                }
+            }
+        }
+    }
+    return v;
+}
+
+EMITTER_FOR(LOAD_NAME) {
+    PyObject *name = GETNAME(oparg);
+    JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyframeobject_ptr);
+    JVALUE v = CALL_NATIVE(sig, _load_name_helper, CONSTANT_PYOBJ(name), jd->f);
+    GOTO_ERROR_IF_NOT(v);
+    PUSH(v);
+    CHECK_EVAL_BREAKER();
+}
+
 EMIT_AS_SUBROUTINE(LOAD_GLOBAL)
 
 EMITTER_FOR(DELETE_FAST) {
