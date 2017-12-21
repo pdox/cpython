@@ -1447,9 +1447,116 @@ EMITTER_FOR(BUILD_SET) {
     END_REMOTE_SECTION(handle_error);
 }
 
-EMIT_AS_SUBROUTINE(BUILD_SET_UNPACK)
-EMIT_AS_SUBROUTINE(BUILD_MAP)
-EMIT_AS_SUBROUTINE(SETUP_ANNOTATIONS)
+EMITTER_FOR(BUILD_SET_UNPACK) {
+    JLABEL handle_error = JLABEL_INIT("handle_error");
+    JVALUE sum = CALL_NATIVE(jd->sig_oo, PySet_New, CONSTANT_PYOBJ(NULL));
+    GOTO_ERROR_IF_NOT(sum);
+    for (int i = 0; i < oparg; i++) {
+        JVALUE err = CALL_NATIVE(jd->sig_ioo, _PySet_Update, sum, PEEK(oparg - i));
+        BRANCH_IF(CMP_LT(err, CONSTANT_INT(0)), handle_error, IR_UNLIKELY);
+    }
+    for (int i = 0; i < oparg; i++) {
+        DECREF(PEEK(oparg - i));
+    }
+    STACKADJ(-oparg);
+    PUSH(sum);
+    CHECK_EVAL_BREAKER();
+
+    BEGIN_REMOTE_SECTION(handle_error);
+    DECREF(sum);
+    GOTO_ERROR();
+    END_REMOTE_SECTION(handle_error);
+}
+
+EMITTER_FOR(BUILD_MAP) {
+    JLABEL handle_error = JLABEL_INIT("handle_error");
+    JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyssizet);
+    JVALUE map = CALL_NATIVE(sig, _PyDict_NewPresized, CONSTANT_PYSSIZET(oparg));
+    GOTO_ERROR_IF_NOT(map);
+    for (int i = oparg; i > 0; i--) {
+        JVALUE key = PEEK(2*i);
+        JVALUE value = PEEK(2*i - 1);
+        JVALUE err = CALL_NATIVE(jd->sig_iooo, PyDict_SetItem, map, key, value);
+        BRANCH_IF(err, handle_error, IR_UNLIKELY);
+    }
+    for (int i = oparg; i > 0; i--) {
+        DECREF(PEEK(2*i));
+        DECREF(PEEK(2*i - 1));
+    }
+    STACKADJ(-2*oparg);
+    PUSH(map);
+
+    BEGIN_REMOTE_SECTION(handle_error);
+    DECREF(map);
+    GOTO_ERROR();
+    END_REMOTE_SECTION(handle_error);
+}
+
+/* This is copied from ceval.c */
+int
+_setup_annotations_helper(PyFrameObject *f) {
+    _Py_IDENTIFIER(__annotations__);
+    int err;
+    PyObject *ann_dict;
+    if (f->f_locals == NULL) {
+        PyErr_Format(PyExc_SystemError,
+                     "no locals found when setting up annotations");
+        return -1;
+    }
+    /* check if __annotations__ in locals()... */
+    if (PyDict_CheckExact(f->f_locals)) {
+        ann_dict = _PyDict_GetItemId(f->f_locals,
+                                     &PyId___annotations__);
+        if (ann_dict == NULL) {
+            /* ...if not, create a new one */
+            ann_dict = PyDict_New();
+            if (ann_dict == NULL) {
+                return -1;
+            }
+            err = _PyDict_SetItemId(f->f_locals,
+                                    &PyId___annotations__, ann_dict);
+            Py_DECREF(ann_dict);
+            if (err != 0) {
+                return -1;
+            }
+        }
+    }
+    else {
+        /* do the same if locals() is not a dict */
+        PyObject *ann_str = _PyUnicode_FromId(&PyId___annotations__);
+        if (ann_str == NULL) {
+            return -1;
+        }
+        ann_dict = PyObject_GetItem(f->f_locals, ann_str);
+        if (ann_dict == NULL) {
+            if (!PyErr_ExceptionMatches(PyExc_KeyError)) {
+                return -1;
+            }
+            PyErr_Clear();
+            ann_dict = PyDict_New();
+            if (ann_dict == NULL) {
+                return -1;
+            }
+            err = PyObject_SetItem(f->f_locals, ann_str, ann_dict);
+            Py_DECREF(ann_dict);
+            if (err != 0) {
+                return -1;
+            }
+        }
+        else {
+            Py_DECREF(ann_dict);
+        }
+    }
+    return 0;
+}
+
+EMITTER_FOR(SETUP_ANNOTATIONS) {
+    JTYPE sig = CREATE_SIGNATURE(ir_type_int, ir_type_pyframeobject_ptr);
+    JVALUE ret = CALL_NATIVE(sig, _setup_annotations_helper, jd->f);
+    GOTO_ERROR_IF(ret);
+    CHECK_EVAL_BREAKER();
+}
+
 EMIT_AS_SUBROUTINE(BUILD_CONST_KEY_MAP)
 EMIT_AS_SUBROUTINE(BUILD_MAP_UNPACK)
 EMIT_AS_SUBROUTINE(BUILD_MAP_UNPACK_WITH_CALL)
