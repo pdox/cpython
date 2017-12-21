@@ -240,6 +240,9 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define IR_PyCoro_CheckExact(obj) \
     CMP_EQ(IR_Py_TYPE(obj), CONSTANT_PTR(ir_type_pytypeobject_ptr, &PyCoro_Type))
 
+#define IR_PyGen_CheckExact(obj) \
+    CMP_EQ(IR_Py_TYPE(obj), CONSTANT_PTR(ir_type_pytypeobject_ptr, &PyGen_Type))
+
 #define IR_PyDict_CheckExact(obj) \
     CMP_EQ(IR_Py_TYPE(obj), CONSTANT_PTR(ir_type_pytypeobject_ptr, &PyDict_Type))
 
@@ -1661,9 +1664,44 @@ EMITTER_FOR(JUMP_ABSOLUTE) {
     JUMPTO(oparg, 1);
 }
 
-EMIT_AS_SUBROUTINE(GET_ITER)
-EMIT_AS_SUBROUTINE(GET_YIELD_FROM_ITER)
+EMITTER_FOR(GET_ITER) {
+    JVALUE iterable = POP();
+    JVALUE iter = CALL_NATIVE(jd->sig_oo, PyObject_GetIter, iterable);
+    DECREF(iterable);
+    GOTO_ERROR_IF_NOT(iter);
+    PUSH(iter);
+    CHECK_EVAL_BREAKER();
+}
 
+EMITTER_FOR(GET_YIELD_FROM_ITER) {
+    JLABEL exact_coro = JLABEL_INIT("exact_coro");
+    JLABEL exact_gen = JLABEL_INIT("exact_gen");
+    JLABEL dispatch = JLABEL_INIT("dispatch");
+    int is_coroutine = (jd->co->co_flags & (CO_COROUTINE | CO_ITERABLE_COROUTINE));
+    JVALUE iterable = POP();
+    BRANCH_IF(IR_PyCoro_CheckExact(iterable), exact_coro, IR_SEMILIKELY);
+    BRANCH_IF(IR_PyGen_CheckExact(iterable), exact_gen, IR_SEMILIKELY);
+
+    /* Generic case */
+    JVALUE iter = CALL_NATIVE(jd->sig_oo, PyObject_GetIter, iterable);
+    DECREF(iterable);
+    GOTO_ERROR_IF_NOT(iter);
+    PUSH(iter);
+    BRANCH(dispatch);
+
+    LABEL(exact_coro);
+    if (!is_coroutine) {
+        DECREF(iterable);
+        CALL_PyErr_SetString(PyExc_TypeError,
+                             "cannot 'yield from' a coroutine object "
+                             "in a non-coroutine generator");
+        GOTO_ERROR();
+    }
+    LABEL(exact_gen);
+    PUSH(iterable);
+    LABEL(dispatch);
+    CHECK_EVAL_BREAKER();
+}
 
 EMITTER_FOR(FOR_ITER) {
     JLABEL handle_null = JLABEL_INIT("handle_null");
