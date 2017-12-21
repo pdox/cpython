@@ -50,6 +50,7 @@ jit_type_t _ir_type_to_jit(ir_type type) {
     case ir_type_kind_ulonglong: return jit_type_sys_ulonglong;
     case ir_type_kind_intptr: return jit_type_nint;
     case ir_type_kind_uintptr: return jit_type_nuint;
+    case ir_type_kind_sizet: return jit_type_nuint;
     case ir_type_kind_pyssizet: return jit_type_nint;
     case ir_type_kind_pointer: return jit_type_void_ptr;
     case ir_type_kind_function: {

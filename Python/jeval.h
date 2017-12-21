@@ -120,6 +120,8 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define CONSTANT_ULONG(n) ir_constant_ulong(jd->func, (n), NULL)
 
 #define CONSTANT_PYSSIZET(n) ir_constant_pyssizet(jd->func, (n), NULL)
+#define CONSTANT_SIZET(n)    ir_constant_sizet(jd->func, (n), NULL)
+#define CONSTANT_UINT32(n)   ir_constant_uint(jd->func, (n), NULL)
 
 /* Constant uintptr_t value */
 #define CONSTANT_UINTPTR(n)  ir_constant_uintptr(jd->func, (n), NULL)
@@ -275,6 +277,11 @@ DECLARE_SPECIAL(NEXT_OPCODE);
     JTYPE sig = CREATE_SIGNATURE(ir_type_void, ir_type_void_ptr, ir_type_void_ptr); \
     CALL_NATIVE(sig, PyErr_SetString, CONSTANT_VOID_PTR(exc), CONSTANT_VOID_PTR(msg)); \
 } while (0)
+
+#define CALL_PyErr_NoMemory() ({ \
+    JTYPE _sig = CREATE_SIGNATURE(ir_type_pyobject_ptr); \
+    CALL_NATIVE(_sig, PyErr_NoMemory); \
+})
 
 #define CALL_PyErr_Format(exc, format, ...) do { \
     ir_value _values[] = { CONSTANT_PYOBJ(exc), CONSTANT_CHAR_PTR(format), __VA_ARGS__ }; \
@@ -1244,7 +1251,103 @@ EMITTER_FOR(STORE_DEREF) {
     CHECK_EVAL_BREAKER();
 }
 
-EMIT_AS_SUBROUTINE(BUILD_STRING)
+static PyObject* _build_string_helper0(PyObject *empty) {
+    PyObject *stack[] = {};
+    return _PyUnicode_JoinArray(empty, stack, 0);
+}
+
+static PyObject* _build_string_helper1(PyObject *empty, PyObject *arg1) {
+    PyObject *stack[] = {arg1};
+    return _PyUnicode_JoinArray(empty, stack, 1);
+}
+
+static PyObject* _build_string_helper2(PyObject *empty, PyObject *arg1, PyObject *arg2) {
+    PyObject *stack[] = {arg1, arg2};
+    return _PyUnicode_JoinArray(empty, stack, 2);
+}
+
+static PyObject* _build_string_helper3(PyObject *empty, PyObject *arg1, PyObject *arg2, PyObject *arg3) {
+    PyObject *stack[] = {arg1, arg2, arg3};
+    return _PyUnicode_JoinArray(empty, stack, 3);
+}
+
+static PyObject* _build_string_helper4(PyObject *empty, PyObject *arg1, PyObject *arg2, PyObject *arg3, PyObject *arg4) {
+    PyObject *stack[] = {arg1, arg2, arg3, arg4};
+    return _PyUnicode_JoinArray(empty, stack, 4);
+}
+
+EMITTER_FOR(BUILD_STRING) {
+    // TODO: The extra call and stack allocation makes this slower than the
+    // interpreted version. Consider inlining _PyUnicode_JoinArray.
+    JTYPE sig1 = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyssizet, ir_type_uint);
+    JVALUE empty = CALL_NATIVE(sig1, PyUnicode_New, CONSTANT_PYSSIZET(0), CONSTANT_UINT32(0));
+    GOTO_ERROR_IF_NOT(empty);
+
+    JVALUE result;
+    switch (oparg) {
+    case 0: {
+        result = CALL_NATIVE(jd->sig_oo, _build_string_helper0, empty);
+        break;
+    }
+    case 1: {
+        result = CALL_NATIVE(jd->sig_ooo, _build_string_helper1, empty, PEEK(1));
+        break;
+    }
+    case 2: {
+        result = CALL_NATIVE(jd->sig_oooo, _build_string_helper2, empty, PEEK(2), PEEK(1));
+        break;
+    }
+    case 3: {
+        JTYPE sig = CREATE_SIGNATURE(
+            ir_type_pyobject_ptr,
+            ir_type_pyobject_ptr,
+            ir_type_pyobject_ptr,
+            ir_type_pyobject_ptr,
+            ir_type_pyobject_ptr);
+        result = CALL_NATIVE(sig, _build_string_helper3, empty, PEEK(3), PEEK(2), PEEK(1));
+        break;
+    }
+    case 4: {
+        JTYPE sig = CREATE_SIGNATURE(
+            ir_type_pyobject_ptr,
+            ir_type_pyobject_ptr,
+            ir_type_pyobject_ptr,
+            ir_type_pyobject_ptr,
+            ir_type_pyobject_ptr,
+            ir_type_pyobject_ptr);
+        result = CALL_NATIVE(sig, _build_string_helper4, empty, PEEK(4), PEEK(3), PEEK(2), PEEK(1));
+        break;
+    }
+    default: {
+        JLABEL malloc_ok = JLABEL_INIT("malloc_ok");
+        JTYPE sig1 = CREATE_SIGNATURE(ir_type_void_ptr, ir_type_sizet);
+        JVALUE stack = CALL_NATIVE(sig1, PyMem_Malloc, CONSTANT_SIZET(sizeof(PyObject*) * oparg));
+        BRANCH_IF(stack, malloc_ok, IR_LIKELY);
+        CALL_PyErr_NoMemory();
+        GOTO_ERROR();
+        LABEL(malloc_ok);
+        stack = CAST(ir_type_pyobject_ptr_ptr, stack);
+        for (int i = 0; i < oparg; i++) {
+            STORE_AT_INDEX(stack, CONSTANT_INT(i), PEEK(oparg - i));
+        }
+        JTYPE sig2 = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr_ptr, ir_type_pyssizet);
+        result = CALL_NATIVE(sig2, _PyUnicode_JoinArray, empty, stack, CONSTANT_PYSSIZET(oparg));
+        JTYPE sig3 = CREATE_SIGNATURE(ir_type_void, ir_type_void_ptr);
+        CALL_NATIVE(sig3, PyMem_Free, CAST(ir_type_void_ptr, stack));
+        break;
+    }
+    } // select
+
+    DECREF(empty);
+    for (int i = 0; i < oparg; i++) {
+        DECREF(PEEK(1+i));
+    }
+    STACKADJ(-oparg);
+    GOTO_ERROR_IF_NOT(result);
+    PUSH(result);
+    CHECK_EVAL_BREAKER();
+}
+
 EMIT_AS_SUBROUTINE(BUILD_TUPLE)
 EMIT_AS_SUBROUTINE(BUILD_LIST)
 EMIT_AS_SUBROUTINE(BUILD_TUPLE_UNPACK_WITH_CALL)
@@ -1617,7 +1720,22 @@ EMIT_AS_SUBROUTINE(CALL_FUNCTION_KW)
 EMIT_AS_SUBROUTINE(CALL_FUNCTION_EX)
 
 EMIT_AS_SUBROUTINE(MAKE_FUNCTION)
-EMIT_AS_SUBROUTINE(BUILD_SLICE)
+
+EMITTER_FOR(BUILD_SLICE) {
+    JVALUE step = (oparg == 3) ? POP() : CONSTANT_PYOBJ(NULL);
+    JVALUE stop = POP();
+    JVALUE start = POP();
+    JVALUE slice = CALL_NATIVE(jd->sig_oooo, PySlice_New, start, stop, step);
+    DECREF(start);
+    DECREF(stop);
+    if (oparg == 3) {
+        DECREF(step);
+    }
+    GOTO_ERROR_IF_NOT(slice);
+    PUSH(slice);
+    CHECK_EVAL_BREAKER();
+}
+
 EMITTER_FOR(FORMAT_VALUE) {
     PyObject *(*conv_fn)(PyObject *);
     int which_conversion = oparg & FVC_MASK;

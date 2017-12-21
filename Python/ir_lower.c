@@ -15,7 +15,7 @@ void _ir_lower_one_instr(
         IR_INSTR_AS(getlocal)
         ir_value addr = ir_get_index_ptr(func, fastlocals, ir_constant_int(func, instr->index, NULL));
         ir_value tmp = ir_load(func, addr);
-        ir_set_value(func, _instr->dest, tmp);
+        _ir_instr_replace_dest(func, tmp, _instr->dest);
         break;
     }
     case ir_opcode_setlocal: {
@@ -75,7 +75,8 @@ void _ir_lower_one_instr(
         IR_INSTR_AS(stack_peek)
         ir_value addr =
             ir_get_index_ptr(func, stack_pointer, ir_constant_int(func, -instr->offset, NULL));
-        ir_set_value(func, _instr->dest, ir_load(func, addr));
+        ir_value tmp = ir_load(func, addr);
+        _ir_instr_replace_dest(func, tmp, _instr->dest);
         break;
     }
     case ir_opcode_stack_put: {

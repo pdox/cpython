@@ -116,6 +116,14 @@ ir_value _ir_instr_insert_helper(ir_func func, ir_instr instr, ir_opcode opcode,
     return dest;
 }
 
+static inline
+void _ir_instr_replace_dest(ir_func func, ir_value old_dest, ir_value new_dest) {
+    ir_block b = func->current_block;
+    ir_instr instr = b->current_instr;
+    assert(instr->dest == old_dest);
+    instr->dest = new_dest;
+}
+
 /* Forward declaration */
 static inline
 ir_value ir_cast(ir_func func, ir_type type, ir_value value);
@@ -481,6 +489,7 @@ IR_CONSTANT_METHOD(ir_constant_char_ptr, ir_type_char_ptr, void *, ptr)
 IR_CONSTANT_METHOD(ir_constant_intptr, ir_type_intptr, intptr_t, uip)
 IR_CONSTANT_METHOD(ir_constant_uintptr, ir_type_uintptr, uintptr_t, uip)
 IR_CONSTANT_METHOD(ir_constant_pyssizet, ir_type_pyssizet, Py_ssize_t, pyssizet)
+IR_CONSTANT_METHOD(ir_constant_sizet, ir_type_sizet, size_t, sizet)
 
 struct _object;
 typedef struct _object PyObject;

@@ -115,10 +115,11 @@ void ir_func_verify(ir_func func) {
 }
 
 char* ir_func_dump(ir_func func) {
-    char *buf = (char*)malloc(10*1024*1024);
-    char *p = buf;
     ssize_t num_values = ir_func_largest_value_index(func);
     ssize_t num_blocks = ir_func_largest_block_index(func);
+    /* TODO: Rather than guess at a maximum buffer size, resize the buffer dynamically */
+    char *buf = (char*)malloc(1024*1024 + 200 * num_values + 200 * num_blocks);
+    char *p = buf;
     p += sprintf(p, "DUMPING FUNCTION:\n");
     p += sprintf(p, "  Signature: ");
     p = ir_type_repr(p, func->sig);

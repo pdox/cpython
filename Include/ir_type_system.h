@@ -18,6 +18,7 @@ typedef enum {
     ir_type_kind_ulong,
     ir_type_kind_ulonglong,
     ir_type_kind_uintptr,
+    ir_type_kind_sizet,
 
     /* Pointer type */
     ir_type_kind_pointer,
@@ -41,7 +42,7 @@ struct ir_type_t {
 static inline
 int ir_type_is_integral(ir_type type) {
     return type->kind >= ir_type_kind_char &&
-           type->kind <= ir_type_kind_uintptr;
+           type->kind <= ir_type_kind_sizet;
 }
 
 static inline
@@ -114,6 +115,7 @@ typedef union {
     intptr_t ip;
     uintptr_t uip;
     Py_ssize_t pyssizet;
+    size_t sizet;
     void *ptr;
 } ir_imm;
 

@@ -16,6 +16,7 @@ PROCESS(uint)
 PROCESS(ulong)
 PROCESS(ulonglong)
 PROCESS(uintptr)
+PROCESS(sizet)
 
 PROCESS(pyobject)
 PROCESS(pytypeobject)
