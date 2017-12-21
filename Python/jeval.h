@@ -261,6 +261,9 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define IR_PyTuple_GET_SIZE(objval) IR_Py_SIZE(objval)
 #define IR_PyList_GET_SIZE(objval)  IR_Py_SIZE(objval)
 
+#define IR_PyTuple_OB_ITEM(obj) \
+    ir_get_element_ptr(jd->func, (obj), offsetof(PyTupleObject, ob_item), ir_type_pyobject_ptr, "ob_item");
+
 #define IR_PyList_OB_ITEM(obj) \
     LOAD_FIELD(CAST(ir_type_pylistobject_ptr, (obj)), PyListObject, ob_item, ir_type_pyobject_ptr_ptr)
 
@@ -1016,7 +1019,7 @@ EMITTER_FOR(UNPACK_SEQUENCE) {
     TYPE_CHECK(type, PyTuple_Type, not_tuple, IR_SEMILIKELY);
     BRANCH_IF(CMP_NE(IR_PyTuple_GET_SIZE(seq), CONSTANT_PYSSIZET(oparg)),
               generic_case, IR_UNLIKELY);
-    JVALUE tup_ob_item = ir_get_element_ptr(jd->func, seq, offsetof(PyTupleObject, ob_item), ir_type_pyobject_ptr, "ob_item");
+    JVALUE tup_ob_item = IR_PyTuple_OB_ITEM(seq);
     for (int i = oparg - 1; i >= 0; i--) {
         JVALUE item = LOAD_AT_INDEX(tup_ob_item, CONSTANT_INT(i));
         INCREF(item);
@@ -1348,12 +1351,63 @@ EMITTER_FOR(BUILD_STRING) {
     CHECK_EVAL_BREAKER();
 }
 
-EMIT_AS_SUBROUTINE(BUILD_TUPLE)
-EMIT_AS_SUBROUTINE(BUILD_LIST)
+/* TODO: Replace with a new opcode which directly places items into
+   a tuple, instead of maintaining a large number of items on the stack.
+   This is difficult to compile, and produces inefficient code.
+ */
+EMITTER_FOR(BUILD_TUPLE) {
+    JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyssizet);
+    JVALUE tup = CALL_NATIVE(sig, PyTuple_New, CONSTANT_PYSSIZET(oparg));
+    GOTO_ERROR_IF_NOT(tup);
+    JVALUE ob_item = IR_PyTuple_OB_ITEM(tup);
+    for (int i = 0; i < oparg; i++) {
+        STORE_AT_INDEX(ob_item, CONSTANT_INT(i), PEEK(oparg - i));
+    }
+    STACKADJ(-oparg);
+    PUSH(tup);
+    CHECK_EVAL_BREAKER();
+}
+
+EMITTER_FOR(BUILD_LIST) {
+    JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyssizet);
+    JVALUE list = CALL_NATIVE(sig, PyList_New, CONSTANT_PYSSIZET(oparg));
+    GOTO_ERROR_IF_NOT(list);
+    JVALUE ob_item = IR_PyList_OB_ITEM(list);
+    for (int i = 0; i < oparg; i++) {
+        STORE_AT_INDEX(ob_item, CONSTANT_INT(i), PEEK(oparg - i));
+    }
+    STACKADJ(-oparg);
+    PUSH(list);
+    CHECK_EVAL_BREAKER();
+}
+
 EMIT_AS_SUBROUTINE(BUILD_TUPLE_UNPACK_WITH_CALL)
 EMIT_AS_SUBROUTINE(BUILD_TUPLE_UNPACK)
 EMIT_AS_SUBROUTINE(BUILD_LIST_UNPACK)
-EMIT_AS_SUBROUTINE(BUILD_SET)
+
+EMITTER_FOR(BUILD_SET) {
+    JLABEL handle_error = JLABEL_INIT("handle_error");
+    JVALUE set = CALL_NATIVE(jd->sig_oo, PySet_New, CONSTANT_PYOBJ(NULL));
+    GOTO_ERROR_IF_NOT(set);
+    for (int i = 0; i < oparg; i++) {
+        JVALUE item = PEEK(oparg - i);
+        JVALUE err = CALL_NATIVE(jd->sig_ioo, PySet_Add, set, item);
+        BRANCH_IF(err, handle_error, IR_UNLIKELY);
+    }
+    for (int i = 0; i < oparg; i++) {
+        JVALUE item = PEEK(oparg - i);
+        DECREF(item);
+    }
+    STACKADJ(-oparg);
+    PUSH(set);
+    CHECK_EVAL_BREAKER();
+
+    BEGIN_REMOTE_SECTION(handle_error);
+    DECREF(set);
+    GOTO_ERROR();
+    END_REMOTE_SECTION(handle_error);
+}
+
 EMIT_AS_SUBROUTINE(BUILD_SET_UNPACK)
 EMIT_AS_SUBROUTINE(BUILD_MAP)
 EMIT_AS_SUBROUTINE(SETUP_ANNOTATIONS)
