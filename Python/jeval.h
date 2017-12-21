@@ -968,7 +968,24 @@ EMITTER_FOR(GET_AWAITABLE) {
 EMIT_AS_SUBROUTINE(YIELD_FROM)
 EMIT_AS_SUBROUTINE(YIELD_VALUE)
 EMIT_AS_SUBROUTINE(POP_EXCEPT)
-EMIT_AS_SUBROUTINE(POP_BLOCK)
+
+#define UNWIND_BLOCK(b) do { \
+    JLABEL loop_entry = JLABEL_INIT("loop_entry"); \
+    JLABEL loop_done = JLABEL_INIT("loop_done"); \
+    LABEL(loop_entry); \
+    BRANCH_IF_NOT(CMP_GT(STACK_LEVEL(), LOAD_FIELD((b), PyTryBlock, b_level, ir_type_int)), loop_done, IR_SOMETIMES); \
+    XDECREF(POP()); \
+    BRANCH(loop_entry); \
+    LABEL(loop_done); \
+} while (0)
+
+EMITTER_FOR(POP_BLOCK) {
+    JTYPE sig = CREATE_SIGNATURE(ir_type_pytryblock_ptr, ir_type_pyframeobject_ptr);
+    JVALUE b = CALL_NATIVE(sig, PyFrame_BlockPop, jd->f);
+    UNWIND_BLOCK(b);
+    CHECK_EVAL_BREAKER();
+}
+
 EMIT_AS_SUBROUTINE(END_FINALLY)
 
 static
