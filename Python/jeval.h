@@ -949,7 +949,43 @@ EMIT_AS_SUBROUTINE(YIELD_VALUE)
 EMIT_AS_SUBROUTINE(POP_EXCEPT)
 EMIT_AS_SUBROUTINE(POP_BLOCK)
 EMIT_AS_SUBROUTINE(END_FINALLY)
-EMIT_AS_SUBROUTINE(LOAD_BUILD_CLASS)
+
+static
+PyObject *
+_load_build_class_helper(PyFrameObject *f) {
+    _Py_IDENTIFIER(__build_class__);
+    PyObject *bc;
+    if (PyDict_CheckExact(f->f_builtins)) {
+        bc = _PyDict_GetItemId(f->f_builtins, &PyId___build_class__);
+        if (bc == NULL) {
+            PyErr_SetString(PyExc_NameError,
+                            "__build_class__ not found");
+            return NULL;
+        }
+        Py_INCREF(bc);
+    }
+    else {
+        PyObject *build_class_str = _PyUnicode_FromId(&PyId___build_class__);
+        if (build_class_str == NULL)
+            return NULL;
+        bc = PyObject_GetItem(f->f_builtins, build_class_str);
+        if (bc == NULL) {
+            if (PyErr_ExceptionMatches(PyExc_KeyError))
+                PyErr_SetString(PyExc_NameError,
+                                "__build_class__ not found");
+            return NULL;
+        }
+    }
+    return bc;
+}
+
+EMITTER_FOR(LOAD_BUILD_CLASS) {
+    JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyframeobject_ptr);
+    JVALUE bc = CALL_NATIVE(sig, _load_build_class_helper, jd->f);
+    GOTO_ERROR_IF_NOT(bc);
+    PUSH(bc);
+    CHECK_EVAL_BREAKER();
+}
 
 EMITTER_FOR(STORE_NAME) {
     JLABEL after_setitem = JLABEL_INIT("after_setitem");
