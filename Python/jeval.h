@@ -303,6 +303,25 @@ DECLARE_SPECIAL(NEXT_OPCODE);
     ir_call(jd->func, _funcval, sizeof(_values)/sizeof(ir_value), _values); \
 } while (0)
 
+void format_exc_check_arg(PyObject *, const char *, PyObject *);
+
+#define CALL_format_exc_check_arg(exc, msg, name) do { \
+    JTYPE _sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr, ir_type_char_ptr, ir_type_pyobject_ptr); \
+    CALL_NATIVE( \
+        _sig, \
+        format_exc_check_arg, \
+        CONSTANT_PYOBJ(exc), \
+        CONSTANT_PTR(ir_type_char_ptr, msg), \
+        CONSTANT_PYOBJ(name)); \
+} while (0)
+
+extern void format_exc_unbound(PyCodeObject *co, int oparg);
+
+#define CALL_format_exc_unbound(arg) do { \
+    JTYPE _sig = CREATE_SIGNATURE(ir_type_void, ir_type_void_ptr, ir_type_int); \
+    CALL_NATIVE(_sig, format_exc_unbound, CONSTANT_PTR(ir_type_void_ptr, jd->co), CONSTANT_INT(arg)); \
+} while (0)
+
 #define INIT_INFO(op) \
     op##_INFO *info = (op##_INFO *) jd->priv[opcode]; \
     int did_alloc_info = 0; \
@@ -469,7 +488,6 @@ EMITTER_FOR(NOP) {
 #define NAME_ERROR_MSG \
     "name '%.200s' is not defined"
 
-void format_exc_check_arg(PyObject *, const char *, PyObject *);
 #define UNBOUNDLOCAL_ERROR_MSG \
     "local variable '%.200s' referenced before assignment"
 
@@ -1038,13 +1056,7 @@ EMITTER_FOR(DELETE_NAME) {
     GOTO_ERROR();
 
     LABEL(handle_err);
-    JTYPE sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr, ir_type_char_ptr, ir_type_pyobject_ptr);
-    CALL_NATIVE(
-        sig,
-        format_exc_check_arg,
-        CONSTANT_PYOBJ(PyExc_NameError),
-        CONSTANT_PTR(ir_type_char_ptr, NAME_ERROR_MSG),
-        CONSTANT_PTR(ir_type_pyobject_ptr, name));
+    CALL_format_exc_check_arg(PyExc_NameError, NAME_ERROR_MSG, name);
     GOTO_ERROR();
 
     LABEL(fast_dispatch);
@@ -1216,10 +1228,38 @@ EMITTER_FOR(STORE_ATTR) {
     CHECK_EVAL_BREAKER();
 }
 
-EMIT_AS_SUBROUTINE(DELETE_ATTR)
-EMIT_AS_SUBROUTINE(STORE_GLOBAL)
+EMITTER_FOR(DELETE_ATTR) {
+    PyObject *name = GETNAME(oparg);
+    JVALUE owner = POP();
+    JVALUE err = CALL_NATIVE(jd->sig_iooo, PyObject_SetAttr, owner, CONSTANT_PYOBJ(name), CONSTANT_PYOBJ(NULL));
+    DECREF(owner);
+    GOTO_ERROR_IF(err);
+    CHECK_EVAL_BREAKER();
+}
 
-EMIT_AS_SUBROUTINE(DELETE_GLOBAL)
+EMITTER_FOR(STORE_GLOBAL) {
+    PyObject *name = GETNAME(oparg);
+    JVALUE v = POP();
+    JVALUE globals = LOAD_FIELD(jd->f, PyFrameObject, f_globals, ir_type_pyobject_ptr);
+    JVALUE err = CALL_NATIVE(jd->sig_iooo, PyDict_SetItem, globals, CONSTANT_PYOBJ(name), v);
+    DECREF(v);
+    GOTO_ERROR_IF(err);
+    CHECK_EVAL_BREAKER();
+}
+
+EMITTER_FOR(DELETE_GLOBAL) {
+    JLABEL handle_error = JLABEL_INIT("handle_error");
+    PyObject *name = GETNAME(oparg);
+    JVALUE globals = LOAD_FIELD(jd->f, PyFrameObject, f_globals, ir_type_pyobject_ptr);
+    JVALUE err = CALL_NATIVE(jd->sig_ioo, PyDict_DelItem, globals, CONSTANT_PYOBJ(name));
+    BRANCH_IF(err, handle_error, IR_UNLIKELY);
+    CHECK_EVAL_BREAKER();
+
+    BEGIN_REMOTE_SECTION(handle_error);
+    CALL_format_exc_check_arg(PyExc_NameError, NAME_ERROR_MSG, name);
+    GOTO_ERROR();
+    END_REMOTE_SECTION(handle_error);
+}
 
 static PyObject *
 _load_name_helper(PyObject *name, PyFrameObject *f) {
@@ -1288,23 +1328,15 @@ EMITTER_FOR(DELETE_FAST) {
     BRANCH_IF(v, no_error, IR_LIKELY);
 
     /* Handle error (unbound) */
-    JTYPE sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr, ir_type_char_ptr, ir_type_pyobject_ptr);
     PyObject *varname = PyTuple_GetItem(jd->co->co_varnames, oparg);
     assert(varname);
-    CALL_NATIVE(
-        sig,
-        format_exc_check_arg,
-        CONSTANT_PYOBJ(PyExc_UnboundLocalError),
-        CONSTANT_PTR(ir_type_char_ptr, UNBOUNDLOCAL_ERROR_MSG),
-        CONSTANT_PTR(ir_type_pyobject_ptr, varname));
+    CALL_format_exc_check_arg(PyExc_UnboundLocalError, UNBOUNDLOCAL_ERROR_MSG, varname);
     GOTO_ERROR();
 
     LABEL(no_error);
     SETLOCAL(oparg, CONSTANT_PYOBJ(NULL));
     CHECK_EVAL_BREAKER();
 }
-
-extern void format_exc_unbound(PyCodeObject *co, int oparg);
 
 EMITTER_FOR(DELETE_DEREF) {
     JLABEL fast_dispatch = JLABEL_INIT("fast_dispatch");
@@ -1318,8 +1350,7 @@ EMITTER_FOR(DELETE_DEREF) {
     BRANCH(fast_dispatch);
 
     LABEL(cell_empty);
-    JTYPE sig = CREATE_SIGNATURE(ir_type_void, ir_type_void_ptr, ir_type_int);
-    CALL_NATIVE(sig, format_exc_unbound, CONSTANT_PTR(ir_type_void_ptr, jd->co), CONSTANT_INT(oparg));
+    CALL_format_exc_unbound(oparg);
     GOTO_ERROR();
 
     LABEL(fast_dispatch);
@@ -1340,8 +1371,7 @@ EMITTER_FOR(LOAD_DEREF) {
     BRANCH(fast_dispatch);
 
     LABEL(unbound_value);
-    JTYPE sig = CREATE_SIGNATURE(ir_type_void, ir_type_void_ptr, ir_type_int);
-    CALL_NATIVE(sig, format_exc_unbound, CONSTANT_PTR(ir_type_void_ptr, jd->co), CONSTANT_INT(oparg));
+    CALL_format_exc_unbound(oparg);
     GOTO_ERROR();
 
     LABEL(fast_dispatch);
