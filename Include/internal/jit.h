@@ -18,7 +18,7 @@ typedef struct _EvalContext {
     int next_instr_index;  /* Next instruction index. Only used during jumps and special instructions. */
     PyObject **stack_pointer; /* Only used for subroutine calls */
 
-    unsigned why; /* Reason for block stack unwind */
+    int why; /* Reason for block stack unwind */
     PyObject **fastlocals, **freevars;
     PyObject *retval;            /* Return value */
     PyThreadState *tstate;
@@ -65,6 +65,7 @@ typedef struct _JITData {
     ir_value stack_pointer;
     ir_value fastlocals;
     ir_value retval; /* corresponding to ctx->retval */
+    ir_value why;    /* corresponding to ctx->why */
 
     /* Some common function signature types:
 

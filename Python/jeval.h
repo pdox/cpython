@@ -15,6 +15,9 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define JLABEL            ir_label
 #define JLABEL_INIT(name) ir_label_new(jd->func, name)
 
+#define IR_LABEL_INIT(name) \
+    ir_label name = ir_label_new(jd->func, #name);
+
 #define JVALUE_CREATE(irtype)    ir_value_new(jd->func, (irtype))
 #define ADDRESS_OF(val)          ir_address_of(jd->func, (val))
 
@@ -59,6 +62,7 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define GOTO_ERROR_IF_NOT(val)   BRANCH_SPECIAL_IF_NOT((val), ERROR)
 
 #define GOTO_FAST_YIELD()        BRANCH_SPECIAL(FAST_YIELD)
+#define GOTO_FAST_BLOCK_END()    BRANCH_SPECIAL(FAST_BLOCK_END)
 
 #define MOVE_TO_END(_from_label, _to_label) do { \
     move_entry *m = PyMem_RawMalloc(sizeof(move_entry)); \
@@ -86,7 +90,7 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define BITWISE_OR(v1, v2)  ir_or(jd->func, (v1), (v2))
 
 /* Logical AND with no short-circuiting */
-#define LOGICAL_AND_NSC(v1, v2) ir_and(jd->func, ir_bool(jd->func, (v1)), ir_bool(jd->func, (v2))
+#define LOGICAL_AND_NSC(v1, v2) ir_and(jd->func, ir_bool(jd->func, (v1)), ir_bool(jd->func, (v2)))
 
 /* Logical OR with no short-circuiting */
 #define LOGICAL_OR(v1, v2)  ir_or(jd->func, ir_bool(jd->func, (v1)), ir_bool(jd->func, (v2)))
@@ -253,6 +257,9 @@ static void _do_assert(int expr, const char *expr_str) {
 #define IR_PyType_Check(obj) \
     IR_PyType_FastSubclass(IR_Py_TYPE(obj), Py_TPFLAGS_TYPE_SUBCLASS)
 
+#define IR_PyLong_Check(obj) \
+    IR_PyType_FastSubclass(IR_Py_TYPE(obj), Py_TPFLAGS_LONG_SUBCLASS)
+
 #define IR_PyCoro_CheckExact(obj) \
     CMP_EQ(IR_Py_TYPE(obj), CONSTANT_PTR(ir_type_pytypeobject_ptr, &PyCoro_Type))
 
@@ -375,10 +382,12 @@ int do_raise(PyObject *, PyObject *);
     void _PyJIT_EMIT_TARGET_##op (JITData *jd, int next_instr_index, int opcode, int oparg) { \
         STORE_FIELD(jd->ctx, EvalContext, stack_pointer, ir_type_pyobject_ptr_ptr, STACKPTR()); \
         STORE_FIELD(jd->ctx, EvalContext, retval, ir_type_pyobject_ptr, jd->retval); \
+        STORE_FIELD(jd->ctx, EvalContext, why, ir_type_int, jd->why); \
         JTYPE instr_sig = CREATE_SIGNATURE(ir_type_int, ir_type_evalcontext_ptr, ir_type_pyframeobject_ptr, ir_type_int, ir_type_int, ir_type_int, ir_type_int); \
         JVALUE tmprv = CALL_NATIVE(instr_sig, opcode_function_table[opcode], jd->ctx, jd->f, CONSTANT_INT(next_instr_index), CONSTANT_INT(opcode), CONSTANT_INT(oparg), /*jumpev=*/ CONSTANT_INT(0)); \
         SET_VALUE(STACKPTR(), LOAD_FIELD(jd->ctx, EvalContext, stack_pointer, ir_type_pyobject_ptr_ptr)); \
         SET_VALUE(jd->retval, LOAD_FIELD(jd->ctx, EvalContext, retval, ir_type_pyobject_ptr)); \
+        SET_VALUE(jd->why, LOAD_FIELD(jd->ctx, EvalContext, why, ir_type_int)); \
         HANDLE_RV_INTERNAL(tmprv); \
     }
 
@@ -404,10 +413,12 @@ int do_raise(PyObject *, PyObject *);
     void _PyJIT_EMIT_SPECIAL_##op (JITData *jd) { \
         STORE_FIELD(jd->ctx, EvalContext, stack_pointer, ir_type_pyobject_ptr_ptr, STACKPTR()); \
         STORE_FIELD(jd->ctx, EvalContext, retval, ir_type_pyobject_ptr, jd->retval); \
+        STORE_FIELD(jd->ctx, EvalContext, why, ir_type_int, jd->why); \
         JTYPE sig = CREATE_SIGNATURE(ir_type_int, ir_type_evalcontext_ptr, ir_type_pyframeobject_ptr, ir_type_int, ir_type_int); \
         JVALUE tmprv = CALL_NATIVE(sig, _PyEval_FUNC_JIT_TARGET_II_##op, jd->ctx, jd->f, GET_CTX_NEXT_INSTR_INDEX(), /*jumpev=*/ CONSTANT_INT(0)); \
         SET_VALUE(STACKPTR(), LOAD_FIELD(jd->ctx, EvalContext, stack_pointer, ir_type_pyobject_ptr_ptr)); \
         SET_VALUE(jd->retval, LOAD_FIELD(jd->ctx, EvalContext, retval, ir_type_pyobject_ptr)); \
+        SET_VALUE(jd->why, LOAD_FIELD(jd->ctx, EvalContext, why, ir_type_int)); \
         HANDLE_RV_INTERNAL(tmprv); \
     }
 
@@ -445,7 +456,7 @@ int do_raise(PyObject *, PyObject *);
 #define INSTR_OFFSET()  (next_instr_index * sizeof(_Py_CODEUNIT))
 
 #define SET_WHY(n) \
-    STORE_FIELD(jd->ctx, EvalContext, why, ir_type_uint, CONSTANT_UINT(n))
+    SET_VALUE(jd->why, CONSTANT_INT(n))
 
 #define SET_RETVAL(val) \
     SET_VALUE(jd->retval, (val))
@@ -539,6 +550,7 @@ EMIT_SPECIAL_AS_SUBROUTINE(UNWIND_CLEANUP)
 
 EMITTER_FOR_SPECIAL(EXIT) {
     STORE_FIELD(jd->ctx, EvalContext, retval, ir_type_pyobject_ptr, jd->retval);
+    STORE_FIELD(jd->ctx, EvalContext, why, ir_type_int, jd->why);
     ir_ret(jd->func, NULL);
 }
 
@@ -1124,7 +1136,72 @@ EMITTER_FOR(POP_BLOCK) {
     CHECK_EVAL_BREAKER();
 }
 
-EMIT_AS_SUBROUTINE(END_FINALLY)
+EMITTER_FOR(END_FINALLY) {
+    IR_LABEL_INIT(try_case_2);
+    IR_LABEL_INIT(skip_retval);
+    IR_LABEL_INIT(skip_silenced);
+    IR_LABEL_INIT(try_case_3);
+    IR_LABEL_INIT(normal_exit);
+    IR_LABEL_INIT(dispatch);
+
+    JVALUE status = POP();
+    BRANCH_IF_NOT(IR_PyLong_Check(status), try_case_2, IR_SEMILIKELY);
+    /* Case 1: PyLong_Check(status) is true */
+    JTYPE sig1 = CREATE_SIGNATURE(ir_type_long, ir_type_pyobject_ptr);
+    SET_VALUE(jd->why, CAST(ir_type_int, CALL_NATIVE(sig1, PyLong_AsLong, status)));
+    IR_ASSERT(
+        LOGICAL_AND_NSC(
+            CMP_NE(jd->why, CONSTANT_INT(WHY_YIELD)),
+            CMP_NE(jd->why, CONSTANT_INT(WHY_EXCEPTION))));
+    JVALUE is_return = CMP_EQ(jd->why, CONSTANT_INT(WHY_RETURN));
+    JVALUE is_continue = CMP_EQ(jd->why, CONSTANT_INT(WHY_CONTINUE));
+    BRANCH_IF_NOT(LOGICAL_OR(is_return, is_continue), skip_retval, IR_SEMILIKELY);
+    SET_VALUE(jd->retval, POP());
+    LABEL(skip_retval);
+    BRANCH_IF_NOT(CMP_EQ(jd->why, CONSTANT_INT(WHY_SILENCED)), skip_silenced, IR_LIKELY);
+    /* An exception was silenced by 'with', we must
+    manually unwind the EXCEPT_HANDLER block which was
+    created when the exception was caught, otherwise
+    the stack will be in an inconsistent state. */
+    {
+        JTYPE sig2 = CREATE_SIGNATURE(ir_type_pytryblock_ptr, ir_type_pyframeobject_ptr);
+        JVALUE b = CALL_NATIVE(sig2, PyFrame_BlockPop, jd->f);
+        IR_ASSERT(CMP_EQ(LOAD_FIELD(b, PyTryBlock, b_type, ir_type_int), CONSTANT_INT(EXCEPT_HANDLER)));
+        UNWIND_EXCEPT_HANDLER(b);
+        SET_WHY(WHY_NOT);
+        DECREF(status);
+        BRANCH(dispatch);
+    }
+    LABEL(skip_silenced);
+    DECREF(status);
+    GOTO_FAST_BLOCK_END();
+
+    LABEL(try_case_2);
+    BRANCH_IF_NOT(IR_PyExceptionClass_Check(status), try_case_3, IR_SEMILIKELY);
+    {
+        JVALUE exc = POP();
+        JVALUE tb = POP();
+        JTYPE sig2 = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
+        CALL_NATIVE(sig2, PyErr_Restore, status, exc, tb);
+        SET_WHY(WHY_EXCEPTION);
+        GOTO_FAST_BLOCK_END();
+    }
+
+    LABEL(try_case_3);
+    BRANCH_IF(CMP_EQ(status, CONSTANT_PYOBJ(Py_None)), normal_exit, IR_LIKELY);
+    {
+        CALL_PyErr_SetString(PyExc_SystemError,
+                    "'finally' pops bad exception");
+        DECREF(status);
+        GOTO_ERROR();
+    }
+
+    LABEL(normal_exit);
+    DECREF(status);
+
+    LABEL(dispatch);
+    CHECK_EVAL_BREAKER();
+}
 
 static
 PyObject *
