@@ -2097,8 +2097,94 @@ EMITTER_FOR(BUILD_CONST_KEY_MAP) {
     END_REMOTE_SECTION(bad_keys_arg);
 }
 
-EMIT_AS_SUBROUTINE(BUILD_MAP_UNPACK)
-EMIT_AS_SUBROUTINE(BUILD_MAP_UNPACK_WITH_CALL)
+EMITTER_FOR(BUILD_MAP_UNPACK) {
+    IR_LABEL_INIT(handle_error);
+    JVALUE sum = CALL_NATIVE(jd->sig_o, PyDict_New);
+    GOTO_ERROR_IF_NOT(sum);
+    JVALUE arg = JVALUE_CREATE(ir_type_pyobject_ptr);
+    for (int i = oparg; i > 0; i--) {
+        SET_VALUE(arg, PEEK(i));
+        JVALUE err = CALL_NATIVE(jd->sig_ioo, PyDict_Update, sum, arg);
+        BRANCH_IF(CMP_LT(err, CONSTANT_INT(0)), handle_error, IR_UNLIKELY);
+    }
+
+    for (int i = oparg; i > 0; i--) {
+        DECREF(POP());
+    }
+    PUSH(sum);
+    CHECK_EVAL_BREAKER();
+
+    BEGIN_REMOTE_SECTION(handle_error);
+    IF(IR_PyErr_ExceptionMatches(PyExc_AttributeError), IR_SEMILIKELY, {
+        CALL_PyErr_Format(PyExc_TypeError,
+                          "'%.200s' object is not a mapping",
+                          LOAD_FIELD(IR_Py_TYPE(arg), PyTypeObject, tp_name, ir_type_char_ptr));
+    });
+    DECREF(sum);
+    GOTO_ERROR();
+    END_REMOTE_SECTION(handle_error);
+}
+
+extern void format_kwargs_mapping_error(PyObject *func, PyObject *kwargs);
+
+void _build_map_unpack_with_call_format_error(PyObject *func, PyObject *arg) {
+    if (PyErr_ExceptionMatches(PyExc_AttributeError)) {
+        format_kwargs_mapping_error(func, arg);
+    }
+    else if (PyErr_ExceptionMatches(PyExc_KeyError)) {
+        PyObject *exc, *val, *tb;
+        PyErr_Fetch(&exc, &val, &tb);
+        if (val && PyTuple_Check(val) && PyTuple_GET_SIZE(val) == 1) {
+            PyObject *key = PyTuple_GET_ITEM(val, 0);
+            if (!PyUnicode_Check(key)) {
+                PyErr_Format(PyExc_TypeError,
+                        "%.200s%.200s keywords must be strings",
+                        PyEval_GetFuncName(func),
+                        PyEval_GetFuncDesc(func));
+            } else {
+                PyErr_Format(PyExc_TypeError,
+                        "%.200s%.200s got multiple "
+                        "values for keyword argument '%U'",
+                        PyEval_GetFuncName(func),
+                        PyEval_GetFuncDesc(func),
+                        key);
+            }
+            Py_XDECREF(exc);
+            Py_XDECREF(val);
+            Py_XDECREF(tb);
+        }
+        else {
+            PyErr_Restore(exc, val, tb);
+        }
+    }
+}
+
+EMITTER_FOR(BUILD_MAP_UNPACK_WITH_CALL) {
+    IR_LABEL_INIT(handle_error);
+    JVALUE sum = CALL_NATIVE(jd->sig_o, PyDict_New);
+    GOTO_ERROR_IF_NOT(sum);
+
+    JTYPE sig = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_int);
+    JVALUE arg = JVALUE_CREATE(ir_type_pyobject_ptr);
+    for (int i = oparg; i > 0; i--) {
+        SET_VALUE(arg, PEEK(i));
+        JVALUE err = CALL_NATIVE(sig, _PyDict_MergeEx, sum, arg, CONSTANT_INT(2));
+        BRANCH_IF(CMP_LT(err, CONSTANT_INT(0)), handle_error, IR_UNLIKELY);
+    }
+    for (int i = oparg; i > 0; i--) {
+        DECREF(POP());
+    }
+    PUSH(sum);
+    CHECK_EVAL_BREAKER();
+
+    BEGIN_REMOTE_SECTION(handle_error);
+    JVALUE func = PEEK(2 + oparg);
+    JTYPE sig2 = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
+    CALL_NATIVE(sig2, _build_map_unpack_with_call_format_error, func, arg);
+    DECREF(sum);
+    GOTO_ERROR();
+    END_REMOTE_SECTION(handle_error);
+}
 
 EMITTER_FOR(MAP_ADD) {
     JVALUE key = POP();

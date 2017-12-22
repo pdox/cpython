@@ -77,6 +77,7 @@ typedef struct _JITData {
 
        The first letter indicates the return type.
     */
+    ir_type sig_o;
     ir_type sig_oo;
     ir_type sig_ooo;
     ir_type sig_oooo;
