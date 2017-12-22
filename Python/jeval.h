@@ -2189,9 +2189,69 @@ EMITTER_FOR(COMPARE_OP) {
     CHECK_EVAL_BREAKER();
 }
 
-EMIT_AS_SUBROUTINE(IMPORT_NAME)
-EMIT_AS_SUBROUTINE(IMPORT_STAR)
-EMIT_AS_SUBROUTINE(IMPORT_FROM)
+PyObject * import_name(PyFrameObject *, PyObject *, PyObject *,
+                       PyObject *);
+
+EMITTER_FOR(IMPORT_NAME) {
+    PyObject *name = GETNAME(oparg);
+    JVALUE fromlist = POP();
+    JVALUE level = POP();
+    JTYPE sig = CREATE_SIGNATURE(
+        ir_type_pyobject_ptr,
+        ir_type_pyframeobject_ptr,
+        ir_type_pyobject_ptr,
+        ir_type_pyobject_ptr,
+        ir_type_pyobject_ptr);
+    JVALUE res = CALL_NATIVE(sig, import_name, jd->f, CONSTANT_PYOBJ(name), fromlist, level);
+    DECREF(level);
+    DECREF(fromlist);
+    GOTO_ERROR_IF_NOT(res);
+    PUSH(res);
+    CHECK_EVAL_BREAKER();
+}
+
+int import_all_from(PyObject *, PyObject *);
+
+EMITTER_FOR(IMPORT_STAR) {
+    JVALUE from = POP();
+
+    JTYPE sig1 = CREATE_SIGNATURE(ir_type_int, ir_type_pyframeobject_ptr);
+    IF(
+        CMP_LT(
+            CALL_NATIVE(sig1, PyFrame_FastToLocalsWithError, jd->f),
+            CONSTANT_INT(0)),
+        IR_UNLIKELY,
+        {
+            DECREF(from);
+            GOTO_ERROR();
+         }
+    );
+
+    JVALUE locals = LOAD_F_LOCALS();
+    IF_NOT(locals, IR_UNLIKELY, {
+        CALL_PyErr_SetString(PyExc_SystemError,
+            "no locals found during 'import *'");
+        DECREF(from);
+        GOTO_ERROR();
+    });
+    JVALUE err = CALL_NATIVE(jd->sig_ioo, import_all_from, locals, from);
+    JTYPE sig2 = CREATE_SIGNATURE(ir_type_void, ir_type_pyframeobject_ptr, ir_type_int);
+    CALL_NATIVE(sig2, PyFrame_LocalsToFast, jd->f, CONSTANT_INT(0));
+    DECREF(from);
+    GOTO_ERROR_IF(err);
+    CHECK_EVAL_BREAKER();
+}
+
+PyObject * import_from(PyObject *, PyObject *);
+
+EMITTER_FOR(IMPORT_FROM) {
+    PyObject *name = GETNAME(oparg);
+    JVALUE from = TOP();
+    JVALUE res = CALL_NATIVE(jd->sig_ooo, import_from, from, CONSTANT_PYOBJ(name));
+    GOTO_ERROR_IF_NOT(res);
+    PUSH(res);
+    CHECK_EVAL_BREAKER();
+}
 
 EMITTER_FOR(JUMP_FORWARD) {
     JUMPBY(oparg, 0);
