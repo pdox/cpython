@@ -285,6 +285,9 @@ static void _do_assert(int expr, const char *expr_str) {
 #define IR_PyLong_Check(obj) \
     IR_PyType_FastSubclass(IR_Py_TYPE(obj), Py_TPFLAGS_LONG_SUBCLASS)
 
+#define IR_PyTuple_CheckExact(obj) \
+    CMP_EQ(IR_Py_TYPE(obj), CONSTANT_PTR(ir_type_pytypeobject_ptr, &PyTuple_Type))
+
 #define IR_PyCoro_CheckExact(obj) \
     CMP_EQ(IR_Py_TYPE(obj), CONSTANT_PTR(ir_type_pytypeobject_ptr, &PyCoro_Type))
 
@@ -2059,7 +2062,41 @@ EMITTER_FOR(SETUP_ANNOTATIONS) {
     CHECK_EVAL_BREAKER();
 }
 
-EMIT_AS_SUBROUTINE(BUILD_CONST_KEY_MAP)
+EMITTER_FOR(BUILD_CONST_KEY_MAP) {
+    IR_LABEL_INIT(bad_keys_arg);
+    IR_LABEL_INIT(handle_setitem_error);
+    JVALUE keys = TOP();
+    BRANCH_IF_NOT(IR_PyTuple_CheckExact(keys), bad_keys_arg, IR_UNLIKELY);
+    BRANCH_IF_NOT(CMP_EQ(IR_PyTuple_GET_SIZE(keys), CONSTANT_PYSSIZET(oparg)), bad_keys_arg, IR_UNLIKELY);
+    JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyssizet);
+    JVALUE map = CALL_NATIVE(sig, _PyDict_NewPresized, CONSTANT_PYSSIZET(oparg));
+    GOTO_ERROR_IF_NOT(map);
+    JVALUE ob_item = IR_PyTuple_OB_ITEM(keys);
+    for (int i = oparg; i > 0; i--) {
+        JVALUE key = LOAD_AT_INDEX(ob_item, CONSTANT_INT(oparg - i));
+        JVALUE value = PEEK(i + 1);
+        JVALUE err = CALL_NATIVE(jd->sig_iooo, PyDict_SetItem, map, key, value);
+        BRANCH_IF(err, handle_setitem_error, IR_UNLIKELY);
+    }
+    DECREF(POP());
+    for (int i = oparg; i > 0; i--) {
+        DECREF(POP());
+    }
+    PUSH(map);
+    CHECK_EVAL_BREAKER();
+
+    BEGIN_REMOTE_SECTION(handle_setitem_error);
+    DECREF(map);
+    GOTO_ERROR();
+    END_REMOTE_SECTION(handle_setitem_error);
+
+    BEGIN_REMOTE_SECTION(bad_keys_arg);
+    CALL_PyErr_SetString(PyExc_SystemError,
+                         "bad BUILD_CONST_KEY_MAP keys argument");
+    GOTO_ERROR();
+    END_REMOTE_SECTION(bad_keys_arg);
+}
+
 EMIT_AS_SUBROUTINE(BUILD_MAP_UNPACK)
 EMIT_AS_SUBROUTINE(BUILD_MAP_UNPACK_WITH_CALL)
 
