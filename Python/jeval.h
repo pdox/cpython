@@ -157,6 +157,20 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define CRASH() \
     STORE(CONSTANT_PTR(ir_type_int_ptr, 0), CONSTANT_INT(0))
 
+#ifdef Py_DEBUG
+static void _do_assert(int expr, const char *expr_str) {
+    if (!expr) {
+        Py_FatalError(expr_str);
+    }
+}
+#  define IR_ASSERT(expr) do { \
+    JTYPE _sig = CREATE_SIGNATURE(ir_type_void, ir_type_int, ir_type_char_ptr); \
+    CALL_NATIVE(_sig, _do_assert, BOOL(expr), CONSTANT_CHAR_PTR(#expr)); \
+} while (0)
+#else
+#  define IR_ASSERT(expr)
+#endif
+
 /* High-level Python macros */
 
 #define INCREF(_objval)    ir_incref(jd->func, (_objval), 0)
@@ -462,6 +476,49 @@ enum why_code {
         WHY_YIELD =     0x0040, /* 'yield' operator */
         WHY_SILENCED =  0x0080  /* Exception silenced by 'with' */
 };
+
+#define UNWIND_TO(level) do { \
+    JLABEL loop_entry = JLABEL_INIT("loop_entry"); \
+    JLABEL loop_done = JLABEL_INIT("loop_done"); \
+    JVALUE _level = (level); \
+    IR_ASSERT(CMP_GE(STACK_LEVEL(), _level)); \
+    LABEL(loop_entry); \
+    BRANCH_IF(CMP_LE(STACK_LEVEL(), _level), loop_done, IR_SOMETIMES); \
+    XDECREF(POP()); \
+    BRANCH(loop_entry); \
+    LABEL(loop_done); \
+} while (0)
+
+#define UNWIND_BLOCK(b) do { \
+    JVALUE level = LOAD_FIELD((b), PyTryBlock, b_level, ir_type_int); \
+    UNWIND_TO(level); \
+} while (0)
+
+static void _unwind_except_helper(PyObject *s_type, PyObject *s_value, PyObject *s_traceback) {
+    PyObject *type, *value, *traceback;
+    _PyErr_StackItem *exc_info;
+
+    exc_info = PyThreadState_GET()->exc_info;
+    type = exc_info->exc_type;
+    value = exc_info->exc_value;
+    traceback = exc_info->exc_traceback;
+    exc_info->exc_type = s_type;
+    exc_info->exc_value = s_value;
+    exc_info->exc_traceback = s_traceback;
+    Py_XDECREF(type);
+    Py_XDECREF(value);
+    Py_XDECREF(traceback);
+}
+
+#define UNWIND_EXCEPT_HANDLER(b) do { \
+    JVALUE level = LOAD_FIELD((b), PyTryBlock, b_level, ir_type_int); \
+    UNWIND_TO(ADD(level, CONSTANT_INT(3))); \
+    JVALUE s_type = POP(); \
+    JVALUE s_value = POP(); \
+    JVALUE s_traceback = POP(); \
+    JTYPE _sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr); \
+    CALL_NATIVE(_sig, _unwind_except_helper, s_type, s_value, s_traceback); \
+} while (0)
 
 EMITTER_FOR_SPECIAL(FLOW) {
     // Index 0 is special, it dispatches to the other handlers based on 'rv'
@@ -1027,18 +1084,38 @@ EMITTER_FOR(YIELD_FROM) {
     CHECK_EVAL_BREAKER();
 }
 
-EMIT_AS_SUBROUTINE(YIELD_VALUE)
-EMIT_AS_SUBROUTINE(POP_EXCEPT)
+EMITTER_FOR(YIELD_VALUE) {
+    SET_RETVAL(POP());
+    if (jd->co->co_flags & CO_ASYNC_GENERATOR) {
+        JVALUE wrapped = CALL_NATIVE(jd->sig_oo, _PyAsyncGenValueWrapperNew, jd->retval);
+        DECREF(jd->retval);
+        SET_VALUE(jd->retval, wrapped);
+        GOTO_ERROR_IF_NOT(wrapped);
+    }
+    STORE_FIELD(jd->f, PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr, STACKPTR());
+    SET_WHY(WHY_YIELD);
+    GOTO_FAST_YIELD();
+}
 
-#define UNWIND_BLOCK(b) do { \
-    JLABEL loop_entry = JLABEL_INIT("loop_entry"); \
-    JLABEL loop_done = JLABEL_INIT("loop_done"); \
-    LABEL(loop_entry); \
-    BRANCH_IF_NOT(CMP_GT(STACK_LEVEL(), LOAD_FIELD((b), PyTryBlock, b_level, ir_type_int)), loop_done, IR_SOMETIMES); \
-    XDECREF(POP()); \
-    BRANCH(loop_entry); \
-    LABEL(loop_done); \
-} while (0)
+EMITTER_FOR(POP_EXCEPT) {
+    JLABEL handle_error = JLABEL_INIT("handle_error");
+    JTYPE sig = CREATE_SIGNATURE(ir_type_pytryblock_ptr, ir_type_pyframeobject_ptr);
+    JVALUE b = CALL_NATIVE(sig, PyFrame_BlockPop, jd->f);
+    BRANCH_IF(
+        CMP_NE(
+            LOAD_FIELD(b, PyTryBlock, b_type, ir_type_int),
+            CONSTANT_INT(EXCEPT_HANDLER)),
+        handle_error,
+        IR_UNLIKELY);
+    UNWIND_EXCEPT_HANDLER(b);
+    CHECK_EVAL_BREAKER();
+
+    BEGIN_REMOTE_SECTION(handle_error);
+    CALL_PyErr_SetString(PyExc_SystemError,
+                         "popped block is not an except handler");
+    GOTO_ERROR();
+    END_REMOTE_SECTION(handle_error);
+}
 
 EMITTER_FOR(POP_BLOCK) {
     JTYPE sig = CREATE_SIGNATURE(ir_type_pytryblock_ptr, ir_type_pyframeobject_ptr);
