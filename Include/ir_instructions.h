@@ -598,12 +598,17 @@ void ir_branch_cond(ir_func func, ir_value cond, ir_label if_true, ir_label if_f
 #define IR_LIKELY           2000
 
 static inline
+int ir_invert_likelyhood(int likelyhood) {
+    return 2001 - likelyhood;
+}
+
+static inline
 void ir_branch_if(ir_func func, ir_value cond, ir_label if_true, int likelyhood) {
     char namebuf[32];
     assert(likelyhood > 0 && likelyhood <= 2000);
     sprintf(namebuf, "cond.if_false.%d", ++(func->num_cond_if_false_labels));
     ir_label next_block = ir_label_new(func, namebuf);
-    ir_branch_cond(func, cond, if_true, next_block, likelyhood, 2001 - likelyhood);
+    ir_branch_cond(func, cond, if_true, next_block, likelyhood, ir_invert_likelyhood(likelyhood));
     ir_label_here(func, next_block);
 }
 
@@ -613,7 +618,7 @@ void ir_branch_if_not(ir_func func, ir_value cond, ir_label if_not, int likelyho
     assert(likelyhood > 0 && likelyhood <= 2000);
     sprintf(namebuf, "cond.if_true.%d", ++(func->num_cond_if_true_labels));
     ir_label next_block = ir_label_new(func, namebuf);
-    ir_branch_cond(func, cond, next_block, if_not, 2001 - likelyhood, likelyhood);
+    ir_branch_cond(func, cond, next_block, if_not, ir_invert_likelyhood(likelyhood), likelyhood);
     ir_label_here(func, next_block);
 }
 

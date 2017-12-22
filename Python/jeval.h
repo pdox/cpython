@@ -49,6 +49,31 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define BRANCH_IF_NOT(val, label, likelyhood)    ir_branch_if_not(jd->func, (val), (label), likelyhood)
 #define BRANCH_IF(val, label, likelyhood)        ir_branch_if(jd->func, (val), (label), likelyhood)
 
+#define IF_ELSE(_cond, _likelyhood, _iftrue, _ifnot) do { \
+    ir_label iftrue_label = ir_label_new(jd->func, "iftrue:" #_cond); \
+    ir_label after_label = ir_label_new(jd->func, "after:" #_cond); \
+    BRANCH_IF((_cond), iftrue_label, (_likelyhood)); \
+    { _ifnot }; \
+    BRANCH(after_label); \
+    LABEL(iftrue_label); \
+    { _iftrue }; \
+    LABEL(after_label); \
+} while (0)
+
+#define IF(_cond, _likelyhood, _todo) do { \
+    ir_label after_label = ir_label_new(jd->func, "after_if:" #_cond); \
+    BRANCH_IF_NOT((_cond), after_label, ir_invert_likelyhood(_likelyhood)); \
+    { _todo }; \
+    LABEL(after_label); \
+} while (0)
+
+#define IF_NOT(_cond, _likelyhood, _todo) do { \
+    ir_label after_label = ir_label_new(jd->func, "after_if_not:" #_cond); \
+    BRANCH_IF((_cond), after_label, ir_invert_likelyhood(_likelyhood)); \
+    { _todo }; \
+    LABEL(after_label); \
+} while (0)
+
 #define BRANCH_SPECIAL(name)     BRANCH(jd->j_special[JIT_RC_ ## name])
 
 /* TODO: Deprecate these */
@@ -178,7 +203,7 @@ static void _do_assert(int expr, const char *expr_str) {
 /* High-level Python macros */
 
 #define INCREF(_objval)    ir_incref(jd->func, (_objval), 0)
-#define XINCREF(_objval)   ir_incref(jd->func, (_objval), 0)
+#define XINCREF(_objval)   ir_incref(jd->func, (_objval), 1)
 
 #define DECREF(_objval)    ir_decref(jd->func, (_objval), 0)
 #define XDECREF(_objval)   ir_decref(jd->func, (_objval), 1)
@@ -314,6 +339,11 @@ static void _do_assert(int expr, const char *expr_str) {
     JTYPE _sig = CREATE_SIGNATURE(ir_type_pyobject_ptr); \
     CALL_NATIVE(_sig, PyErr_NoMemory); \
 })
+
+#define CALL_PyErr_Clear() do { \
+    JTYPE _sig = CREATE_SIGNATURE(ir_type_void); \
+    CALL_NATIVE(_sig, PyErr_Clear); \
+} while (0)
 
 #define CALL_PyErr_Format(exc, format, ...) do { \
     ir_value _values[] = { CONSTANT_PYOBJ(exc), CONSTANT_CHAR_PTR(format), __VA_ARGS__ }; \
@@ -461,7 +491,7 @@ int do_raise(PyObject *, PyObject *);
 #define SET_RETVAL(val) \
     SET_VALUE(jd->retval, (val))
 
-#define F_LOCALS() \
+#define LOAD_F_LOCALS() \
     LOAD_FIELD(jd->f, PyFrameObject, f_locals, ir_type_pyobject_ptr)
 
 #define HANDLERS_FOR(op) \
@@ -1246,7 +1276,7 @@ EMITTER_FOR(STORE_NAME) {
     JLABEL object_case = JLABEL_INIT("object_case");
     PyObject *name = GETNAME(oparg);
     JVALUE v = POP();
-    JVALUE ns = F_LOCALS();
+    JVALUE ns = LOAD_F_LOCALS();
     BRANCH_IF_NOT(ns, no_locals_found, IR_UNLIKELY);
     BRANCH_IF_NOT(IR_PyDict_CheckExact(ns), object_case, IR_UNLIKELY);
     JVALUE err = JVALUE_CREATE(ir_type_int);
@@ -1275,7 +1305,7 @@ EMITTER_FOR(DELETE_NAME) {
     JLABEL fast_dispatch = JLABEL_INIT("fast_dispatch");
     PyObject *name = GETNAME(oparg);
     assert(name);
-    JVALUE ns = F_LOCALS();
+    JVALUE ns = LOAD_F_LOCALS();
     BRANCH_IF_NOT(ns, no_locals, IR_UNLIKELY);
     JVALUE err = CALL_NATIVE(jd->sig_ioo, PyObject_DelItem, ns, CONSTANT_PYOBJ(name));
     BRANCH_IF(err, handle_err, IR_UNLIKELY);
@@ -1552,7 +1582,57 @@ EMITTER_FOR(LOAD_NAME) {
     CHECK_EVAL_BREAKER();
 }
 
-EMIT_AS_SUBROUTINE(LOAD_GLOBAL)
+static PyObject* _load_global_helper(PyFrameObject *f, PyObject *name) {
+    PyObject *v;
+    if (PyDict_CheckExact(f->f_globals)
+        && PyDict_CheckExact(f->f_builtins))
+    {
+        v = _PyDict_LoadGlobal((PyDictObject *)f->f_globals,
+                               (PyDictObject *)f->f_builtins,
+                               name);
+        if (v == NULL) {
+            if (!_PyErr_OCCURRED()) {
+                /* _PyDict_LoadGlobal() returns NULL without raising
+                 * an exception if the key doesn't exist */
+                format_exc_check_arg(PyExc_NameError,
+                                     NAME_ERROR_MSG, name);
+            }
+            return NULL;
+        }
+        Py_INCREF(v);
+    }
+    else {
+        /* Slow-path if globals or builtins is not a dict */
+
+        /* namespace 1: globals */
+        v = PyObject_GetItem(f->f_globals, name);
+        if (v == NULL) {
+            if (!PyErr_ExceptionMatches(PyExc_KeyError))
+                return NULL;
+            PyErr_Clear();
+
+            /* namespace 2: builtins */
+            v = PyObject_GetItem(f->f_builtins, name);
+            if (v == NULL) {
+                if (PyErr_ExceptionMatches(PyExc_KeyError))
+                    format_exc_check_arg(
+                                PyExc_NameError,
+                                NAME_ERROR_MSG, name);
+                return NULL;
+            }
+        }
+    }
+    return v;
+}
+
+EMITTER_FOR(LOAD_GLOBAL) {
+    PyObject *name = GETNAME(oparg);
+    JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyframeobject_ptr, ir_type_pyobject_ptr);
+    JVALUE v = CALL_NATIVE(sig, _load_global_helper, jd->f, CONSTANT_PYOBJ(name));
+    GOTO_ERROR_IF_NOT(v);
+    PUSH(v);
+    CHECK_EVAL_BREAKER();
+}
 
 EMITTER_FOR(DELETE_FAST) {
     JLABEL no_error = JLABEL_INIT("no_error");
@@ -1588,8 +1668,52 @@ EMITTER_FOR(DELETE_DEREF) {
     LABEL(fast_dispatch);
 }
 
-EMIT_AS_SUBROUTINE(LOAD_CLOSURE)
-EMIT_AS_SUBROUTINE(LOAD_CLASSDEREF)
+EMITTER_FOR(LOAD_CLOSURE) {
+    JVALUE cell = LOAD_FREEVAR(oparg);
+    INCREF(cell);
+    PUSH(cell);
+    CHECK_EVAL_BREAKER();
+}
+
+EMITTER_FOR(LOAD_CLASSDEREF) {
+    assert(oparg >= PyTuple_GET_SIZE(jd->co->co_cellvars));
+    Py_ssize_t idx = oparg - PyTuple_GET_SIZE(jd->co->co_cellvars);
+    assert(idx >= 0 && idx < PyTuple_GET_SIZE(jd->co->co_freevars));
+    PyObject *name = PyTuple_GET_ITEM(jd->co->co_freevars, idx);
+
+    JVALUE value = JVALUE_CREATE(ir_type_pyobject_ptr);
+    JVALUE locals = LOAD_F_LOCALS();
+    IR_ASSERT(locals);
+
+    IF_ELSE(
+        IR_PyDict_CheckExact(locals), IR_LIKELY,
+        {
+            SET_VALUE(value, CALL_NATIVE(jd->sig_ooo, PyDict_GetItem, locals, CONSTANT_PYOBJ(name)));
+            XINCREF(value);
+        },
+        {
+            SET_VALUE(value, CALL_NATIVE(jd->sig_ooo, PyObject_GetItem, locals, CONSTANT_PYOBJ(name)));
+            IF_NOT(
+                value, IR_SEMILIKELY,
+                {
+                    GOTO_ERROR_IF_NOT(IR_PyErr_ExceptionMatches(PyExc_KeyError));
+                    CALL_PyErr_Clear();
+                });
+        });
+    IF_NOT(value, IR_SEMILIKELY,
+    {
+        JVALUE cell = LOAD_FREEVAR(oparg);
+        SET_VALUE(value, IR_PyCell_GET(cell));
+        IF_NOT(value, IR_UNLIKELY,
+        {
+            CALL_format_exc_unbound(oparg);
+            GOTO_ERROR();
+        });
+        INCREF(value);
+    });
+    PUSH(value);
+    CHECK_EVAL_BREAKER();
+}
 
 EMITTER_FOR(LOAD_DEREF) {
     JLABEL fast_dispatch = JLABEL_INIT("fast_dispatch");
@@ -2241,8 +2365,7 @@ EMITTER_FOR(FOR_ITER) {
     BRANCH_IF_NOT(PYERR_OCCURRED(), cleanup, IR_LIKELY);
     JVALUE ret = CALL_NATIVE(jd->sig_io, PyErr_ExceptionMatches, CONSTANT_PYOBJ(PyExc_StopIteration));
     GOTO_ERROR_IF_NOT(ret); /* This may actually be likely? */
-    JTYPE sig3 = CREATE_SIGNATURE(ir_type_void);
-    CALL_NATIVE(sig3, PyErr_Clear);
+    CALL_PyErr_Clear();
 
     LABEL(cleanup);
     STACKADJ(-1);
