@@ -64,6 +64,9 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     jd->f = ir_func_get_argument(jd->func, 1);
     jd->stack_pointer = ir_func_get_argument(jd->func, 2);
     jd->fastlocals = ir_get_element_ptr(jd->func, jd->f, offsetof(PyFrameObject, f_localsplus), ir_type_pyobject_ptr, "f_localsplus");
+    jd->retval = ir_value_new(jd->func, ir_type_pyobject_ptr);
+    ir_set_value(jd->func, jd->retval, LOAD_FIELD(jd->ctx, EvalContext, retval, ir_type_pyobject_ptr));
+
     jd->move_entry_list = NULL;
 
     for (i = 0; i < 256; i++) {

@@ -58,6 +58,8 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define GOTO_ERROR_IF(val)       BRANCH_SPECIAL_IF((val), ERROR)
 #define GOTO_ERROR_IF_NOT(val)   BRANCH_SPECIAL_IF_NOT((val), ERROR)
 
+#define GOTO_FAST_YIELD()        BRANCH_SPECIAL(FAST_YIELD)
+
 #define MOVE_TO_END(_from_label, _to_label) do { \
     move_entry *m = PyMem_RawMalloc(sizeof(move_entry)); \
     assert(m); \
@@ -87,7 +89,7 @@ DECLARE_SPECIAL(NEXT_OPCODE);
 #define LOGICAL_AND_NSC(v1, v2) ir_and(jd->func, ir_bool(jd->func, (v1)), ir_bool(jd->func, (v2))
 
 /* Logical OR with no short-circuiting */
-#define LOGICAL_OR(v1, v2)  ir_or(jd->func, ir_bool(jd->func, (v1)), ir_bool(jd->func, (v2))
+#define LOGICAL_OR(v1, v2)  ir_or(jd->func, ir_bool(jd->func, (v1)), ir_bool(jd->func, (v2)))
 
 /* Logical AND with short-circuiting */
 #define LOGICAL_AND_SC(v1, v2) ({ \
@@ -358,9 +360,11 @@ int do_raise(PyObject *, PyObject *);
 #define EMIT_AS_SUBROUTINE(op) \
     void _PyJIT_EMIT_TARGET_##op (JITData *jd, int next_instr_index, int opcode, int oparg) { \
         STORE_FIELD(jd->ctx, EvalContext, stack_pointer, ir_type_pyobject_ptr_ptr, STACKPTR()); \
+        STORE_FIELD(jd->ctx, EvalContext, retval, ir_type_pyobject_ptr, jd->retval); \
         JTYPE instr_sig = CREATE_SIGNATURE(ir_type_int, ir_type_evalcontext_ptr, ir_type_pyframeobject_ptr, ir_type_int, ir_type_int, ir_type_int, ir_type_int); \
         JVALUE tmprv = CALL_NATIVE(instr_sig, opcode_function_table[opcode], jd->ctx, jd->f, CONSTANT_INT(next_instr_index), CONSTANT_INT(opcode), CONSTANT_INT(oparg), /*jumpev=*/ CONSTANT_INT(0)); \
         SET_VALUE(STACKPTR(), LOAD_FIELD(jd->ctx, EvalContext, stack_pointer, ir_type_pyobject_ptr_ptr)); \
+        SET_VALUE(jd->retval, LOAD_FIELD(jd->ctx, EvalContext, retval, ir_type_pyobject_ptr)); \
         HANDLE_RV_INTERNAL(tmprv); \
     }
 
@@ -385,9 +389,11 @@ int do_raise(PyObject *, PyObject *);
 #define EMIT_SPECIAL_AS_SUBROUTINE(op) \
     void _PyJIT_EMIT_SPECIAL_##op (JITData *jd) { \
         STORE_FIELD(jd->ctx, EvalContext, stack_pointer, ir_type_pyobject_ptr_ptr, STACKPTR()); \
+        STORE_FIELD(jd->ctx, EvalContext, retval, ir_type_pyobject_ptr, jd->retval); \
         JTYPE sig = CREATE_SIGNATURE(ir_type_int, ir_type_evalcontext_ptr, ir_type_pyframeobject_ptr, ir_type_int, ir_type_int); \
         JVALUE tmprv = CALL_NATIVE(sig, _PyEval_FUNC_JIT_TARGET_II_##op, jd->ctx, jd->f, GET_CTX_NEXT_INSTR_INDEX(), /*jumpev=*/ CONSTANT_INT(0)); \
         SET_VALUE(STACKPTR(), LOAD_FIELD(jd->ctx, EvalContext, stack_pointer, ir_type_pyobject_ptr_ptr)); \
+        SET_VALUE(jd->retval, LOAD_FIELD(jd->ctx, EvalContext, retval, ir_type_pyobject_ptr)); \
         HANDLE_RV_INTERNAL(tmprv); \
     }
 
@@ -428,7 +434,7 @@ int do_raise(PyObject *, PyObject *);
     STORE_FIELD(jd->ctx, EvalContext, why, ir_type_uint, CONSTANT_UINT(n))
 
 #define SET_RETVAL(val) \
-    STORE_FIELD(jd->ctx, EvalContext, retval, ir_type_pyobject_ptr, (val))
+    SET_VALUE(jd->retval, (val))
 
 #define F_LOCALS() \
     LOAD_FIELD(jd->f, PyFrameObject, f_locals, ir_type_pyobject_ptr)
@@ -475,6 +481,7 @@ EMIT_SPECIAL_AS_SUBROUTINE(FAST_YIELD)
 EMIT_SPECIAL_AS_SUBROUTINE(UNWIND_CLEANUP)
 
 EMITTER_FOR_SPECIAL(EXIT) {
+    STORE_FIELD(jd->ctx, EvalContext, retval, ir_type_pyobject_ptr, jd->retval);
     ir_ret(jd->func, NULL);
 }
 
@@ -965,7 +972,61 @@ EMITTER_FOR(GET_AWAITABLE) {
     CHECK_EVAL_BREAKER();
 }
 
-EMIT_AS_SUBROUTINE(YIELD_FROM)
+EMITTER_FOR(YIELD_FROM) {
+    _Py_IDENTIFIER(send);
+    JLABEL fast_send = JLABEL_INIT("fast_send");
+    JLABEL v_is_none = JLABEL_INIT("v_is_none");
+    JLABEL after_getting_retval = JLABEL_INIT("after_getting_retval");
+    JLABEL handle_null_retval = JLABEL_INIT("handle_null_retval");
+    JVALUE v = POP();
+    JVALUE receiver = TOP();
+
+    BRANCH_IF(
+        LOGICAL_OR(IR_PyGen_CheckExact(receiver), IR_PyCoro_CheckExact(receiver)),
+        fast_send,
+        IR_LIKELY);
+
+    /* Handle generic case */
+    BRANCH_IF(CMP_EQ(v, CONSTANT_PYOBJ(Py_None)), v_is_none, IR_SEMILIKELY);
+    /* v is not None */
+    JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_void_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
+    SET_VALUE(jd->retval,
+        CALL_NATIVE(sig, _PyObject_CallMethodIdObjArgs,
+            receiver, CONSTANT_PTR(ir_type_void_ptr, &PyId_send), v, CONSTANT_PYOBJ(NULL)));
+    BRANCH(after_getting_retval);
+    LABEL(v_is_none);
+    JVALUE receiver_type = IR_Py_TYPE(receiver);
+    JVALUE tp_iternext = LOAD_FIELD(receiver_type, PyTypeObject, tp_iternext, jd->sig_oo);
+    SET_VALUE(jd->retval, CALL_INDIRECT(tp_iternext, receiver));
+    BRANCH(after_getting_retval);
+
+    LABEL(fast_send);
+    SET_VALUE(jd->retval, CALL_NATIVE(jd->sig_ooo, _PyGen_Send, receiver, v));
+    BRANCH(after_getting_retval);
+
+    LABEL(after_getting_retval);
+    DECREF(v);
+    BRANCH_IF_NOT(jd->retval, handle_null_retval, IR_SOMETIMES);
+
+    /* Receiver remains on the stack, retval is value to be yielded */
+    STORE_FIELD(jd->f, PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr, STACKPTR());
+    SET_WHY(WHY_YIELD);
+    assert(next_instr_index >= 2);
+    STORE_FIELD(jd->f, PyFrameObject, f_lasti, ir_type_int, CONSTANT_INT(2*(next_instr_index - 2)));
+    GOTO_FAST_YIELD();
+
+    /* Exiting from 'yield from' */
+    LABEL(handle_null_retval);
+    JVALUE val = JVALUE_CREATE(ir_type_pyobject_ptr);
+    SET_VALUE(val, CONSTANT_PYOBJ(NULL));
+    JTYPE sig2 = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr_ptr);
+    JVALUE err = CALL_NATIVE(sig2, _PyGen_FetchStopIterationValue, ADDRESS_OF(val));
+    GOTO_ERROR_IF(CMP_LT(err, CONSTANT_INT(0)));
+    DECREF(receiver);
+    SET_TOP(val);
+    CHECK_EVAL_BREAKER();
+}
+
 EMIT_AS_SUBROUTINE(YIELD_VALUE)
 EMIT_AS_SUBROUTINE(POP_EXCEPT)
 

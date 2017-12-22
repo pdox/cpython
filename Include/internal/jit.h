@@ -64,6 +64,7 @@ typedef struct _JITData {
     ir_value f;
     ir_value stack_pointer;
     ir_value fastlocals;
+    ir_value retval; /* corresponding to ctx->retval */
 
     /* Some common function signature types:
 
