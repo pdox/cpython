@@ -378,6 +378,11 @@ extern void format_exc_unbound(PyCodeObject *co, int oparg);
     CALL_NATIVE(_sig, format_exc_unbound, CONSTANT_PTR(ir_type_void_ptr, jd->co), CONSTANT_INT(arg)); \
 } while (0)
 
+#define CALL_PyObject_CallNoArg(func) ({ \
+    JTYPE _sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr_ptr, ir_type_pyssizet, ir_type_pyobject_ptr); \
+    CALL_NATIVE(_sig, _PyObject_FastCallDict, (func), CONSTANT_PTR(ir_type_pyobject_ptr_ptr, NULL), CONSTANT_PYSSIZET(0), CONSTANT_PYOBJ(NULL)); \
+})
+
 #define INIT_INFO(op) \
     op##_INFO *info = (op##_INFO *) jd->priv[opcode]; \
     int did_alloc_info = 0; \
@@ -2605,9 +2610,64 @@ EMITTER_FOR(SETUP_FINALLY) {
     CHECK_EVAL_BREAKER();
 }
 
-EMIT_AS_SUBROUTINE(BEFORE_ASYNC_WITH)
-EMIT_AS_SUBROUTINE(SETUP_ASYNC_WITH)
-EMIT_AS_SUBROUTINE(SETUP_WITH)
+PyObject * special_lookup(PyObject *, _Py_Identifier *);
+
+EMITTER_FOR(BEFORE_ASYNC_WITH) {
+    _Py_IDENTIFIER(__aexit__);
+    _Py_IDENTIFIER(__aenter__);
+
+    JVALUE mgr = TOP();
+    JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_void_ptr);
+    JVALUE exit = CALL_NATIVE(sig, special_lookup, mgr, CONSTANT_VOID_PTR(&PyId___aexit__));
+    GOTO_ERROR_IF_NOT(exit);
+    SET_TOP(exit);
+    JVALUE enter = CALL_NATIVE(sig, special_lookup, mgr, CONSTANT_VOID_PTR(&PyId___aenter__));
+    DECREF(mgr);
+    GOTO_ERROR_IF_NOT(enter);
+    JVALUE res = CALL_PyObject_CallNoArg(enter);
+    DECREF(enter);
+    GOTO_ERROR_IF_NOT(res);
+    PUSH(res);
+    CHECK_EVAL_BREAKER();
+}
+
+EMITTER_FOR(SETUP_ASYNC_WITH) {
+    JVALUE res = POP();
+    JTYPE sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyframeobject_ptr, ir_type_int, ir_type_int, ir_type_int);
+    CALL_NATIVE(sig, PyFrame_BlockSetup,
+        FRAMEPTR(), CONSTANT_INT(SETUP_FINALLY), CONSTANT_INT(INSTR_OFFSET() + oparg), STACK_LEVEL());
+    PUSH(res);
+    CHECK_EVAL_BREAKER();
+}
+
+EMITTER_FOR(SETUP_WITH) {
+    _Py_IDENTIFIER(__exit__);
+    _Py_IDENTIFIER(__enter__);
+
+    JVALUE mgr = TOP();
+    JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_void_ptr);
+    JVALUE enter = CALL_NATIVE(sig, special_lookup, mgr, CONSTANT_VOID_PTR(&PyId___enter__));
+    GOTO_ERROR_IF_NOT(enter);
+    JVALUE exit = CALL_NATIVE(sig, special_lookup, mgr, CONSTANT_VOID_PTR(&PyId___exit__));
+    IF_NOT(exit, IR_UNLIKELY, {
+        DECREF(enter);
+        GOTO_ERROR();
+    });
+    SET_TOP(exit);
+    DECREF(mgr);
+    JVALUE res = CALL_PyObject_CallNoArg(enter);
+    DECREF(enter);
+    GOTO_ERROR_IF_NOT(res);
+
+    /* Setup the finally block before pushing the result
+       of __enter__ on the stack. */
+    JTYPE sig2 = CREATE_SIGNATURE(ir_type_void, ir_type_pyframeobject_ptr, ir_type_int, ir_type_int, ir_type_int);
+    CALL_NATIVE(sig2, PyFrame_BlockSetup,
+        FRAMEPTR(), CONSTANT_INT(SETUP_FINALLY), CONSTANT_INT(INSTR_OFFSET() + oparg), STACK_LEVEL());
+    PUSH(res);
+    CHECK_EVAL_BREAKER();
+}
+
 EMIT_AS_SUBROUTINE(WITH_CLEANUP_START)
 EMIT_AS_SUBROUTINE(WITH_CLEANUP_FINISH)
 
