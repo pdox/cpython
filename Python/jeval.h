@@ -2451,7 +2451,39 @@ EMIT_AS_SUBROUTINE(CALL_FUNCTION)
 EMIT_AS_SUBROUTINE(CALL_FUNCTION_KW)
 EMIT_AS_SUBROUTINE(CALL_FUNCTION_EX)
 
-EMIT_AS_SUBROUTINE(MAKE_FUNCTION)
+EMITTER_FOR(MAKE_FUNCTION) {
+    JVALUE qualname = POP();
+    JVALUE codeobj = POP();
+    JVALUE globals = LOAD_FIELD(jd->f, PyFrameObject, f_globals, ir_type_pyobject_ptr);
+    JTYPE sig = CREATE_SIGNATURE(ir_type_pyfunctionobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
+    JVALUE func = CALL_NATIVE(sig, PyFunction_NewWithQualName, codeobj, globals, qualname);
+    DECREF(codeobj);
+    DECREF(qualname);
+    GOTO_ERROR_IF_NOT(func);
+
+    if (oparg & 0x08) {
+        JVALUE closure = POP();
+        IR_ASSERT(IR_PyTuple_CheckExact(closure));
+        STORE_FIELD(func, PyFunctionObject, func_closure, ir_type_pyobject_ptr, closure);
+    }
+    if (oparg & 0x04) {
+        JVALUE annotations = POP();
+        IR_ASSERT(IR_PyDict_CheckExact(annotations));
+        STORE_FIELD(func, PyFunctionObject, func_annotations, ir_type_pyobject_ptr, annotations);
+    }
+    if (oparg & 0x02) {
+        JVALUE kwdefaults = POP();
+        IR_ASSERT(IR_PyDict_CheckExact(kwdefaults));
+        STORE_FIELD(func, PyFunctionObject, func_kwdefaults, ir_type_pyobject_ptr, kwdefaults);
+    }
+    if (oparg & 0x01) {
+        JVALUE defaults = POP();
+        IR_ASSERT(IR_PyTuple_CheckExact(defaults));
+        STORE_FIELD(func, PyFunctionObject, func_defaults, ir_type_pyobject_ptr, defaults);
+    }
+    PUSH(CAST(ir_type_pyobject_ptr, func));
+    CHECK_EVAL_BREAKER();
+}
 
 EMITTER_FOR(BUILD_SLICE) {
     JVALUE step = (oparg == 3) ? POP() : CONSTANT_PYOBJ(NULL);

@@ -783,6 +783,7 @@ ir_value ir_stack_put(ir_func func, int offset, ir_value value) {
     IR_INSTR_ALLOC(ir_instr_stack_put, 0)
     instr->offset = offset;
     instr->value = value;
+    assert(ir_pointer_base(ir_typeof(value)) == ir_type_pyobject);
     return IR_INSTR_INSERT(ir_opcode_stack_put, ir_type_void);
 }
 
