@@ -16,13 +16,6 @@ jit_context_t gcontext = NULL;
     } \
 } while (0)
 
-#define CAST_DEST(v) do { \
-    assert(_instr->dest != NULL); \
-    jit_value_t __v = (v); \
-    jit_value_t __casted = jit_insn_convert(jit_func, (__v), JIT_TYPE(ir_typeof(_instr->dest)); \
-    SET_DEST(__casted); \
-} while (0)
-
 #define JIT_VALUE(irval) \
     (jit_values[(irval)->index] ? \
      jit_values[(irval)->index] : \
@@ -196,6 +189,18 @@ void _emit_instr(jit_function_t jit_func,
     case ir_opcode_address_of: {
         IR_INSTR_AS(address_of)
         SET_DEST(jit_insn_address_of(jit_func, JIT_VALUE(instr->value)));
+        break;
+    }
+    case ir_opcode_alloca: {
+        IR_INSTR_AS(alloca)
+        size_t elem_size = ir_pointer_base(ir_typeof(_instr->dest))->size;
+        assert(elem_size > 0);
+        jit_value_t alloca_size = jit_insn_mul(
+            jit_func,
+            jit_insn_convert(jit_func, JIT_VALUE(instr->num_elements), jit_type_nuint, 0),
+            jit_value_create_nint_constant(jit_func, jit_type_nuint, elem_size));
+        jit_value_t mem = jit_insn_alloca(jit_func, alloca_size);
+        SET_DEST(mem);
         break;
     }
     case ir_opcode_constant: {

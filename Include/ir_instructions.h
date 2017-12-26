@@ -39,6 +39,7 @@ typedef enum {
     ir_opcode_load,            // *ptr
     ir_opcode_store,           // *ptr = value;
     ir_opcode_address_of,      // &value
+    ir_opcode_alloca,          // allocate on stack
 
     /* assign constant value */
     ir_opcode_constant, // new_value = $imm;
@@ -456,7 +457,22 @@ ir_value ir_address_of(ir_func func, ir_value value) {
 }
 
 /*****************************************************************************/
+IR_PROTOTYPE(ir_instr_alloca)
+struct ir_instr_alloca_t {
+    IR_INSTR_HEADER
+    ir_value num_elements;
+};
 
+static inline
+ir_value ir_alloca(ir_func func, ir_type elem_type, ir_value num_elements) {
+    IR_INSTR_ALLOC(ir_instr_alloca, 0)
+    assert(ir_type_is_integral(ir_typeof(num_elements)));
+    instr->num_elements = num_elements;
+    ir_type ret_type = ir_create_pointer_type(func->context, elem_type);
+    return IR_INSTR_INSERT(ir_opcode_alloca, ret_type);
+}
+
+/*****************************************************************************/
 
 IR_PROTOTYPE(ir_instr_constant)
 struct ir_instr_constant_t {
@@ -486,6 +502,7 @@ IR_CONSTANT_METHOD(ir_constant_longlong, ir_type_longlong, long long, ll)
 IR_CONSTANT_METHOD(ir_constant_ulonglong, ir_type_ulonglong, unsigned long long, ull)
 IR_CONSTANT_METHOD(ir_constant_void_ptr, ir_type_void_ptr, void *, ptr)
 IR_CONSTANT_METHOD(ir_constant_char_ptr, ir_type_char_ptr, void *, ptr)
+IR_CONSTANT_METHOD(ir_constant_int_ptr, ir_type_int_ptr, int *, ptr)
 IR_CONSTANT_METHOD(ir_constant_intptr, ir_type_intptr, intptr_t, uip)
 IR_CONSTANT_METHOD(ir_constant_uintptr, ir_type_uintptr, uintptr_t, uip)
 IR_CONSTANT_METHOD(ir_constant_pyssizet, ir_type_pyssizet, Py_ssize_t, pyssizet)

@@ -41,6 +41,7 @@ _ir_opcode_repr(ir_opcode opcode) {
     OPCODE_CASE(load)
     OPCODE_CASE(store)
     OPCODE_CASE(address_of)
+    OPCODE_CASE(alloca)
 
     OPCODE_CASE(constant)
     OPCODE_CASE(cast)
@@ -180,6 +181,13 @@ ir_instr_repr(char *p, ir_instr _instr) {
         case ir_opcode_address_of: {
             IR_INSTR_AS(address_of)
             p = ir_value_repr(p, instr->value);
+            break;
+        }
+        case ir_opcode_alloca: {
+            IR_INSTR_AS(alloca)
+            p = ir_type_repr(p, ir_pointer_base(ir_typeof(_instr->dest)));
+            p += sprintf(p, " ");
+            p = ir_value_repr(p, instr->num_elements);
             break;
         }
         case ir_opcode_constant: {

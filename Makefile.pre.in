@@ -331,6 +331,7 @@ PYTHON_OBJS=	\
                 Python/ir_libjit.o \
                 Python/ir_llvm.o \
 		Python/jit.o \
+		Python/jit_trampoline.o \
 		Python/compile.o \
 		Python/codecs.o \
 		Python/dynamic_annotations.o \

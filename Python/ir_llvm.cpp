@@ -291,6 +291,17 @@ void _emit_instr(
         SET_DEST(LLVM_VALUE_ADDRESS(instr->value));
         break;
     }
+    case ir_opcode_alloca: {
+        IR_INSTR_AS(alloca)
+        ir_type elem_type = ir_pointer_base(ir_typeof(_instr->dest));
+        assert(elem_type->size > 0);
+        llvm::Value *alloca_size =
+            builder.CreateMul(
+                builder.getIntN(ir_type_uintptr->size * 8, (uint64_t)elem_type->size),
+                builder.CreateZExt(LLVM_VALUE(instr->num_elements), LLVM_TYPE(ir_type_uintptr)));
+        SET_DEST(builder.CreateAlloca(LLVM_TYPE(elem_type), alloca_size));
+        break;
+    }
     case ir_opcode_constant: {
         IR_INSTR_AS(constant)
         ir_type dest_type = ir_typeof(_instr->dest);

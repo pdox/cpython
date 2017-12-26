@@ -42,6 +42,8 @@ typedef struct _EvalContext {
 } EvalContext;
 
 /* JIT data attached to a PyCodeObject */
+struct _frame;
+typedef struct _frame PyFrameObject;
 struct _JITData;
 typedef struct _JITData JITData;
 typedef void (*PyJITEntryFunction)(EvalContext *ctx, PyFrameObject *f, PyObject **sp);
@@ -98,7 +100,6 @@ typedef struct _JITData {
     ir_label j_special_internal[JIT_RC_EXIT + 1];
     ir_label jmptab[1];
 } JITData;
-
 
 typedef void (*PyJITEmitterFunction)(JITData *jd, int next_instr_index, int opcode, int oparg);
 typedef void (*PyJITSpecialEmitterFunction)(JITData *jd);
