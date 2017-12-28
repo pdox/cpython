@@ -143,6 +143,16 @@ char* ir_func_dump(ir_func func) {
     return buf;
 }
 
+void ir_func_dump_file(ir_func func, const char *filename, const char *description) {
+    FILE *fp = fopen(filename, "w");
+    char* dump = ir_func_dump(func);
+    assert(fp && dump);
+    fprintf(fp, "%s", dump);
+    fclose(fp);
+    free(dump);
+    fprintf(stderr, "%s IR dumped to %s\n", description, filename);
+}
+
 char *ir_value_repr(char *p, ir_value value) {
     p += sprintf(p, "%%%ld", (long)value->index);
     return p;

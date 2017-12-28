@@ -106,6 +106,16 @@ typedef void (*PyJITSpecialEmitterFunction)(JITData *jd);
 
 int _PyJIT_Execute(EvalContext *ctx, PyFrameObject *f, PyObject **sp);
 
+/* Opaque type */
+struct _pyjit_callsite;
+typedef struct _pyjit_callsite _pyjit_callsite;
+
+_pyjit_callsite*
+_pyjit_new_fastcall(size_t nargs, PyObject *kwnames);
+
+ir_value
+_pyjit_load_entrypoint(ir_func func, _pyjit_callsite *callsite);
+
 #ifdef __cplusplus
 }
 #endif

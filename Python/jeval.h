@@ -2,6 +2,7 @@
 #include "Include/internal/pystate.h"
 
 #include "Include/jit_macros.h"
+#include "Include/jit.h"
 
 /* Special pseudo-instructions */
 #define DECLARE_SPECIAL(name)  int _PyEval_FUNC_JIT_TARGET_II_##name (EvalContext *ctx, PyFrameObject *f, int jumpev)
@@ -2447,6 +2448,75 @@ EMITTER_FOR(LOAD_METHOD) {
 }
 
 EMIT_AS_SUBROUTINE(CALL_METHOD)
+
+#if 0
+/* Emit a call to a function from the stack. The stack is expected to be arranged like so:
+
+    callable, arg1, ..., argN, kwarg1, ..., kwargM
+
+    where nargs = N, and M = (kwnames ? PyTuple_GET_SIZE(kwnames) : 0)
+
+    Returns the return value (ir_value) of the function.
+    Does not modify the stack. Does not check for NULL return.
+
+ */
+static ir_value
+_call_function(JITData *jd, size_t nargs, PyObject *kwnames) {
+    _pyjit_callsite *cs = _pyjit_new_fastcall(nargs, kwnames);
+    assert(cs);
+
+    /* Invoke the trampoline */
+    ir_value entrypoint = _pyjit_load_entrypoint(jd->func, cs);
+
+    /* Invoke the entry point: entrypoint(callable, args..., kwargs...) */
+    size_t nkwargs = kwnames ? PyTuple_GET_SIZE(kwnames) : 0;
+    size_t total_args = 1 + nargs + nkwargs;
+    ir_value *args = (ir_value*)PyMem_RawMalloc(total_args * sizeof(ir_value));
+    size_t j = 0;
+    int k = nargs + nkwargs + 1;
+    args[j++] = PEEK(k--); /* Callable */
+    size_t stack_base = nargs + nkwargs;
+    for (size_t i = 0; i < nargs; i++) {
+        args[j++] = PEEK(k--);
+    }
+    for (size_t i = 0; i < nkwargs; i++) {
+        args[j++] = PEEK(k--);
+    }
+    assert(j == total_args);
+    assert(k == 0);
+    ir_value ret = ir_call(jd->func, entrypoint, args);
+    PyMem_RawFree(args);
+    return ret;
+}
+
+EMITTER_FOR(CALL_FUNCTION) {
+    IR_LABEL_INIT(fast_dispatch);
+    IR_LABEL_INIT(use_subroutine);
+    JVALUE func = PEEK(oparg + 1);
+    BRANCH_IF_NOT(IR_PyCFunction_Check(func), use_subroutine, IR_SEMILIKELY);
+    JVALUE res = _call_function(jd, oparg, NULL);
+    for (int i = 0; i < oparg; i++) {
+        DECREF(POP());
+    }
+    DECREF(POP()); /* func */
+    GOTO_ERROR_IF_NOT(res);
+    PUSH(res);
+    BRANCH(fast_dispatch);
+
+    LABEL(use_subroutine);
+    STORE_FIELD(jd->ctx, EvalContext, stack_pointer, ir_type_pyobject_ptr_ptr, STACKPTR());
+    STORE_FIELD(jd->ctx, EvalContext, retval, ir_type_pyobject_ptr, jd->retval);
+    STORE_FIELD(jd->ctx, EvalContext, why, ir_type_int, jd->why);
+    JTYPE instr_sig = CREATE_SIGNATURE(ir_type_int, ir_type_evalcontext_ptr, ir_type_pyframeobject_ptr, ir_type_int, ir_type_int, ir_type_int, ir_type_int);
+    JVALUE tmprv = CALL_NATIVE(instr_sig, opcode_function_table[opcode], jd->ctx, jd->f, CONSTANT_INT(next_instr_index), CONSTANT_INT(opcode), CONSTANT_INT(oparg), /*jumpev=*/ CONSTANT_INT(0));
+    SET_VALUE(STACKPTR(), LOAD_FIELD(jd->ctx, EvalContext, stack_pointer, ir_type_pyobject_ptr_ptr));
+    SET_VALUE(jd->retval, LOAD_FIELD(jd->ctx, EvalContext, retval, ir_type_pyobject_ptr));
+    SET_VALUE(jd->why, LOAD_FIELD(jd->ctx, EvalContext, why, ir_type_int));
+    HANDLE_RV_INTERNAL(tmprv);
+    LABEL(fast_dispatch);
+}
+#endif
+
 EMIT_AS_SUBROUTINE(CALL_FUNCTION)
 EMIT_AS_SUBROUTINE(CALL_FUNCTION_KW)
 EMIT_AS_SUBROUTINE(CALL_FUNCTION_EX)

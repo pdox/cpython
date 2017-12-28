@@ -308,9 +308,10 @@ ir_libjit_compile(ir_func func) {
     jit_value_t *jit_values = (jit_value_t*)malloc(num_values * sizeof(jit_value_t));
     memset(jit_values, 0, num_values * sizeof(jit_value_t));
 
-    /* By convention, the first values correspond to the arguments */
+    /* Setup the values corresponding to the arguments */
     for (i = 0; i < func->sig->param_count - 1; i++) {
-        jit_values[i] = jit_value_get_param(jit_func, i);
+        ir_value argi = ir_func_get_argument(func, i);
+        jit_values[argi->index] = jit_value_get_param(jit_func, i);
     }
 
     /* Allocate an array for block labels */
@@ -335,7 +336,7 @@ ir_libjit_compile(ir_func func) {
     jit_function_set_optimization_level(jit_func, jit_function_get_max_optimization_level());
     int ok = jit_function_compile(jit_func);
     if (!ok) {
-        Py_FatalError("JIT compile failed");
+        Py_FatalError("libjit compile failed");
     }
     void *ret = jit_function_to_closure(jit_func);
     assert(ret);

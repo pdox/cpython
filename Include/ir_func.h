@@ -188,3 +188,5 @@ char *ir_func_dump(ir_func func);
 
 /* Print representation of value to buffer */
 char *ir_value_repr(char *p, ir_value value);
+
+void ir_func_dump_file(ir_func func, const char *filename, const char *description);

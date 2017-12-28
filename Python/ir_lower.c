@@ -13,6 +13,7 @@ void _ir_lower_one_instr(
     switch (_instr->opcode) {
     case ir_opcode_getlocal: {
         IR_INSTR_AS(getlocal)
+        assert(fastlocals != NULL);
         ir_value addr = ir_get_index_ptr(func, fastlocals, ir_constant_int(func, instr->index, NULL));
         ir_value tmp = ir_load(func, addr);
         _ir_instr_replace_dest(func, tmp, _instr->dest);
@@ -20,6 +21,7 @@ void _ir_lower_one_instr(
     }
     case ir_opcode_setlocal: {
         IR_INSTR_AS(setlocal)
+        assert(fastlocals != NULL);
         ir_value addr = ir_get_index_ptr(func, fastlocals, ir_constant_int(func, instr->index, NULL));
         ir_store(func, addr, instr->value);
         break;
@@ -66,6 +68,7 @@ void _ir_lower_one_instr(
     }
     case ir_opcode_stackadj: {
         IR_INSTR_AS(stackadj)
+        assert(stack_pointer != NULL);
         ir_value new_value =
             ir_get_index_ptr(func, stack_pointer, ir_constant_int(func, instr->amount, NULL));
         ir_set_value(func, stack_pointer, new_value);
@@ -73,6 +76,7 @@ void _ir_lower_one_instr(
     }
     case ir_opcode_stack_peek: {
         IR_INSTR_AS(stack_peek)
+        assert(stack_pointer != NULL);
         ir_value addr =
             ir_get_index_ptr(func, stack_pointer, ir_constant_int(func, -instr->offset, NULL));
         ir_value tmp = ir_load(func, addr);
@@ -81,6 +85,7 @@ void _ir_lower_one_instr(
     }
     case ir_opcode_stack_put: {
         IR_INSTR_AS(stack_put)
+        assert(stack_pointer != NULL);
         ir_value addr =
             ir_get_index_ptr(func, stack_pointer, ir_constant_int(func, -instr->offset, NULL));
         ir_store(func, addr, instr->value);
@@ -88,6 +93,7 @@ void _ir_lower_one_instr(
     }
     case ir_opcode_check_eval_breaker: {
         //IR_INSTR_AS(check_eval_breaker)
+        assert(eval_breaker_label != NULL);
         ir_value eval_breaker_addr = ir_constant_from_ptr(func, ir_type_int_ptr, &_PyRuntime.ceval.eval_breaker._value, "&_PyRuntime.ceval.eval_breaker._value");
         ir_value eval_breaker_value = ir_load(func, eval_breaker_addr);
         ir_branch_if(func, eval_breaker_value, eval_breaker_label, IR_UNLIKELY);

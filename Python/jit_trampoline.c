@@ -4,14 +4,44 @@
 
 #include "jit_macros.h"
 
+#if 0
+
 extern int Py_JITFlag;
+extern int Py_JITDebugFlag;
+
+typedef struct {
+    void *entrypoint;   /* Function entrypoint */
+    size_t refcount;    /* Number of threads inside "entrypoint" */
+    ir_context context; /* IR context for "entrypoint" */
+
+    /* We keep a linked list of previous "zombie" trampolines. These are
+       previous trampolines that are still alive, because
+       they are on the call stack for some thread. Once the last caller
+       exits, the zombie's refcount will drop to 0, and it will be
+       destroyed.
+     */
+    _pyjit_trampoline *prev;
+} _pyjit_trampoline;
+
+typedef struct {
+    _pyjit_trampoline *current;
+    size_t nargs;
+    size_t nkwargs;
+    PyObject *kwnames;
+    size_t alive;      /* Code which uses this callsite is still around */
+} _pyjit_callsite;
 
 typedef struct {
     ir_context context;
+    _pyjit_callsite *callsite;
+
     ir_func func;
+    ir_type func_sig;
+
     ir_value retval;
     ir_label exit;
     ir_label error_exit;
+    ir_value callable;
 
     size_t nargs;
     ir_value *args;
@@ -39,7 +69,7 @@ _shift_args_right(_jitdata *jd, size_t count) {
     for (size_t i = 0; i < jd->nargs; i++) {
         newargs[count + i] = jd->args[i];
     }
-    PyMem_Free(jd->args);
+    PyMem_RawFree(jd->args);
     jd->args = newargs;
     jd->nargs += count;
 }
@@ -91,17 +121,17 @@ static void no_keyword_error(const char *name) {
             DECREF(resultval); \
             SET_VALUE(ret, CONSTANT_PYOBJ(NULL)); \
             if (callable) { \
-                _PyErr_FormatFromCause(PyExc_SystemError, \
+                CALL_PyErr_FormatFromCause(PyExc_SystemError, \
                         "%R returned a result with an error set", \
-                        callable); \
+                        CONSTANT_PYOBJ(callable)); \
             } \
             else { \
-                _PyErr_FormatFromCause(PyExc_SystemError, \
+                CALL_PyErr_FormatFromCause(PyExc_SystemError, \
                         "%s returned a result with an error set", \
-                        where); \
+                        CONSTANT_CHAR_PTR((char*)where)); \
             } \
             /* Ensure that the bug is caught in debug mode */ \
-            IF_PY_DEBUG(Py_FatalError("a function returned a result with an error set");) \
+            IF_PY_DEBUG(CALL_Py_FatalError("a function returned a result with an error set");) \
         }); \
     }); \
     ret; \
@@ -216,8 +246,7 @@ _verify_kwdict_empty(_jitdata *jd, const char *ml_name) {
 static int
 _emit_pymethoddef_call(
         _jitdata *jd,
-        PyMethodDef *method,
-        ir_value self)
+        PyMethodDef *method)
 {
     size_t nargs = jd->nargs;
     size_t nkwargs = jd->nkwargs;
@@ -359,8 +388,7 @@ _emit_pymethoddef_call(
 static int
 _emit_cfunction_call(_jitdata *jd, PyObject *callable) {
     PyCFunctionObject *func = (PyCFunctionObject*)callable;
-    PyObject *self = PyCFunction_GET_SELF(func);
-    int err = _emit_pymethoddef_call(jd, func->m_ml, CONSTANT_PYOBJ(self));
+    int err = _emit_pymethoddef_call(jd, func->m_ml);
     if (err != 0) {
         return err;
     }
@@ -377,6 +405,7 @@ descr_name(PyDescrObject *descr)
         return descr->d_name;
     return NULL;
 }
+
 
 static int
 _emit_methoddescr_call(_jitdata *jd, PyObject *callable) {
@@ -461,19 +490,23 @@ _emit_call(_jitdata *jd, PyObject *callable)
     return err;
 }
 
+static int _emit_stub(_jitdata *jd);
+
+static
 ir_type
-_create_trampoline_signature(ir_context context, size_t nargs, size_t nkwargs, int has_kwdict) {
-    size_t total_nargs = nargs + nkwargs + (has_kwdict ? 1 : 0);
+_create_trampoline_signature(ir_context context, _py_callsite *cs) {
+    size_t total_nargs = 1 + cs->nargs + cs->nkwargs + (cs->has_kwdict ? 1 : 0);
     ir_type *argtypes = PyMem_RawMalloc(sizeof(ir_type) * total_nargs);
     for (size_t i = 0; i < total_nargs; i++) {
         argtypes[i] = ir_type_pyobject_ptr;
     }
     ir_type sig = ir_create_function_type(context, ir_type_pyobject_ptr, total_nargs, argtypes);
-    PyMem_Free(argtypes);
+    PyMem_RawFree(argtypes);
     return sig;
 }
 
 /* Make a trampoline for calling a python callable as if it were a native function.
+   Exactly one of 'callable' or 'method' should be supplied, but not both.
 
    The result is a native function with signature:
 
@@ -497,34 +530,35 @@ _create_trampoline_signature(ir_context context, size_t nargs, size_t nkwargs, i
    set, and NULL returned. This error may be an invocation error (like the wrong
    number of arguments) which prevents a sane trampoline from being created.
  */
-PyJIT_Trampoline *
-_PyJIT_generate_trampoline(
-        PyObject *callable,
-        size_t nargs,
-        PyObject *kwnames,
-        int has_kwdict)
-{
-    size_t nkwargs = kwnames ? PyTuple_GET_SIZE(kwnames) : 0;
-    _jitdata *jd = PyMem_RawMalloc(sizeof(_jitdata));
-    assert(jd);
+void*
+_pyjit_generate_trampoline(
+        ir_context context,
+        _pyjit_callsite *cs,
+        PyObject *first_callable,
+        int stub_only) {
+    void *entrypoint = NULL;
+    _jitdata _jd;
+    _jitdata *jd = &_jd;
 
     /* Initialize trampoline context and function */
-    jd->context = ir_context_new();
+    jd->context = context;
+    jd->callsite = cs;
 
-    ir_type sig = _create_trampoline_signature(jd->context, nargs, nkwargs, has_kwdict);
-    jd->func = ir_func_new(jd->context, sig);
+    jd->func_sig = _create_trampoline_signature(jd->context, cs);
+    jd->func = ir_func_new(jd->context, jd->func_sig);
     jd->retval = ir_value_new(jd->func, ir_type_pyobject_ptr);
     jd->exit = ir_label_new(jd->func, "exit");
     jd->error_exit = ir_label_new(jd->func, "error_exit");
 
-    jd->nargs = nargs;
+    jd->nargs = cs->nargs;
     jd->args = PyMem_RawMalloc(sizeof(ir_value) * nargs);
     size_t j = 0;
+    jd->callable = ir_func_get_argment(jd->func, j++);
     for (size_t i = 0; i < nargs; i++) {
         jd->args[i] = ir_func_get_argument(jd->func, j++);
     }
 
-    jd->nkwargs = nkwargs;
+    jd->nkwargs = cs->nkwargs;
     jd->kwargs = PyMem_RawMalloc(sizeof(ir_value) * nkwargs);
     jd->kwnames_tuple = kwnames;
     for (size_t i = 0; i < nkwargs; i++) {
@@ -536,14 +570,18 @@ _PyJIT_generate_trampoline(
         jd->kwdict = NULL;
     }
 
-    int err = _emit_call(jd, callable);
+    int err;
+    if (stub_only) {
+        assert(!first_callable);
+        err = _emit_stub(jd);
+    } else {
+        assert(first_callable);
+        err = _emit_call(jd, callable);
+    }
+
     if (err != 0) {
         /* Something went wrong, clean up and exit */
-        ir_context_destroy(jd->context);
-        PyMem_Free(jd->args);
-        PyMem_Free(jd->kwargs);
-        PyMem_Free(jd);
-        return NULL;
+        goto genexit;
     }
 
     LABEL(jd->exit);
@@ -554,23 +592,77 @@ _PyJIT_generate_trampoline(
 
 #ifdef IR_DEBUG
     ir_func_verify(jd->func);
+    if (Py_JITDebugFlag > 0) {
+        ir_func_dump_file(jd->func, "/tmp/tbefore.ir", "Trampoline before lowering");
+    }
 #endif
 
-    PyJIT_Trampoline *jt = PyMem_RawMalloc(sizeof(PyJIT_Trampoline));
+    /* Not providing fastlocals, stack_pointer or eval_breaker_label.
+       Locals and stack operations do not make sense in trampolines.
+    */
+    ir_lower(jd->func, NULL, NULL, NULL);
+
+#ifdef IR_DEBUG
+    if (Py_JITDebugFlag > 0) {
+        ir_func_dump_file(jd->func, "/tmp/tafter.ir", "Trampoline after lowering");
+    }
+    ir_func_verify(jd->func);
+#endif
+
     if (Py_JITFlag == 1) {
-        jt->entry = ir_libjit_compile(jd->func);
+        entrypoint = ir_libjit_compile(jd->func);
     } else if (Py_JITFlag == 2) {
-        jt->entry = ir_llvm_compile(jd->func);
+        entrypoint = ir_llvm_compile(jd->func);
     } else {
         Py_FatalError("Invalid PYJIT value");
     }
-    assert(jt->entry);
+    assert(entrypoint);
 
-    ir_context_destroy(jd->context);
-    PyMem_Free(jd->args);
-    PyMem_Free(jd->kwargs);
-    PyMem_Free(jd);
-
-    return jt;
+genexit:
+    PyMem_RawFree(jd->args);
+    PyMem_RawFree(jd->kwargs);
+    return entrypoint;
 }
 
+void
+_PyJIT_destroy_trampoline(PyJIT_Trampoline *jt) {
+    // TODO: Actually deallocate code
+    PyMem_RawFree(jt);
+}
+
+static void *
+_pyjit_materialize(_pyjit_callsite *cs, PyObject *callable) {
+    
+}
+
+/* The stub is the initial code sitting at the entrypoint for the
+   trampoline. The only thing it does is invoke _pyjit_materialize,
+   and then invoke the newly generated trampoline.
+  */
+static int _emit_stub(_jitdata *jd) {
+    JTYPE sig = CREATE_SIGNATURE(ir_type_void_ptr, ir_type_void_ptr, ir_type_pyobject_ptr);
+    JVALUE new_entry = CALL_NATIVE(sig, _pyjit_materialize, CONSTANT_VOID_PTR(jd->callsite), jd->callable);
+    BRANCH_IF_NOT(new_entry, jd->error_exit, IR_UNLIKELY);
+
+    /* Call the new callsite */
+    ir_call
+
+    CALL_INDIRECT(new_entry, CONSTANT_PTR(ir_void_ptr, jt);
+
+_pyjit_callsite*
+_pyjit_new_fastcall(size_t nargs, PyObject *kwnames) {
+    _pyjit_callsite *cs = PyMem_RawMalloc(sizeof(_pyjit_callsite));
+    cs->nargs = nargs;
+    cs->nkwargs = kwnames ? PyTuple_GET_SIZE(kwnames) : 0;
+    cs->kwnames = kwnames;
+    cs->alive = 1;
+
+    ir_context context = ir_context_new();
+    cs->current.entrypoint = _pyjit_generate_trampoline(context, cs, NULL, 1);
+    cs->current.refcount = 0;
+    cs->current.context = context;
+    cs->current.prev = NULL;
+
+    return cs;
+}
+#endif

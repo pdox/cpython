@@ -213,6 +213,9 @@ static void _do_assert(int expr, const char *expr_str) {
 #define IR_PyUnicode_CheckExact(obj) \
     CMP_EQ(IR_Py_TYPE(obj), CONSTANT_PTR(ir_type_pytypeobject_ptr, &PyUnicode_Type))
 
+#define IR_PyCFunction_Check(obj) \
+    CMP_EQ(IR_Py_TYPE(obj), CONSTANT_PTR(ir_type_pytypeobject_ptr, &PyCFunction_Type))
+
 #define IR_PyExceptionClass_Check(x) \
     LOGICAL_AND_SC( \
         IR_PyType_Check((x)), \
@@ -275,6 +278,17 @@ static void _do_assert(int expr, const char *expr_str) {
     } \
     JTYPE _sig = ir_create_function_type(jd->context, ir_type_pyobject_ptr, sizeof(_types)/sizeof(ir_type), _types); \
     JVALUE _funcval = ir_constant_from_ptr(jd->func, (_sig), PyErr_Format, "PyErr_Format"); \
+    ir_call(jd->func, _funcval, sizeof(_values)/sizeof(ir_value), _values); \
+} while (0)
+
+#define CALL_PyErr_FormatFromCause(exc, format, ...) do { \
+    ir_value _values[] = { CONSTANT_PYOBJ(exc), CONSTANT_CHAR_PTR(format), __VA_ARGS__ }; \
+    ir_type _types[sizeof(_values)/sizeof(ir_value)]; \
+    for (size_t _i = 0; _i < sizeof(_values)/sizeof(ir_value); _i++) { \
+        _types[_i] = ir_typeof(_values[_i]); \
+    } \
+    JTYPE _sig = ir_create_function_type(jd->context, ir_type_pyobject_ptr, sizeof(_types)/sizeof(ir_type), _types); \
+    JVALUE _funcval = ir_constant_from_ptr(jd->func, (_sig), _PyErr_FormatFromCause, "_PyErr_FormatFromCause"); \
     ir_call(jd->func, _funcval, sizeof(_values)/sizeof(ir_value), _values); \
 } while (0)
 

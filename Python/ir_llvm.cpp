@@ -488,11 +488,12 @@ ir_llvm_compile(ir_func func) {
     llvm::Value**      llvm_values = (llvm::Value**)malloc(num_values * sizeof(llvm::Value*));
     memset(llvm_values, 0, num_values * sizeof(llvm::Value*));
 
-    /* By convention, the first values correspond to the function arguments */
+    /* Setup the values corresponding to the arguments */
     llvm::Function::arg_iterator llvm_args = llvm_func->arg_begin();
     for (size_t i = 0; i < func->sig->param_count - 1; i++) {
-        llvm_values[i] = builder.CreateAlloca(LLVM_TYPE(func->sig->param[i+1]));
-        builder.CreateStore(llvm_args++, llvm_values[i]);
+        ir_value argi = ir_func_get_argument(func, i);
+        llvm_values[argi->index] = builder.CreateAlloca(LLVM_TYPE(ir_typeof(argi)));
+        builder.CreateStore(llvm_args++, llvm_values[argi->index]);
     }
 
     llvm::BasicBlock** llvm_blocks = (llvm::BasicBlock**)malloc(num_blocks * sizeof(llvm::BasicBlock*));

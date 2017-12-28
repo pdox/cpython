@@ -150,27 +150,19 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     }
 }
 
-void _dumpir(const char *description, const char *filename, ir_func func) {
-    FILE *fp = fopen(filename, "w");
-    char* dump = ir_func_dump(func);
-    assert(fp && dump);
-    fprintf(fp, "%s", dump);
-    fclose(fp);
-    free(dump);
-    fprintf(stderr, "%s IR dumped to %s\n", description, filename);
-}
-
 static int
 _PyJIT_CodeGen(PyCodeObject *co) {
     char namebuf[32];
     ir_type sig;
     Py_ssize_t i;
     Py_ssize_t inst_count = PyBytes_GET_SIZE(co->co_code)/sizeof(_Py_CODEUNIT);
-    JITData *jd = PyMem_RawMalloc(sizeof(JITData) + inst_count * sizeof(ir_label));
+    size_t total_size = sizeof(JITData) + inst_count * sizeof(ir_label);
+    JITData *jd = PyMem_RawMalloc(total_size);
     if (jd == NULL) {
         PyErr_NoMemory();
         return -1;
     }
+    memset(jd, 0, total_size);
     jd->co = co;
     jd->context = ir_context_new();
 
@@ -194,11 +186,11 @@ _PyJIT_CodeGen(PyCodeObject *co) {
     ir_func_verify(jd->func);
 #endif
     if (Py_JITDebugFlag > 0) {
-        _dumpir("Before lowering", "/tmp/before.ir", jd->func);
+        ir_func_dump_file(jd->func, "/tmp/before.ir", "Before lowering");
     }
     ir_lower(jd->func, jd->fastlocals, jd->stack_pointer, jd->j_special[JIT_RC_NEXT_OPCODE]);
     if (Py_JITDebugFlag > 0) {
-        _dumpir("After lowering", "/tmp/after.ir", jd->func);
+        ir_func_dump_file(jd->func, "/tmp/after.ir", "After lowering");
     }
 #ifdef IR_DEBUG
     ir_func_verify(jd->func);
