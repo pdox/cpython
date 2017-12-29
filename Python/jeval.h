@@ -2447,7 +2447,41 @@ EMITTER_FOR(LOAD_METHOD) {
     CHECK_EVAL_BREAKER();
 }
 
-EMIT_AS_SUBROUTINE(CALL_METHOD)
+/* From ceval */
+PyObject *call_function_extern(PyObject **, Py_ssize_t,
+                               PyObject *);
+
+ir_value _emit_call_function(JITData *jd, ir_value callable, int oparg, ir_value kwnames) {
+    assert(jd->tmpstack_size >= (size_t)oparg + 1);
+
+    /* This assumes the arguments are at the top of the "stack" */
+    STORE_AT_INDEX(jd->tmpstack, CONSTANT_INT(0), callable);
+    for (int i = 0; i < oparg; i++) {
+        STORE_AT_INDEX(jd->tmpstack, CONSTANT_INT(i+1), PEEK(oparg-i));
+    }
+    JVALUE endptr = ir_get_index_ptr(jd->func, jd->tmpstack, CONSTANT_INT(oparg+1));
+    JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr_ptr, ir_type_pyssizet, ir_type_pyobject_ptr);
+    JVALUE res = CALL_NATIVE(sig, call_function_extern, endptr, CONSTANT_PYSSIZET(oparg), kwnames);
+    return res;
+}
+
+EMITTER_FOR(CALL_METHOD) {
+    JVALUE meth = PEEK(oparg + 2);
+    JVALUE res = JVALUE_CREATE(ir_type_pyobject_ptr);
+    IF_ELSE(NOTBOOL(meth), IR_SOMETIMES, {
+        SET_VALUE(res, _emit_call_function(jd, PEEK(oparg+1), oparg, CONSTANT_PYOBJ(NULL)));
+    }, {
+        SET_VALUE(res, _emit_call_function(jd, meth, oparg + 1, CONSTANT_PYOBJ(NULL)));
+    });
+    for (int i = 0; i < oparg; i++) {
+        DECREF(POP());
+    }
+    XDECREF(POP());
+    XDECREF(POP());
+    GOTO_ERROR_IF_NOT(res);
+    PUSH(res);
+    CHECK_EVAL_BREAKER();
+}
 
 #if 0
 /* Emit a call to a function from the stack. The stack is expected to be arranged like so:
@@ -2517,9 +2551,99 @@ EMITTER_FOR(CALL_FUNCTION) {
 }
 #endif
 
-EMIT_AS_SUBROUTINE(CALL_FUNCTION)
-EMIT_AS_SUBROUTINE(CALL_FUNCTION_KW)
-EMIT_AS_SUBROUTINE(CALL_FUNCTION_EX)
+EMITTER_FOR(CALL_FUNCTION) {
+    JVALUE res = _emit_call_function(jd, PEEK(oparg+1), oparg, CONSTANT_PYOBJ(NULL));
+    for (int i = 0; i < oparg; i++) {
+        DECREF(POP());
+    }
+    DECREF(POP()); /* callable */
+    GOTO_ERROR_IF_NOT(res);
+    PUSH(res);
+    CHECK_EVAL_BREAKER();
+}
+
+EMITTER_FOR(CALL_FUNCTION_KW) {
+    JVALUE names = POP();
+    IR_ASSERT(IR_PyTuple_CheckExact(names));
+    IR_ASSERT(CMP_LE(IR_PyTuple_GET_SIZE(names), CONSTANT_PYSSIZET(oparg)));
+
+    JVALUE res = _emit_call_function(jd, PEEK(oparg+1), oparg, names);
+    for (int i = 0; i < oparg; i++) {
+        DECREF(POP());
+    }
+    DECREF(POP()); /* callable */
+    DECREF(names);
+    GOTO_ERROR_IF_NOT(res);
+    PUSH(res);
+    CHECK_EVAL_BREAKER();
+}
+
+/* Helper to convert "kwargs" to a dict, when it is not already an exact dict */
+PyObject *
+_call_function_ex_make_dict(PyObject *func, PyObject *kwargs) {
+    PyObject *d = PyDict_New();
+    if (d == NULL)
+        return NULL;
+    if (PyDict_Update(d, kwargs) != 0) {
+        Py_DECREF(d);
+        /* PyDict_Update raises attribute
+         * error (percolated from an attempt
+         * to get 'keys' attribute) instead of
+         * a type error if its second argument
+         * is not a mapping.
+         */
+        if (PyErr_ExceptionMatches(PyExc_AttributeError)) {
+            format_kwargs_mapping_error(func, kwargs);
+        }
+        return NULL;
+    }
+    return d;
+}
+
+PyObject *
+_call_function_ex_make_tuple(PyObject *func, PyObject *callargs) {
+    if (check_args_iterable(func, callargs) < 0) {
+        return NULL;
+    }
+    return PySequence_Tuple(callargs);
+}
+
+PyObject * do_call_core(PyObject *, PyObject *, PyObject *);
+
+EMITTER_FOR(CALL_FUNCTION_EX) {
+    /* Stack on entry: func | callargs [| kwargs] */
+    JVALUE kwargs;
+    if (oparg & 0x01) {
+        kwargs = POP();
+        IF_NOT(IR_PyDict_CheckExact(kwargs), IR_UNLIKELY, {
+            JVALUE d = CALL_NATIVE(jd->sig_ooo, _call_function_ex_make_dict, SECOND(), kwargs);
+            DECREF(kwargs);
+            GOTO_ERROR_IF_NOT(d);
+            SET_VALUE(kwargs, d);
+        });
+        IR_ASSERT(IR_PyDict_CheckExact(kwargs));
+    } else {
+        kwargs = CONSTANT_PYOBJ(NULL);
+    }
+    JVALUE callargs = POP();
+    IF_NOT(IR_PyTuple_CheckExact(callargs), IR_UNLIKELY, {
+        JVALUE t = CALL_NATIVE(jd->sig_ooo, _call_function_ex_make_tuple, TOP(), callargs);
+        DECREF(callargs);
+        GOTO_ERROR_IF_NOT(t);
+        SET_VALUE(callargs, t);
+    });
+    IR_ASSERT(IR_PyTuple_CheckExact(callargs));
+    JVALUE func = POP();
+    JVALUE result = CALL_NATIVE(jd->sig_oooo, do_call_core, func, callargs, kwargs);
+    DECREF(func);
+    DECREF(callargs);
+    if (oparg & 0x01) {
+        DECREF(kwargs);
+    }
+    GOTO_ERROR_IF_NOT(result);
+    PUSH(result);
+    CHECK_EVAL_BREAKER();
+}
 
 EMITTER_FOR(MAKE_FUNCTION) {
     JVALUE qualname = POP();

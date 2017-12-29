@@ -506,6 +506,7 @@ IR_CONSTANT_METHOD(ir_constant_int_ptr, ir_type_int_ptr, int *, ptr)
 IR_CONSTANT_METHOD(ir_constant_intptr, ir_type_intptr, intptr_t, uip)
 IR_CONSTANT_METHOD(ir_constant_uintptr, ir_type_uintptr, uintptr_t, uip)
 IR_CONSTANT_METHOD(ir_constant_pyssizet, ir_type_pyssizet, Py_ssize_t, pyssizet)
+IR_CONSTANT_METHOD(ir_constant_pyssizet_ptr, ir_type_pyssizet_ptr, Py_ssize_t*, ptr)
 IR_CONSTANT_METHOD(ir_constant_sizet, ir_type_sizet, size_t, sizet)
 
 struct _object;

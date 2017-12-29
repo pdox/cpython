@@ -35,9 +35,9 @@ extern int _PyObject_GetMethod(PyObject *, PyObject *, PyObject **);
 typedef PyObject *(*callproc)(PyObject *, PyObject *, PyObject *);
 
 /* Forward declarations */
-Py_LOCAL_INLINE(PyObject *) call_function(PyObject ***, Py_ssize_t,
+Py_LOCAL_INLINE(PyObject *) call_function(PyObject **, Py_ssize_t,
                                           PyObject *);
-PyObject * call_function_extern(PyObject ***, Py_ssize_t, PyObject *);
+PyObject * call_function_extern(PyObject **, Py_ssize_t, PyObject *);
 PyObject * do_call_core(PyObject *, PyObject *, PyObject *);
 
 #ifdef LLTRACE
@@ -3124,9 +3124,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
 
         TARGET(CALL_METHOD) {
             /* Designed to work in tamdem with LOAD_METHOD. */
-            PyObject **sp, *res, *meth;
-
-            sp = stack_pointer;
+            PyObject *res, *meth;
 
             meth = PEEK(oparg + 2);
             if (meth == NULL) {
@@ -3144,9 +3142,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
                    `callable` will be POPed by call_function.
                    NULL will will be POPed manually later.
                 */
-                res = call_function(&sp, oparg, NULL);
-                stack_pointer = sp;
-                (void)POP(); /* POP the NULL. */
+                res = call_function(stack_pointer, oparg, NULL);
             }
             else {
                 /* This is a method call.  Stack layout:
@@ -3161,9 +3157,13 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
                   We'll be passing `oparg + 1` to call_function, to
                   make it accept the `self` as a first argument.
                 */
-                res = call_function(&sp, oparg + 1, NULL);
-                stack_pointer = sp;
+                res = call_function(stack_pointer, oparg + 1, NULL);
             }
+            while (oparg--) {
+                Py_DECREF(POP());
+            }
+            Py_XDECREF(POP());
+            Py_XDECREF(POP());
 
             PUSH(res);
             if (res == NULL)
@@ -3173,10 +3173,12 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
 
         PREDICTED(CALL_FUNCTION);
         TARGET(CALL_FUNCTION) {
-            PyObject **sp, *res;
-            sp = stack_pointer;
-            res = call_function(&sp, oparg, NULL);
-            stack_pointer = sp;
+            PyObject *res;
+            res = call_function(stack_pointer, oparg, NULL);
+            while (oparg--) {
+                Py_DECREF(POP());
+            }
+            Py_DECREF(POP());
             PUSH(res);
             if (res == NULL) {
                 goto error;
@@ -3185,13 +3187,15 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
         }
 
         TARGET(CALL_FUNCTION_KW) {
-            PyObject **sp, *res, *names;
+            PyObject *res, *names;
 
             names = POP();
             assert(PyTuple_CheckExact(names) && PyTuple_GET_SIZE(names) <= oparg);
-            sp = stack_pointer;
-            res = call_function(&sp, oparg, names);
-            stack_pointer = sp;
+            res = call_function(stack_pointer, oparg, names);
+            while (oparg--) {
+                Py_DECREF(POP());
+            }
+            Py_DECREF(POP());
             PUSH(res);
             Py_DECREF(names);
 
@@ -4566,14 +4570,15 @@ if (tstate->use_tracing && tstate->c_profilefunc) { \
 /* Issue #29227: Inline call_function() into _PyEval_EvalFrameDefault()
    to reduce the stack consumption. */
 Py_LOCAL_INLINE(PyObject *) _Py_HOT_FUNCTION
-call_function(PyObject ***pp_stack, Py_ssize_t oparg, PyObject *kwnames)
+call_function(PyObject **pp_stack, Py_ssize_t oparg, PyObject *kwnames)
 {
-    PyObject **pfunc = (*pp_stack) - oparg - 1;
+    PyObject **pfunc = (pp_stack) - oparg - 1;
     PyObject *func = *pfunc;
-    PyObject *x, *w;
+    PyObject *x;
     Py_ssize_t nkwargs = (kwnames == NULL) ? 0 : PyTuple_GET_SIZE(kwnames);
     Py_ssize_t nargs = oparg - nkwargs;
-    PyObject **stack = (*pp_stack) - nargs - nkwargs;
+    PyObject **stack = (pp_stack) - nargs - nkwargs;
+    PyObject *orig_func = NULL;
 
     /* Always dispatch PyCFunction first, because these are
        presumed to be the most frequent callable object.
@@ -4606,16 +4611,13 @@ call_function(PyObject ***pp_stack, Py_ssize_t oparg, PyObject *kwnames)
                with 'self'. It avoids the creation of a new temporary tuple
                for arguments (to replace func with self) when the method uses
                FASTCALL. */
+            orig_func = func;
+            PyObject *new_func = PyMethod_GET_FUNCTION(func);
             PyObject *self = PyMethod_GET_SELF(func);
-            Py_INCREF(self);
-            func = PyMethod_GET_FUNCTION(func);
-            Py_INCREF(func);
-            Py_SETREF(*pfunc, self);
+            *pfunc = self;
+            func = new_func;
             nargs++;
             stack--;
-        }
-        else {
-            Py_INCREF(func);
         }
 
         if (PyFunction_Check(func)) {
@@ -4624,22 +4626,18 @@ call_function(PyObject ***pp_stack, Py_ssize_t oparg, PyObject *kwnames)
         else {
             x = _PyObject_FastCallKeywords(func, stack, nargs, kwnames);
         }
-        Py_DECREF(func);
+        if (orig_func != NULL) {
+            *pfunc = orig_func;
+        }
     }
 
     assert((x != NULL) ^ (PyErr_Occurred() != NULL));
-
-    /* Clear the stack of the function object. */
-    while ((*pp_stack) > pfunc) {
-        w = EXT_POP(*pp_stack);
-        Py_DECREF(w);
-    }
 
     return x;
 }
 
 PyObject * _Py_HOT_FUNCTION
-call_function_extern(PyObject ***pp_stack, Py_ssize_t oparg, PyObject *kwnames) {
+call_function_extern(PyObject **pp_stack, Py_ssize_t oparg, PyObject *kwnames) {
     return call_function(pp_stack, oparg, kwnames);
 }
 

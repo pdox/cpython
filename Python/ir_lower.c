@@ -34,6 +34,12 @@ void _ir_lower_one_instr(
             skip_incref = ir_label_new(func, "x_skip_incref");
             ir_branch_if_not(func, obj, skip_incref, IR_UNLIKELY);
         }
+#ifdef Py_REF_DEBUG
+        ir_value total_addr = ir_constant_pyssizet_ptr(func, &_Py_RefTotal, "&_Py_RefTotal");
+        ir_value old_total = ir_load(func, total_addr);
+        ir_value new_total = ir_add(func, old_total, ir_constant_pyssizet(func, 1, NULL));
+        ir_store(func, total_addr, new_total);
+#endif
         ir_value addr = ir_get_element_ptr(func, obj, offsetof(PyObject, ob_refcnt), ir_type_pyssizet, "ob_refcnt");
         ir_value old_value = ir_load(func, addr);
         ir_value new_value = ir_add(func, old_value, ir_constant_pyssizet(func, 1, NULL));
@@ -50,6 +56,12 @@ void _ir_lower_one_instr(
         if (instr->is_xdecref) {
             ir_branch_if_not(func, obj, skip_dealloc, IR_UNLIKELY);
         }
+#ifdef Py_REF_DEBUG
+        ir_value total_addr = ir_constant_pyssizet_ptr(func, &_Py_RefTotal, "&_Py_RefTotal");
+        ir_value old_total = ir_load(func, total_addr);
+        ir_value new_total = ir_sub(func, old_total, ir_constant_pyssizet(func, 1, NULL));
+        ir_store(func, total_addr, new_total);
+#endif
         ir_value old_value = IR_LOAD_FIELD(func, obj, PyObject, ob_refcnt, ir_type_pyssizet);
         ir_value new_value = ir_sub(func, old_value, ir_constant_pyssizet(func, 1, NULL));
         IR_STORE_FIELD(func, obj, PyObject, ob_refcnt, ir_type_pyssizet, new_value);

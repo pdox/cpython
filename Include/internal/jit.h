@@ -69,6 +69,10 @@ typedef struct _JITData {
     ir_value retval; /* corresponding to ctx->retval */
     ir_value why;    /* corresponding to ctx->why */
 
+    /* Temporary stack is used for call_function */
+    ir_value tmpstack;
+    size_t tmpstack_size;
+
     /* Some common function signature types:
 
        v = void

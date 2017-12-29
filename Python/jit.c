@@ -43,6 +43,26 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     Py_ssize_t i;
     Py_ssize_t inst_count = PyBytes_GET_SIZE(co->co_code)/sizeof(_Py_CODEUNIT);
 
+    /* Setup temporary stack */
+    jd->tmpstack_size = 0;
+    for (i = 0; i < inst_count; i++) {
+        int opcode = _Py_OPCODE(code[i]);
+        int oparg = _Py_OPARG(code[i]);
+        while (opcode == EXTENDED_ARG) {
+            ++i;
+            opcode = _Py_OPCODE(code[i]);
+            oparg = (oparg << 8) | _Py_OPARG(code[i]);
+        }
+        if (opcode == CALL_FUNCTION || opcode == CALL_METHOD || opcode == CALL_FUNCTION_KW) {
+            jd->tmpstack_size = Py_MAX(jd->tmpstack_size, (size_t)oparg + 2);
+        }
+    }
+    if (jd->tmpstack_size > 0) {
+        jd->tmpstack = ir_alloca(jd->func, ir_type_pyobject_ptr, CONSTANT_SIZET(jd->tmpstack_size));
+    } else {
+        jd->tmpstack = NULL;
+    }
+
     /* Common function signatures */
     jd->sig_o = CREATE_SIGNATURE(ir_type_pyobject_ptr);
     jd->sig_oo = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr);
