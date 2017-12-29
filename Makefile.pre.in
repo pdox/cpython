@@ -330,7 +330,7 @@ PYTHON_OBJS=	\
                 Python/ir_lower.o \
                 Python/ir_libjit.o \
                 Python/ir_llvm.o \
-		Python/jit.o \
+		Python/jeval.o \
 		Python/jit_trampoline.o \
 		Python/compile.o \
 		Python/codecs.o \

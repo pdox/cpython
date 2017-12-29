@@ -41,73 +41,8 @@ typedef struct _EvalContext {
 #endif
 } EvalContext;
 
-/* JIT data attached to a PyCodeObject */
 struct _frame;
 typedef struct _frame PyFrameObject;
-struct _JITData;
-typedef struct _JITData JITData;
-typedef void (*PyJITEntryFunction)(EvalContext *ctx, PyFrameObject *f, PyObject **sp);
-typedef void (*PyJITEmitHandlerFunction)(JITData *jd, int opcode);
-
-typedef struct move_entry {
-    ir_label from_label;
-    ir_label to_label;
-    struct move_entry *next;
-} move_entry;
-
-typedef struct _JITData {
-    PyJITEntryFunction entry;
-    PyCodeObject *co; /* Borrowed reference */
-    ir_context context;
-    ir_func func;
-
-    ir_value rv;
-    ir_value ctx;
-    ir_value f;
-    ir_value stack_pointer;
-    ir_value fastlocals;
-    ir_value retval; /* corresponding to ctx->retval */
-    ir_value why;    /* corresponding to ctx->why */
-
-    /* Temporary stack is used for call_function */
-    ir_value tmpstack;
-    size_t tmpstack_size;
-
-    /* Some common function signature types:
-
-       v = void
-       i = int
-       z = Py_ssize_t
-       o = PyObject*
-       p = PyObject**
-
-       The first letter indicates the return type.
-    */
-    ir_type sig_o;
-    ir_type sig_oo;
-    ir_type sig_ooo;
-    ir_type sig_oooo;
-    ir_type sig_io;
-    ir_type sig_ioo;
-    ir_type sig_iooo;
-
-    /* Blocks that will be moved to the end */
-    move_entry *move_entry_list;
-
-    /* Private storage for each opcode */
-    void *priv[256];
-
-    /* Code to emit exceptional handlers for each opcode */
-    PyJITEmitHandlerFunction handlers[256];
-
-    ir_label j_special[JIT_RC_EXIT + 1];
-    ir_label j_special_internal[JIT_RC_EXIT + 1];
-    ir_label jmptab[1];
-} JITData;
-
-typedef void (*PyJITEmitterFunction)(JITData *jd, int next_instr_index, int opcode, int oparg);
-typedef void (*PyJITSpecialEmitterFunction)(JITData *jd);
-
 int _PyJIT_Execute(EvalContext *ctx, PyFrameObject *f, PyObject **sp);
 
 /* Opaque type */
