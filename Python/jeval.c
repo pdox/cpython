@@ -3298,6 +3298,7 @@ _PyJIT_CodeGen(PyCodeObject *co) {
     if (Py_JITDebugFlag > 0) {
         ir_func_dump_file(jd->func, "/tmp/before.ir", "Before lowering");
     }
+    //ir_verify_stack_effect(jd->func);
     ir_lower(jd->func, jd->fastlocals, jd->stack_pointer, NULL);
     if (Py_JITDebugFlag > 0) {
         ir_func_dump_file(jd->func, "/tmp/after.ir", "After lowering");

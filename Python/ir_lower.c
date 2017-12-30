@@ -145,3 +145,75 @@ void ir_lower(ir_func func, ir_value fastlocals, ir_value stack_pointer, ir_labe
         }
     }
 }
+
+void ir_verify_stack_effect(ir_func func) {
+    ir_block b;
+    ir_instr _instr;
+    ssize_t num_blocks = ir_func_largest_block_index(func);
+    int *stack_at_entry = (int*)malloc(num_blocks * sizeof(int));
+    for (int i = 0; i < num_blocks; i++) {
+        stack_at_entry[i] = -1;
+    }
+    stack_at_entry[func->first_block->index] = 0;
+
+    int errors = 0;
+    int rerun = 1;
+    while (rerun) {
+        rerun = 0;
+        for (b = func->first_block; b != NULL; b = b->next) {
+            int entry_stack_level = stack_at_entry[b->index];
+            if (entry_stack_level == -1) {
+                rerun = 1;
+                continue;
+            }
+            int block_stack_effect = 0;
+            for (_instr = b->first_instr; _instr != NULL; _instr = _instr->next) {
+                if (_instr->opcode == ir_opcode_stackadj) {
+                    IR_INSTR_AS(stackadj)
+                    block_stack_effect += instr->amount;
+                } else if (ir_instr_opcode_is_flow_control(_instr->opcode)) {
+                    break;
+                }
+            }
+            assert(_instr != NULL && _instr->next == NULL);
+            int exit_stack_level = entry_stack_level + block_stack_effect;
+#define SET_AND_CHECK(_label) do { \
+    ir_label label = (_label); \
+    size_t index = label->block->index; \
+    if (stack_at_entry[index] == -1) { \
+        stack_at_entry[index] = exit_stack_level; \
+    } \
+    if (stack_at_entry[index] != exit_stack_level) { \
+        fprintf(stderr, "Stack level mismatch at branch from %p to %s (%p)\n", b, label->name ? label->name : "<NULL>", label->block); \
+        errors = 1; \
+    } \
+} while (0)
+            switch (_instr->opcode) {
+            case ir_opcode_branch: {
+                IR_INSTR_AS(branch)
+                SET_AND_CHECK(instr->target);
+                break;
+            }
+            case ir_opcode_branch_cond: {
+                IR_INSTR_AS(branch_cond)
+                SET_AND_CHECK(instr->if_true);
+                SET_AND_CHECK(instr->if_false);
+                break;
+            }
+            case ir_opcode_jumptable: {
+                IR_INSTR_AS(jumptable)
+                for (size_t i = 0; i < instr->table_size; i++) {
+                    SET_AND_CHECK(instr->table[i]);
+                }
+                break;
+            }
+            case ir_opcode_ret: {
+                assert(exit_stack_level == 0);
+            }
+            default: abort(); /* Unhandled flow control */
+            } // switch
+#undef SET_AND_CHECK
+        }
+    }
+    assert(!errors);
+}
