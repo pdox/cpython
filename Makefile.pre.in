@@ -322,7 +322,6 @@ PYTHON_OBJS=	\
 		Python/ast.o \
 		Python/bltinmodule.o \
 		Python/ceval.o \
-		Python/ceval_jit.o \
                 Python/ir_context.o \
                 Python/ir_func.o \
                 Python/ir_type_system.o \
@@ -889,14 +888,6 @@ regen-opcode-targets:
 	$(PYTHON_FOR_REGEN) $(srcdir)/Python/makeopcodetargets.py \
 		$(srcdir)/Python/opcode_targets.h.new
 	$(UPDATE_FILE) $(srcdir)/Python/opcode_targets.h $(srcdir)/Python/opcode_targets.h.new
-
-.PHONY: regen-opcode-function-table
-regen-opcode-function-table:
-	# Regenerate Python/opcode_function_table.h from Lib/opcode.py
-	# using Python/makeopcodefunctiontable.py
-	$(PYTHON_FOR_REGEN) $(srcdir)/Python/makeopcodefunctiontable.py \
-		$(srcdir)/Python/opcode_function_table.h.new
-	$(UPDATE_FILE) $(srcdir)/Python/opcode_function_table.h $(srcdir)/Python/opcode_function_table.h.new
 
 .PHONY: regen-opcode-emitter-table
 regen-opcode-emitter-table:

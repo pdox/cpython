@@ -1,10 +1,10 @@
+#if 0
+
 #include "Python.h"
 #include "internal/jit.h"
 #include "jit.h"
 
 #include "jit_macros.h"
-
-#if 0
 
 extern int Py_JITFlag;
 extern int Py_JITDebugFlag;

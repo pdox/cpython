@@ -10,17 +10,11 @@ extern "C" {
 #define JIT_RC_FAST_BLOCK_END  3
 #define JIT_RC_ERROR           4
 #define JIT_RC_UNWIND_CLEANUP  5
-#define JIT_RC_NEXT_OPCODE     6
-#define JIT_RC_EXIT            7
+#define JIT_RC_EXIT            6
 // EXIT needs to be the highest value
 
 typedef struct _EvalContext {
-    int next_instr_index;  /* Next instruction index. Only used during jumps and special instructions. */
-    PyObject **stack_pointer; /* Only used for subroutine calls */
-
-    int why; /* Reason for block stack unwind */
     PyObject **fastlocals, **freevars;
-    PyObject *retval;            /* Return value */
     PyThreadState *tstate;
     PyCodeObject *co;
 
@@ -43,7 +37,7 @@ typedef struct _EvalContext {
 
 struct _frame;
 typedef struct _frame PyFrameObject;
-int _PyJIT_Execute(EvalContext *ctx, PyFrameObject *f, PyObject **sp);
+PyObject* _PyJIT_Execute(EvalContext *ctx, PyFrameObject *f, PyObject **sp);
 
 /* Opaque type */
 struct _pyjit_callsite;

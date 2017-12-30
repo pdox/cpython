@@ -172,7 +172,15 @@ void _emit_instr(jit_function_t jit_func,
     case ir_opcode_get_index_ptr: {
         IR_INSTR_AS(get_index_ptr)
         ir_type base_type = ir_pointer_base(ir_typeof(instr->ptr));
-        SET_DEST(jit_insn_load_elem_address(jit_func, JIT_VALUE(instr->ptr), JIT_VALUE(instr->index), JIT_TYPE(base_type)));
+        if (base_type->kind == ir_type_kind_struct) {
+            jit_value_t offset = jit_insn_mul(
+                jit_func,
+                JIT_VALUE(instr->index),
+                jit_value_create_nint_constant(jit_func, jit_type_void_ptr, base_type->size));
+            SET_DEST(jit_insn_add(jit_func, JIT_VALUE(instr->ptr), offset));
+        } else {
+            SET_DEST(jit_insn_load_elem_address(jit_func, JIT_VALUE(instr->ptr), JIT_VALUE(instr->index), JIT_TYPE(base_type)));
+        }
         break;
     }
     case ir_opcode_load: {

@@ -1,4 +1,6 @@
 #include "Python.h"
+#include "Include/frameobject.h"
+#include "Include/internal/jit.h"
 #include "ir.h"
 #include <stdio.h>
 
@@ -15,7 +17,7 @@ ir_type_t _ir_type_void = {"void", ir_type_kind_void, 0, 0, {NULL}};
 
 /* Define struct types */
 #define PROCESS(name, ctype) \
-    ir_type_t _ir_type_ ## name = {#ctype, ir_type_kind_struct, 0, 0, {NULL}};
+    ir_type_t _ir_type_ ## name = {#ctype, ir_type_kind_struct, sizeof(ctype), 0, {NULL}};
 #include "ir_struct_types.def"
 #undef PROCESS
 

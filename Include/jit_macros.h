@@ -76,6 +76,7 @@
 
 #define BITWISE_AND(v1, v2) ir_and(jd->func, (v1), (v2))
 #define BITWISE_OR(v1, v2)  ir_or(jd->func, (v1), (v2))
+#define BITWISE_XOR(v1, v2) ir_xor(jd->func, (v1), (v2))
 
 /* Logical AND with no short-circuiting */
 #define LOGICAL_AND_NSC(v1, v2) ir_and(jd->func, ir_bool(jd->func, (v1)), ir_bool(jd->func, (v2)))

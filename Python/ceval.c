@@ -5173,7 +5173,6 @@ maybe_dtrace_line(PyFrameObject *frame,
 
 PyObject*
 PyJIT_EvalFrame(PyFrameObject *f) {
-    int rc;
     EvalContext _ctx;
     EvalContext *ctx = &_ctx;
     PyObject **stack_pointer;
@@ -5182,7 +5181,6 @@ PyJIT_EvalFrame(PyFrameObject *f) {
     ctx->lastopcode = 0;
 #endif
     ctx->tstate = PyThreadState_GET();
-    ctx->retval = NULL;
     ctx->instr_ub = -1;
     ctx->instr_lb = 0;
     ctx->instr_prev = -1;
@@ -5204,16 +5202,10 @@ PyJIT_EvalFrame(PyFrameObject *f) {
     ctx->first_instr = (_Py_CODEUNIT *) PyBytes_AS_STRING(ctx->co->co_code);
     assert(f->f_lasti >= -1);
 
-    ctx->next_instr_index = 0;
-    if (f->f_lasti >= 0) {
-        assert(f->f_lasti % sizeof(_Py_CODEUNIT) == 0);
-        ctx->next_instr_index = f->f_lasti / sizeof(_Py_CODEUNIT) + 1;
-    }
     stack_pointer = f->f_stacktop;
     assert(stack_pointer != NULL);
     f->f_stacktop = NULL;       /* remains NULL unless yield suspends frame */
     f->f_executing = 1;
-    ctx->why = WHY_NOT;
 
 #ifdef Py_DEBUG
     /* PyEval_EvalFrameEx() must not be called with an exception set,
@@ -5222,14 +5214,9 @@ PyJIT_EvalFrame(PyFrameObject *f) {
     assert(!PyErr_Occurred());
 #endif
 
-    rc = _PyJIT_Execute(ctx, f, stack_pointer);
-    if (rc != 0) {
-        /* TODO: Handle gracefully */
-        abort();
-    }
-
+    PyObject *retval = _PyJIT_Execute(ctx, f, stack_pointer);
     Py_LeaveRecursiveCall();
     f->f_executing = 0;
     ctx->tstate->frame = f->f_back;
-    return _Py_CheckFunctionResult(NULL, ctx->retval, "PyEval_EvalFrameEx");
+    return _Py_CheckFunctionResult(NULL, retval, "PyEval_EvalFrameEx");
 }
