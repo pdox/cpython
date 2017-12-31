@@ -45,7 +45,7 @@ typedef struct {
     void *co_zombieframe;     /* for optimization only (see frameobject.c) */
     PyObject *co_weakreflist;   /* to support weakrefs to code objects */
 
-    void *co_jit_data;          /* JIT data, if available */
+    void *co_jit_handle;        /* PyJIT handle, if compiled */
     /* Scratch space for extra data relating to the code object.
        Type is a void* to keep the format private in codeobject.c to force
        people to go through the proper APIs. */

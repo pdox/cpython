@@ -541,9 +541,6 @@ PyEval_EvalFrame(PyFrameObject *f) {
     return PyEval_EvalFrameEx(f, 0);
 }
 
-extern int Py_JITFlag;
-extern char *Py_JITDebugFunc;
-
 PyObject *
 PyEval_EvalFrameEx(PyFrameObject *f, int throwflag)
 {
@@ -551,7 +548,7 @@ PyEval_EvalFrameEx(PyFrameObject *f, int throwflag)
     if (Py_JITFlag != 0) {
         if (!Py_JITDebugFunc || strcmp(Py_JITDebugFunc, PyUnicode_AsUTF8(f->f_code->co_name)) == 0) {
             if (!tstate->use_tracing && !_Py_TracingPossible && !PyDTrace_LINE_ENABLED() && !throwflag) {
-                return PyJIT_EvalFrame(f);
+                return PyJIT_Execute(f);
             }
         }
     }
@@ -5167,56 +5164,4 @@ maybe_dtrace_line(PyFrameObject *frame,
         PyDTrace_LINE(co_filename, co_name, line);
     }
     *instr_prev = frame->f_lasti;
-}
-
-#include "internal/jit.h"
-
-PyObject*
-PyJIT_EvalFrame(PyFrameObject *f) {
-    EvalContext _ctx;
-    EvalContext *ctx = &_ctx;
-    PyObject **stack_pointer;
-
-#ifdef DXPAIRS
-    ctx->lastopcode = 0;
-#endif
-    ctx->tstate = PyThreadState_GET();
-    ctx->instr_ub = -1;
-    ctx->instr_lb = 0;
-    ctx->instr_prev = -1;
-
-    /* push frame */
-    if (Py_EnterRecursiveCall(""))
-        return NULL;
-
-    ctx->tstate->frame = f;
-    ctx->co = f->f_code;
-    ctx->names = ctx->co->co_names;
-    ctx->consts = ctx->co->co_consts;
-    ctx->fastlocals = f->f_localsplus;
-    ctx->freevars = f->f_localsplus + ctx->co->co_nlocals;
-    assert(PyBytes_Check(ctx->co->co_code));
-    assert(PyBytes_GET_SIZE(ctx->co->co_code) <= INT_MAX);
-    assert(PyBytes_GET_SIZE(ctx->co->co_code) % sizeof(_Py_CODEUNIT) == 0);
-    assert(_Py_IS_ALIGNED(PyBytes_AS_STRING(ctx->co->co_code), sizeof(_Py_CODEUNIT)));
-    ctx->first_instr = (_Py_CODEUNIT *) PyBytes_AS_STRING(ctx->co->co_code);
-    assert(f->f_lasti >= -1);
-
-    stack_pointer = f->f_stacktop;
-    assert(stack_pointer != NULL);
-    f->f_stacktop = NULL;       /* remains NULL unless yield suspends frame */
-    f->f_executing = 1;
-
-#ifdef Py_DEBUG
-    /* PyEval_EvalFrameEx() must not be called with an exception set,
-       because it can clear it (directly or indirectly) and so the
-       caller loses its exception */
-    assert(!PyErr_Occurred());
-#endif
-
-    PyObject *retval = _PyJIT_Execute(ctx, f, stack_pointer);
-    Py_LeaveRecursiveCall();
-    f->f_executing = 0;
-    ctx->tstate->frame = f->f_back;
-    return _Py_CheckFunctionResult(NULL, retval, "PyEval_EvalFrameEx");
 }

@@ -6,7 +6,6 @@
 PROCESS(pyobject, PyObject)
 PROCESS(pytypeobject, PyTypeObject)
 PROCESS(pyframeobject, PyFrameObject)
-PROCESS(evalcontext, EvalContext)
 PROCESS(pythreadstate, PyThreadState)
 PROCESS(pyasyncmethods, PyAsyncMethods)
 PROCESS(pyvarobject, PyVarObject)

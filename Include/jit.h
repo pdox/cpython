@@ -5,8 +5,36 @@ extern "C" {
 #endif
 
 /* Interface exposed to the rest of cPython */
+extern int Py_JITFlag;
+extern int Py_JITDebugFlag;
+extern char *Py_JITDebugFunc;
 
-PyAPI_FUNC(PyObject*) PyJIT_EvalFrame(PyFrameObject *f);
+typedef PyObject* (*PyJIT_EntryPoint)(PyFrameObject *f);
+
+typedef struct {
+    void *context;
+    PyJIT_EntryPoint entry;
+} PyJIT_Handle;
+
+extern int _PyJIT_CodeGen(PyCodeObject *co);
+
+static inline PyObject*
+PyJIT_Execute(PyFrameObject *f) {
+    PyCodeObject *co = f->f_code;
+    if (co->co_jit_handle == NULL) {
+        if (Py_JITDebugFlag > 0) {
+            fprintf(stderr, "Entering CodeGen for %s from %s (f->f_code == %p)\n",
+                PyUnicode_AsUTF8(co->co_name),
+                PyUnicode_AsUTF8(co->co_filename),
+                co);
+        }
+        if (_PyJIT_CodeGen(co) != 0) {
+            abort();
+        }
+        assert(co->co_jit_handle != NULL);
+    }
+    return ((PyJIT_Handle*)co->co_jit_handle)->entry(f);
+}
 
 #ifdef __cplusplus
 }

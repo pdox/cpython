@@ -7,20 +7,15 @@
 #include "opcode.h"
 #include "frameobject.h"
 #include "ir.h"
-#include "internal/jit.h"
 #include "Include/internal/ceval.h"
 #include "Include/internal/pystate.h"
 
 #include "Include/jit_macros.h"
 #include "Include/jit.h"
 
-extern int Py_JITFlag;
-extern int Py_JITDebugFlag;
-
 /* JIT data attached to a PyCodeObject */
 struct _JITData;
 typedef struct _JITData JITData;
-typedef PyObject* (*PyJITEntryFunction)(EvalContext *ctx, PyFrameObject *f, PyObject **sp);
 typedef void (*PyJITEmitHandlerFunction)(JITData *jd, int opcode);
 typedef void (*PyJITEmitterFunction)(JITData *jd, int next_instr_index, int opcode, int oparg);
 typedef void (*PyJITSpecialEmitterFunction)(JITData *jd);
@@ -32,13 +27,11 @@ typedef struct move_entry {
 } move_entry;
 
 typedef struct _JITData {
-    PyJITEntryFunction entry;
     PyCodeObject *co; /* Borrowed reference */
     ir_context context;
     ir_func func;
 
-    ir_value rv;
-    ir_value ctx;
+    ir_value tstate;
     ir_value f;
     ir_value next_instr_index; /* only set during special control flow */
     ir_value stack_pointer;
@@ -77,31 +70,24 @@ typedef struct _JITData {
     /* Private storage for each opcode */
     int skip_eval_breaker;
 
-    ir_label j_special[JIT_RC_EXIT + 1];
-    ir_label j_special_internal[JIT_RC_EXIT + 1];
+    ir_label jump;
+    ir_label jump_int;
+    ir_label error;
+    ir_label error_int;
+    ir_label fast_block_end;
+    ir_label fast_block_end_int;
+    ir_label exit;
+
     ir_label jmptab[1];
 } JITData;
 
-#define BRANCH_SPECIAL(name)     BRANCH(jd->j_special[JIT_RC_ ## name])
-#define BRANCH_SPECIAL_INTERNAL(name)     BRANCH(jd->j_special_internal[JIT_RC_ ## name])
-
-/* TODO: Deprecate these */
-#define BRANCH_SPECIAL_IF(val, name) \
-    BRANCH_IF((val), jd->j_special[JIT_RC_ ## name], IR_UNLIKELY)
-#define BRANCH_SPECIAL_IF_NOT(val, name) \
-    BRANCH_IF_NOT((val), jd->j_special[JIT_RC_ ## name], IR_UNLIKELY)
-
-#define GOTO_ERROR()             BRANCH_SPECIAL(ERROR)
-#define GOTO_ERROR_IF(val)       BRANCH_SPECIAL_IF((val), ERROR)
-#define GOTO_ERROR_IF_NOT(val)   BRANCH_SPECIAL_IF_NOT((val), ERROR)
-
-#define GOTO_FAST_YIELD()        BRANCH_SPECIAL(FAST_YIELD)
-#define GOTO_FAST_BLOCK_END()    BRANCH_SPECIAL(FAST_BLOCK_END)
-
-#define GOTO_FAST_YIELD_INTERNAL()        BRANCH_SPECIAL_INTERNAL(FAST_YIELD)
-#define GOTO_FAST_BLOCK_END_INTERNAL()    BRANCH_SPECIAL_INTERNAL(FAST_BLOCK_END)
-#define GOTO_UNWIND_CLEANUP_INTERNAL()    BRANCH_SPECIAL_INTERNAL(UNWIND_CLEANUP)
-#define GOTO_EXIT_EVAL_FRAME_INTERNAL()   BRANCH_SPECIAL_INTERNAL(EXIT);
+#define GOTO_ERROR()             BRANCH(jd->error)
+#define GOTO_ERROR_IF(val)       BRANCH_IF((val), jd->error, IR_UNLIKELY)
+#define GOTO_ERROR_IF_NOT(val)   BRANCH_IF_NOT((val), jd->error, IR_UNLIKELY)
+#define GOTO_FAST_YIELD()        BRANCH(jd->exit)
+#define GOTO_FAST_BLOCK_END()    BRANCH(jd->fast_block_end)
+#define GOTO_FAST_YIELD_INTERNAL()        BRANCH(jd->exit)
+#define GOTO_FAST_BLOCK_END_INTERNAL()    BRANCH(jd->fast_block_end_int)
 
 #define MOVE_TO_END(_from_label, _to_label) do { \
     move_entry *m = PyMem_RawMalloc(sizeof(move_entry)); \
@@ -367,14 +353,11 @@ int do_raise(PyObject *, PyObject *);
 /* Set next_instr_index based on the current f_lasti. This must be done
    when a regular instruction jumps to a special handler. */
 #define COMPUTE_NEXT_INSTR_INDEX() do { \
-        /* ctx->next_instr_index = (f->f_lasti / 2) + 1 */ \
+        /* next_instr_index = (f->f_lasti / 2) + 1 */ \
         JVALUE f_lasti_val = LOAD_FIELD(jd->f, PyFrameObject, f_lasti, ir_type_int); \
         JVALUE computed_next_instr_index = ADD(SHIFT_RIGHT(f_lasti_val, CONSTANT_INT(1)), CONSTANT_INT(1)); \
         SET_VALUE(jd->next_instr_index, computed_next_instr_index); \
 } while (0)
-
-#define EMITTER_FOR_SPECIAL(op) \
-    void _PyJIT_EMIT_SPECIAL_##op (JITData *jd)
 
 #define GETLOCAL(i)  ir_getlocal(jd->func, (i))
 
@@ -407,7 +390,7 @@ int do_raise(PyObject *, PyObject *);
 #define JUMPTO_VAL(x) do { \
     JVALUE index = ir_div(jd->func, CAST(ir_type_int, (x)), CONSTANT_INT(sizeof(_Py_CODEUNIT))); \
     SET_VALUE(jd->next_instr_index, index); \
-    BRANCH(jd->j_special_internal[JIT_RC_JUMP]); \
+    BRANCH(jd->jump_int); \
 } while (0)
 
 #define INSTR_OFFSET()  (next_instr_index * sizeof(_Py_CODEUNIT))
@@ -497,25 +480,6 @@ void _pop_block(JITData *jd) {
 
 /* --- BEGIN EMITTERS --- */
 
-EMITTER_FOR_SPECIAL(FLOW) {
-    // Index 0 is special, it dispatches to the other handlers based on 'rv'
-    ir_jumptable(jd->func, jd->rv, jd->j_special_internal, JIT_RC_EXIT + 1);
-}
-
-EMITTER_FOR_SPECIAL(JUMP) {
-    Py_ssize_t inst_count = PyBytes_GET_SIZE(jd->co->co_code)/sizeof(_Py_CODEUNIT);
-    ir_jumptable(jd->func, jd->next_instr_index, jd->jmptab, inst_count);
-}
-
-EMITTER_FOR_SPECIAL(ERROR) {
-    IR_ASSERT(CMP_EQ(jd->why, CONSTANT_INT(WHY_NOT)));
-    SET_WHY(WHY_EXCEPTION);
-    IR_ASSERT(IR_PyErr_Occurred());
-    JTYPE sig = CREATE_SIGNATURE(ir_type_int, ir_type_pyframeobject_ptr);
-    CALL_NATIVE(sig, PyTraceBack_Here, jd->f);
-    GOTO_FAST_BLOCK_END_INTERNAL();
-}
-
 void _fast_block_end_helper(PyFrameObject *f, PyTryBlock *b, int stack_level, PyObject **stack) {
     PyObject *exc, *val, *tb;
     _PyErr_StackItem *exc_info = PyThreadState_GET()->exc_info;
@@ -555,7 +519,7 @@ void _fast_block_end_helper(PyFrameObject *f, PyTryBlock *b, int stack_level, Py
     stack[5] = exc;
 }
 
-EMITTER_FOR_SPECIAL(FAST_BLOCK_END) {
+void _emit_fast_block_end(JITData *jd) {
     IR_LABEL_INIT(loop_start);
     IR_LABEL_INIT(loop_done);
     IR_ASSERT(CMP_NE(jd->why, CONSTANT_INT(WHY_NOT)));
@@ -628,29 +592,23 @@ EMITTER_FOR_SPECIAL(FAST_BLOCK_END) {
     BRANCH(loop_start);
     LABEL(loop_done);
 
-    IF(CMP_NE(jd->why, CONSTANT_INT(WHY_NOT)), IR_SEMILIKELY, {
-        GOTO_UNWIND_CLEANUP_INTERNAL();
+    IF(CMP_EQ(jd->why, CONSTANT_INT(WHY_NOT)), IR_SEMILIKELY, {
+        IR_ASSERT(NOTBOOL(IR_PyErr_Occurred()));
+        CHECK_EVAL_BREAKER_SPECIAL();
+        BRANCH(jd->jump);
     });
-    IR_ASSERT(NOTBOOL(IR_PyErr_Occurred()));
-    CHECK_EVAL_BREAKER_SPECIAL();
-    BRANCH(jd->j_special_internal[JIT_RC_JUMP]);
-}
 
-EMITTER_FOR_SPECIAL(FAST_YIELD) {
-    GOTO_EXIT_EVAL_FRAME_INTERNAL();
-}
-
-EMITTER_FOR_SPECIAL(UNWIND_CLEANUP) {
-    IR_LABEL_INIT(loop_start);
-    IR_LABEL_INIT(loop_done);
+    /* Final unwind cleanup */
+    IR_LABEL_INIT(unwind_start);
+    IR_LABEL_INIT(unwind_done);
     IR_ASSERT(CMP_NE(jd->why, CONSTANT_INT(WHY_YIELD)));
 
     /* Pop remaining stack entries. */
-    LABEL(loop_start);
-    BRANCH_IF(EMPTY(), loop_done, IR_SOMETIMES);
+    LABEL(unwind_start);
+    BRANCH_IF(EMPTY(), unwind_done, IR_SOMETIMES);
     XDECREF(POP());
-    BRANCH(loop_start);
-    LABEL(loop_done);
+    BRANCH(unwind_start);
+    LABEL(unwind_done);
 
     IF(CMP_NE(jd->why, CONSTANT_INT(WHY_RETURN)), IR_SEMILIKELY, {
         SET_VALUE(jd->retval, CONSTANT_PYOBJ(NULL));
@@ -658,10 +616,6 @@ EMITTER_FOR_SPECIAL(UNWIND_CLEANUP) {
 
     IR_ASSERT(BITWISE_XOR(BOOL(jd->retval), BOOL(IR_PyErr_Occurred())));
     GOTO_FAST_YIELD_INTERNAL();
-}
-
-EMITTER_FOR_SPECIAL(EXIT) {
-    ir_ret(jd->func, jd->retval);
 }
 
 EMITTER_FOR(INVALID_OPCODE) {
@@ -677,12 +631,6 @@ EMITTER_FOR(NOP) {
 #define UNBOUNDLOCAL_ERROR_MSG \
     "local variable '%.200s' referenced before assignment"
 
-void handle_load_fast_unbound_local(EvalContext *ctx, int opcode, int oparg) {
-    format_exc_check_arg(PyExc_UnboundLocalError,
-                         UNBOUNDLOCAL_ERROR_MSG,
-                         PyTuple_GetItem(ctx->co->co_varnames, oparg));
-}
-
 EMITTER_FOR(LOAD_FAST) {
     JLABEL load_fast_error = JLABEL_INIT("load_fast_error");
     JVALUE v = GETLOCAL(oparg);
@@ -691,9 +639,10 @@ EMITTER_FOR(LOAD_FAST) {
     PUSH(v);
 
     BEGIN_REMOTE_SECTION(load_fast_error);
-    JTYPE sig = CREATE_SIGNATURE(ir_type_void, ir_type_evalcontext_ptr, ir_type_int, ir_type_int);
-    CALL_NATIVE(sig, handle_load_fast_unbound_local, jd->ctx, CONSTANT_INT(opcode), CONSTANT_INT(oparg));
-    BRANCH(jd->j_special[JIT_RC_ERROR]);
+    CALL_format_exc_check_arg(PyExc_UnboundLocalError,
+                              UNBOUNDLOCAL_ERROR_MSG,
+                              PyTuple_GetItem(jd->co->co_varnames, oparg));
+    GOTO_ERROR();
     END_REMOTE_SECTION(load_fast_error);
 }
 
@@ -779,7 +728,7 @@ EMITTER_FOR(UNARY_NOT) {
     /* Handle err < 0 case */
     BEGIN_REMOTE_SECTION(real_error);
     STACKADJ(-1);
-    BRANCH(jd->j_special[JIT_RC_ERROR]);
+    GOTO_ERROR();
     END_REMOTE_SECTION(real_error);
 }
 
@@ -985,7 +934,7 @@ EMITTER_FOR(RAISE_VARARGS) {
         JVALUE ret = CALL_NATIVE(jd->sig_ioo, do_raise, exc, cause);
         BRANCH_IF_NOT(ret, fin, IR_UNLIKELY);
         SET_WHY(WHY_EXCEPTION);
-        BRANCH_SPECIAL(FAST_BLOCK_END);
+        GOTO_FAST_BLOCK_END();
     }
     default:
         CALL_PyErr_SetString(PyExc_SystemError, "bad RAISE_VARARGS oparg");
@@ -998,7 +947,7 @@ EMITTER_FOR(RAISE_VARARGS) {
 EMITTER_FOR(RETURN_VALUE) {
     SET_RETVAL(POP());
     SET_WHY(WHY_RETURN);
-    BRANCH_SPECIAL(FAST_BLOCK_END);
+    GOTO_FAST_BLOCK_END();
 }
 
 EMITTER_FOR(GET_AITER) {
@@ -1026,7 +975,7 @@ EMITTER_FOR(GET_AITER) {
 
     BEGIN_REMOTE_SECTION(iter_is_null);
     SET_TOP(CONSTANT_PYOBJ(NULL));
-    BRANCH(jd->j_special[JIT_RC_ERROR]);
+    GOTO_ERROR();
     END_REMOTE_SECTION(iter_is_null);
 
     BEGIN_REMOTE_SECTION(getter_is_null);
@@ -1037,7 +986,7 @@ EMITTER_FOR(GET_AITER) {
         "__aiter__ method, got %.100s",
         LOAD_FIELD(obj_type, PyTypeObject, tp_name, ir_type_char_ptr));
     DECREF(obj);
-    BRANCH(jd->j_special[JIT_RC_ERROR]);
+    GOTO_ERROR();
     END_REMOTE_SECTION(getter_is_null);
 
     BEGIN_REMOTE_SECTION(invalid_iter);
@@ -1048,7 +997,7 @@ EMITTER_FOR(GET_AITER) {
         "that does not implement __anext__: %.100s",
         LOAD_FIELD(iter_type, PyTypeObject, tp_name, ir_type_char_ptr));
     DECREF(iter);
-    BRANCH(jd->j_special[JIT_RC_ERROR]);
+    GOTO_ERROR();
     END_REMOTE_SECTION(invalid_iter);
 }
 
@@ -2636,7 +2585,7 @@ EMITTER_FOR(FOR_ITER) {
 
 EMITTER_FOR(BREAK_LOOP) {
     SET_WHY(WHY_BREAK);
-    BRANCH_SPECIAL(FAST_BLOCK_END);
+    GOTO_FAST_BLOCK_END();
 }
 
 EMITTER_FOR(CONTINUE_LOOP) {
@@ -2645,7 +2594,7 @@ EMITTER_FOR(CONTINUE_LOOP) {
     SET_RETVAL(tmp);
     GOTO_ERROR_IF_NOT(tmp);
     SET_WHY(WHY_CONTINUE);
-    BRANCH_SPECIAL(FAST_BLOCK_END);
+    GOTO_FAST_BLOCK_END();
 }
 
 /* SETUP_* are the same */
@@ -3123,19 +3072,14 @@ EMITTER_FOR(EXTENDED_ARG) {
 #include "opcode_emitter_table.h"
 #include "opcode_names.h"
 
-PyJITSpecialEmitterFunction special_emitter_table[] = {
-        _PyJIT_EMIT_SPECIAL_FLOW,
-        _PyJIT_EMIT_SPECIAL_JUMP,
-        _PyJIT_EMIT_SPECIAL_FAST_YIELD,
-        _PyJIT_EMIT_SPECIAL_FAST_BLOCK_END,
-        _PyJIT_EMIT_SPECIAL_ERROR,
-        _PyJIT_EMIT_SPECIAL_UNWIND_CLEANUP,
-        _PyJIT_EMIT_SPECIAL_EXIT
-};
-
 static void
 translate_bytecode(JITData *jd, PyCodeObject *co)
 {
+    assert(PyBytes_Check(co->co_code));
+    assert(PyBytes_GET_SIZE(co->co_code) <= INT_MAX);
+    assert(PyBytes_GET_SIZE(co->co_code) % sizeof(_Py_CODEUNIT) == 0);
+    assert(_Py_IS_ALIGNED(PyBytes_AS_STRING(co->co_code), sizeof(_Py_CODEUNIT)));
+
     int is_gen = (co->co_flags & (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR));
     _Py_CODEUNIT *code = (_Py_CODEUNIT*)PyBytes_AS_STRING(co->co_code);
     Py_ssize_t i;
@@ -3175,30 +3119,49 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     jd->sig_ioo = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
     jd->sig_iooo = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
 
-    jd->rv = ir_value_new(jd->func, ir_type_int);
-
-    /* libjit miscompiles if you don't set a value before using it.
-       Since we can't guarantee block ordering, be on the safe side and assign it on entry.
-       TODO: Fix this during compilation, in ir_libjit.c.
-     */
-    ir_set_value(jd->func, jd->rv, ir_constant_int(jd->func, 0, NULL));
-
-    /* Arguments: ctx, f, sp */
-    jd->ctx = ir_func_get_argument(jd->func, 0);
-    jd->f = ir_func_get_argument(jd->func, 1);
-    jd->stack_pointer = ir_func_get_argument(jd->func, 2);
-    jd->next_instr_index = ir_value_new(jd->func, ir_type_int);
-    ir_set_value(jd->func, jd->next_instr_index, CONSTANT_INT(0));
-    jd->fastlocals = ir_get_element_ptr(jd->func, jd->f, offsetof(PyFrameObject, f_localsplus), ir_type_pyobject_ptr, "f_localsplus");
+    /* Arguments: f */
+    jd->f = ir_func_get_argument(jd->func, 0);
     jd->retval = ir_value_new(jd->func, ir_type_pyobject_ptr);
-    SET_RETVAL(CONSTANT_PYOBJ(NULL));
     jd->why = ir_value_new(jd->func, ir_type_int);
-    ir_set_value(jd->func, jd->why, CONSTANT_INT(WHY_NOT));
+    jd->stack_pointer = ir_value_new(jd->func, ir_type_pyobject_ptr_ptr);
+    jd->next_instr_index = ir_value_new(jd->func, ir_type_int);
     jd->move_entry_list = NULL;
 
+    /* Initialization sequence */
+    jd->tstate = IR_PyThreadState_GET();
+    jd->fastlocals = ir_get_element_ptr(jd->func, jd->f, offsetof(PyFrameObject, f_localsplus), ir_type_pyobject_ptr, "f_localsplus");
 
+    /* push frame */
+    IF(IR_Py_EnterRecursiveCall(""), IR_UNLIKELY, {
+        ir_ret(jd->func, CONSTANT_PYOBJ(NULL));
+    });
+    STORE_FIELD(jd->tstate, PyThreadState, frame, ir_type_pyframeobject_ptr, jd->f);
+
+    /* Setup stack pointer */
+    SET_VALUE(jd->stack_pointer, LOAD_FIELD(jd->f, PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr));
+    IR_ASSERT(BOOL(jd->stack_pointer));
+    STORE_FIELD(jd->f, PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr, CONSTANT_PTR(ir_type_pyobject_ptr_ptr, NULL));
+
+    /* Setup retval and why */
+    SET_RETVAL(CONSTANT_PYOBJ(NULL));
+    SET_WHY(WHY_NOT);
+
+    /* Set f_executing = 1 */
+    STORE_FIELD(jd->f, PyFrameObject, f_executing, ir_type_char, CONSTANT_CHAR(1));
+
+    /* assert f->f_lasti >= -1 */
+    IR_ASSERT(CMP_GE(LOAD_FIELD(jd->f, PyFrameObject, f_lasti, ir_type_int), CONSTANT_INT(-1)));
+
+#ifdef Py_DEBUG
+    /* PyEval_EvalFrameEx() must not be called with an exception set,
+       because it can clear it (directly or indirectly) and so the
+       caller loses its exception */
+    IR_ASSERT(NOTBOOL(IR_PyErr_Occurred()));
+#endif
+
+    /* Begin function body */
     if (is_gen) {
-        /* For generator, jump to the next instruction */
+        /* For generator, jump to the next instruction as determined by f_lasti */
         COMPUTE_NEXT_INSTR_INDEX();
         CHECK_EVAL_BREAKER_SPECIAL();
         ir_jumptable(jd->func, jd->next_instr_index, jd->jmptab, inst_count);
@@ -3231,20 +3194,46 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
 
         ir_label_pop_prefix(jd->func);
     }
+
+    /* Shouldn't ever fall through to this area */
     CRASH();
 
-    /* Special sections. While in a special section, ctx->next_instr_index must
+    /* Special sections. While in a special section, jd->next_instr_index must
        be valid and point to the next instruction to execute (for next dispatch).
        There are two entrypoints to each special section. One for instructions,
        and one for coming from another special section.
      */
-    for (i = 0; i <= JIT_RC_EXIT; i++) {
-        LABEL(jd->j_special[i]);
-        COMPUTE_NEXT_INSTR_INDEX();
-        LABEL(jd->j_special_internal[i]);
-        special_emitter_table[i](jd);
-        BRANCH(jd->j_special_internal[JIT_RC_JUMP]);
-    }
+
+    LABEL(jd->jump);
+    COMPUTE_NEXT_INSTR_INDEX();
+
+    LABEL(jd->jump_int);
+    ir_jumptable(jd->func, jd->next_instr_index, jd->jmptab, inst_count);
+
+    LABEL(jd->error);
+    COMPUTE_NEXT_INSTR_INDEX();
+
+    LABEL(jd->error_int);
+    IR_ASSERT(CMP_EQ(jd->why, CONSTANT_INT(WHY_NOT)));
+    SET_WHY(WHY_EXCEPTION);
+    IR_ASSERT(IR_PyErr_Occurred());
+    JTYPE sig = CREATE_SIGNATURE(ir_type_int, ir_type_pyframeobject_ptr);
+    CALL_NATIVE(sig, PyTraceBack_Here, jd->f);
+    GOTO_FAST_BLOCK_END_INTERNAL();
+
+    LABEL(jd->fast_block_end);
+    COMPUTE_NEXT_INSTR_INDEX();
+
+    LABEL(jd->fast_block_end_int);
+    _emit_fast_block_end(jd);
+
+    LABEL(jd->exit);
+    IR_Py_LeaveRecursiveCall();
+    STORE_FIELD(jd->f, PyFrameObject, f_executing, ir_type_char, CONSTANT_CHAR(0));
+    JVALUE f_back = LOAD_FIELD(jd->f, PyFrameObject, f_back, ir_type_pyframeobject_ptr);
+    STORE_FIELD(jd->tstate, PyThreadState, frame, ir_type_pyframeobject_ptr, f_back);
+    JVALUE ret = IR_Py_CheckFunctionResult(NULL, jd->retval, "PyJIT_EvalFrame");
+    ir_ret(jd->func, ret);
 
     /* Move extra sections to end */
     {
@@ -3260,7 +3249,7 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     }
 }
 
-static int
+int
 _PyJIT_CodeGen(PyCodeObject *co) {
     char namebuf[32];
     ir_type sig;
@@ -3276,17 +3265,18 @@ _PyJIT_CodeGen(PyCodeObject *co) {
     jd->co = co;
     jd->context = ir_context_new();
 
-    /* func(ctx, f, sp); */
-    ir_type argtypes[] = { ir_type_evalcontext_ptr, ir_type_pyframeobject_ptr, ir_type_pyobject_ptr_ptr };
+    /* func(f); */
+    ir_type argtypes[] = { ir_type_pyframeobject_ptr };
     sig = ir_create_function_type(jd->context, ir_type_pyobject_ptr, sizeof(argtypes)/sizeof(argtypes[0]), argtypes);
     jd->func = ir_func_new(jd->context, sig);
 
-    for (i = 0; i <= JIT_RC_EXIT; i++) {
-        sprintf(namebuf, "j_special_%ld", (long)i);
-        jd->j_special[i] = ir_label_new(jd->func, namebuf);
-        sprintf(namebuf, "j_special_internal_%ld", (long)i);
-        jd->j_special_internal[i] = ir_label_new(jd->func, namebuf);
-    }
+    jd->jump = ir_label_new(jd->func, "jump");
+    jd->jump_int = ir_label_new(jd->func, "jump_int");
+    jd->error = ir_label_new(jd->func, "error");
+    jd->error_int = ir_label_new(jd->func, "error_int");
+    jd->fast_block_end = ir_label_new(jd->func, "fast_block_end");
+    jd->fast_block_end_int = ir_label_new(jd->func, "fast_block_end_int");
+    jd->exit = ir_label_new(jd->func, "exit");
     for (i = 0; i < inst_count; i++) {
         sprintf(namebuf, "inst_%ld", (long)i);
         jd->jmptab[i] = ir_label_new(jd->func, namebuf);
@@ -3306,35 +3296,17 @@ _PyJIT_CodeGen(PyCodeObject *co) {
 #ifdef IR_DEBUG
     ir_func_verify(jd->func);
 #endif
+    PyJIT_Handle *handle = PyMem_RawMalloc(sizeof(PyJIT_Handle));
+    handle->context = NULL; /* TODO: need to keep track of this */
     if (Py_JITFlag == 1) {
-        jd->entry = (PyJITEntryFunction)ir_libjit_compile(jd->func);
+        handle->entry = (PyJIT_EntryPoint)ir_libjit_compile(jd->func);
     } else if (Py_JITFlag == 2) {
-        jd->entry = (PyJITEntryFunction)ir_llvm_compile(jd->func);
+        handle->entry = (PyJIT_EntryPoint)ir_llvm_compile(jd->func);
     } else {
         Py_FatalError("invalid PYJIT value");
     }
     ir_context_destroy(jd->context);
-    jd->context = NULL;
-    jd->func = NULL;
-    co->co_jit_data = jd;
+    PyMem_RawFree(jd);
+    co->co_jit_handle = handle;
     return 0;
-}
-
-PyObject*
-_PyJIT_Execute(EvalContext *ctx, PyFrameObject *f, PyObject **sp) {
-    JITData *jd;
-    if (ctx->co->co_jit_data == NULL) {
-        if (Py_JITDebugFlag > 0) {
-            fprintf(stderr, "Entering CodeGen for %s from %s (f->f_code == %p)\n",
-                PyUnicode_AsUTF8(f->f_code->co_name),
-                PyUnicode_AsUTF8(f->f_code->co_filename),
-                f->f_code);
-        }
-        if (_PyJIT_CodeGen(ctx->co) != 0) {
-            abort();
-        }
-        assert(ctx->co->co_jit_data != NULL);
-    }
-    jd = (JITData*)ctx->co->co_jit_data;
-    return jd->entry(ctx, f, sp);
 }

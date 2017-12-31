@@ -300,3 +300,92 @@ static void _do_assert(int expr, const char *expr_str) {
 /* Unlike PyErr_Occurred, this assumes tstate != NULL */
 #define IR_PyErr_Occurred() \
     LOAD_FIELD(IR_PyThreadState_GET(), PyThreadState, curexc_type, ir_type_void_ptr)
+
+#define IR_LOAD_Py_CheckRecursionLimit() \
+    LOAD(CONSTANT_INT_PTR(&_Py_CheckRecursionLimit))
+
+#ifdef Py_DEBUG
+#  define IF_PY_DEBUG(x)    x
+#else
+#  define IF_PY_DEBUG(x)
+#endif
+
+#define IR_Py_CheckFunctionResult(_callable, _resultval, _where) ({ \
+    PyObject *callable = (_callable); \
+    ir_value resultval = (_resultval); \
+    const char *where = (_where); \
+    ir_value ret = ir_value_new(jd->func, ir_type_pyobject_ptr); \
+    ir_value err_occurred = BOOL(IR_PyErr_Occurred()); \
+    SET_VALUE(ret, resultval); \
+    IF_ELSE(NOTBOOL(resultval), IR_SOMETIMES, { \
+        IF_NOT(err_occurred, IR_UNLIKELY, { \
+            if (callable) { \
+                CALL_PyErr_Format(PyExc_SystemError, \
+                             "%R returned NULL without setting an error", \
+                             CONSTANT_PYOBJ(callable)); \
+            } else { \
+                CALL_PyErr_Format(PyExc_SystemError, \
+                             "%s returned NULL without setting an error", \
+                             CONSTANT_CHAR_PTR((char*)where)); \
+            } \
+            /* Ensure that the bug is caught in debug mode */ \
+            IF_PY_DEBUG(CALL_Py_FatalError("a function returned NULL without setting an error");) \
+        }); \
+    }, /* else */ { \
+        IF(err_occurred, IR_UNLIKELY, { \
+            DECREF(resultval); \
+            SET_VALUE(ret, CONSTANT_PYOBJ(NULL)); \
+            if (callable) { \
+                CALL_PyErr_FormatFromCause(PyExc_SystemError, \
+                        "%R returned a result with an error set", \
+                        CONSTANT_PYOBJ(callable)); \
+            } \
+            else { \
+                CALL_PyErr_FormatFromCause(PyExc_SystemError, \
+                        "%s returned a result with an error set", \
+                        CONSTANT_CHAR_PTR((char*)where)); \
+            } \
+            /* Ensure that the bug is caught in debug mode */ \
+            IF_PY_DEBUG(CALL_Py_FatalError("a function returned a result with an error set");) \
+        }); \
+    }); \
+    ret; \
+})
+
+#define IR_Py_EnterRecursiveCall(msg) ({ \
+    IR_LABEL_INIT(recursion_ok); \
+    JVALUE tstate = IR_PyThreadState_GET(); \
+    JVALUE curdepth = LOAD_FIELD(tstate, PyThreadState, recursion_depth, ir_type_int); \
+    JVALUE newdepth = ADD(curdepth, CONSTANT_INT(1)); \
+    STORE_FIELD(tstate, PyThreadState, recursion_depth, ir_type_int, newdepth); \
+    JVALUE recursion_limit = IR_LOAD_Py_CheckRecursionLimit(); \
+    JVALUE ret = JVALUE_CREATE(ir_type_int); \
+    SET_VALUE(ret, CONSTANT_INT(0)); \
+    BRANCH_IF_NOT(CMP_GT(newdepth, recursion_limit), recursion_ok, IR_LIKELY); \
+    JTYPE _sig = CREATE_SIGNATURE(ir_type_int, ir_type_char_ptr); \
+    SET_VALUE(ret, CALL_NATIVE(_sig, _Py_CheckRecursiveCall, CONSTANT_CHAR_PTR(msg))); \
+    LABEL(recursion_ok); \
+    ret; \
+})
+
+/* Who designed this?!?! */
+#define IR_Py_RecursionLimitLowerWaterMark(limitval) ({ \
+    JVALUE _limit = (limitval); \
+    JVALUE ret = \
+        TERNARY(CMP_GT(_limit, CONSTANT_INT(200)), \
+                SUBTRACT(_limit, CONSTANT_INT(50)), \
+                MULTIPLY(CONSTANT_INT(3), SHIFT_RIGHT(_limit, CONSTANT_INT(2)))); \
+    ret; \
+})
+
+#define IR_Py_LeaveRecursiveCall() do { \
+    IR_LABEL_INIT(skip_overflowed_clear); \
+    JVALUE tstate = IR_PyThreadState_GET(); \
+    JVALUE curdepth = LOAD_FIELD(tstate, PyThreadState, recursion_depth, ir_type_int); \
+    JVALUE newdepth = SUBTRACT(curdepth, CONSTANT_INT(1)); \
+    STORE_FIELD(tstate, PyThreadState, recursion_depth, ir_type_int, newdepth); \
+    JVALUE watermark = IR_Py_RecursionLimitLowerWaterMark(IR_LOAD_Py_CheckRecursionLimit()); \
+    BRANCH_IF_NOT(CMP_LT(newdepth, watermark), skip_overflowed_clear, IR_UNLIKELY); \
+    STORE_FIELD(tstate, PyThreadState, overflowed, ir_type_char, CONSTANT_CHAR(0)); \
+    LABEL(skip_overflowed_clear); \
+} while (0)
