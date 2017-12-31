@@ -106,7 +106,7 @@ private:
   ModuleSharedPtr_t optimizeModule(ModuleSharedPtr_t module) {
     using namespace llvm;
 
-    if (Py_JITDebugFlag > 0) {
+    if (Py_JITDebugFlag > 2) {
         llvm_module_to_file(*module, "/tmp/before.ll");
         std::cout << "Module dumped to /tmp/before.ll" << std::endl;
     }
@@ -136,7 +136,7 @@ private:
       outs() << *module.get() << "\n\n";
     });
 
-    if (Py_JITDebugFlag > 0) {
+    if (Py_JITDebugFlag > 2) {
         llvm_module_to_file(*module, "/tmp/after.ll");
         std::cout << "Module dumped to /tmp/after.ll" << std::endl;
     }

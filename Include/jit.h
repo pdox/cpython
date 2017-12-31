@@ -8,6 +8,7 @@ extern "C" {
 extern int Py_JITFlag;
 extern int Py_JITDebugFlag;
 extern char *Py_JITDebugFunc;
+extern char *Py_JITDebugFile;
 
 typedef PyObject* (*PyJIT_EntryPoint)(PyFrameObject *f);
 

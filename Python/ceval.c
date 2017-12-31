@@ -547,8 +547,10 @@ PyEval_EvalFrameEx(PyFrameObject *f, int throwflag)
     PyThreadState *tstate = PyThreadState_GET();
     if (Py_JITFlag != 0) {
         if (!Py_JITDebugFunc || strcmp(Py_JITDebugFunc, PyUnicode_AsUTF8(f->f_code->co_name)) == 0) {
-            if (!tstate->use_tracing && !_Py_TracingPossible && !PyDTrace_LINE_ENABLED() && !throwflag) {
-                return PyJIT_Execute(f);
+            if (!Py_JITDebugFile || strstr(PyUnicode_AsUTF8(f->f_code->co_filename), Py_JITDebugFile) != NULL) {
+                if (!tstate->use_tracing && !_Py_TracingPossible && !PyDTrace_LINE_ENABLED() && !throwflag) {
+                    return PyJIT_Execute(f);
+                }
             }
         }
     }
