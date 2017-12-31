@@ -50,8 +50,8 @@ typedef enum {
     /* set register. Not present in SSA form */
     ir_opcode_set_value,   // existing_value = value;
 
-    /* labels */
-    ir_opcode_label_here,  // label:
+    /* user-specified debug info */
+    ir_opcode_info_here,   // info (string) embedded at a specific point
 
     /* flow control */
     ir_opcode_branch,      // goto label;
@@ -557,17 +557,17 @@ void ir_set_value(ir_func func, ir_value dest, ir_value src) {
 }
 
 /*****************************************************************************/
-IR_PROTOTYPE(ir_instr_label_here)
-struct ir_instr_label_here_t {
+IR_PROTOTYPE(ir_instr_info_here)
+struct ir_instr_info_here_t {
     IR_INSTR_HEADER
-    ir_label label;
+    const char *info;
 };
 
 static inline
-void ir_label_here(ir_func func, ir_label label) {
-    IR_INSTR_ALLOC(ir_instr_label_here, 0);
-    instr->label = label;
-    IR_INSTR_INSERT(ir_opcode_label_here, ir_type_void);
+void ir_info_here(ir_func func, const char *info) {
+    IR_INSTR_ALLOC(ir_instr_info_here, 0);
+    instr->info = _ir_strdup(func->context, info);
+    IR_INSTR_INSERT(ir_opcode_info_here, ir_type_void);
 }
 
 /*****************************************************************************/
@@ -583,6 +583,27 @@ void ir_branch(ir_func func, ir_label target) {
     IR_INSTR_ALLOC(ir_instr_branch, 0)
     instr->target = target;
     IR_INSTR_INSERT(ir_opcode_branch, ir_type_void);
+}
+
+static inline
+void ir_label_here(ir_func func, ir_label label) {
+    assert(label->block == NULL);
+
+    if (func->current_block &&
+        func->current_block->current_instr != NULL) {
+        /* We're inserting a label into the middle of a block. Start a new one.
+           Leave the existing block with an unconditional branch.
+         */
+        ir_branch(func, label);
+    }
+    if (func->current_block == NULL) {
+        _ir_func_new_block(func);
+    }
+    ir_block b = func->current_block;
+    assert(b->current_instr == NULL);
+    label->block = b;
+    label->next = b->labels;
+    b->labels = label;
 }
 
 /*****************************************************************************/
@@ -812,20 +833,7 @@ char* ir_instr_repr(char *p, ir_instr _instr);
  */
 static inline
 void _ir_instr_insert(ir_func func, ir_instr _instr) {
-    int is_label = (_instr->opcode == ir_opcode_label_here);
     int terminates_block = ir_instr_opcode_is_flow_control(_instr->opcode);
-
-    if (is_label &&
-        func->current_block &&
-        func->current_block->current_instr != NULL &&
-        func->current_block->current_instr->opcode != ir_opcode_label_here) {
-        /* We're inserting a label into the middle of a block. Start a new one.
-           Leave the existing block with an unconditional branch.
-           Note that this is recursive!
-         */
-        IR_INSTR_AS(label_here);
-        ir_branch(func, instr->label);
-    }
     if (terminates_block &&
         func->current_block &&
         func->current_block->current_instr != func->current_block->last_instr) {
@@ -857,11 +865,6 @@ void _ir_instr_insert(ir_func func, ir_instr _instr) {
         _ir_func_new_block(func);
     }
     ir_block b = func->current_block;
-    if (is_label) {
-        IR_INSTR_AS(label_here);
-        assert(instr->label->block == NULL);
-        instr->label->block = b;
-    }
     IR_LL_INSERT_AFTER(b->first_instr, b->last_instr, b->current_instr, _instr);
     b->current_instr = _instr;
     if (terminates_block) {

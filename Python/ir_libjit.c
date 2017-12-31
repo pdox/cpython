@@ -246,7 +246,7 @@ void _emit_instr(jit_function_t jit_func,
         jit_insn_store(jit_func, jit_values[_instr->dest->index], JIT_VALUE(instr->src));
         break;
     }
-    case ir_opcode_label_here: {
+    case ir_opcode_info_here: {
         break;
     }
     case ir_opcode_branch: {

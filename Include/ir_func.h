@@ -18,6 +18,7 @@ struct ir_block_t {
     ir_instr first_instr;
     ir_instr current_instr; /* NULL means 'insert before first_instr' */
     ir_instr last_instr;
+    ir_label labels; /* Linked list of labels */
     size_t index;
 };
 
@@ -72,6 +73,7 @@ void _ir_func_new_block(ir_func func) {
     block->first_instr = NULL;
     block->current_instr = NULL;
     block->last_instr = NULL;
+    block->labels = NULL;
     block->index = (func->next_block_index)++;
     ir_block after = func->current_block ? func->current_block : func->last_block;
     IR_LL_INSERT_AFTER(func->first_block, func->last_block, after, block);
@@ -153,7 +155,7 @@ void ir_label_pop_prefix(ir_func func) {
 static inline
 char* ir_label_repr(char *p, ir_label label) {
     if (label->name) {
-        p += sprintf(p, "%p(%s)", label->block, label->name);
+        p += sprintf(p, "%s(%p)", label->name, label->block);
     } else {
         p += sprintf(p, "%p", label->block);
     }

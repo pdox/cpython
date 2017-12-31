@@ -46,7 +46,7 @@ _ir_opcode_repr(ir_opcode opcode) {
     OPCODE_CASE(constant)
     OPCODE_CASE(cast)
     OPCODE_CASE(set_value)
-    OPCODE_CASE(label_here)
+    OPCODE_CASE(info_here)
     OPCODE_CASE(branch)
     OPCODE_CASE(branch_cond)
     OPCODE_CASE(jumptable)
@@ -211,13 +211,9 @@ ir_instr_repr(char *p, ir_instr _instr) {
             p = ir_value_repr(p, instr->value);
             break;
         }
-        case ir_opcode_label_here: {
-            IR_INSTR_AS(label_here)
-            if (instr->label->name) {
-                p += sprintf(p, "%s:", instr->label->name);
-            } else {
-                p += sprintf(p, "unnamed label @ %p", instr->label);
-            }
+        case ir_opcode_info_here: {
+            IR_INSTR_AS(info_here)
+            p += sprintf(p, "%s:", instr->info);
             break;
         }
         case ir_opcode_branch: {

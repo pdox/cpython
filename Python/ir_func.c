@@ -62,17 +62,10 @@ void ir_func_verify(ir_func func) {
 
         ir_instr _instr;
         ir_instr _instr_prev = NULL;
-        int in_label_section = 1;
         int found_branch = 0;
         for (_instr = b->first_instr; _instr != NULL; _instr = _instr->next) {
             assert(_instr_prev == _instr->prev);
             _instr_prev = _instr;
-
-            if (_instr->opcode == ir_opcode_label_here) {
-                assert(in_label_section == 1 && "Label inside block");
-            } else {
-                in_label_section = 0;
-            }
 
             if (ir_instr_opcode_is_flow_control(_instr->opcode)) {
                 assert(_instr == b->last_instr &&
@@ -137,6 +130,11 @@ char* ir_func_dump(ir_func func) {
 
     ir_block b;
     for (b = func->first_block; b != NULL; b = b->next) {
+        ir_label label = b->labels;
+        while (label != NULL) {
+            p += sprintf(p, "%s:\n", label->name ? label->name : "<unnamed_label>");
+            label = label->next;
+        }
         p = ir_block_repr(p, b);
         p += sprintf(p, "\n");
     }
