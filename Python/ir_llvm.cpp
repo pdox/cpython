@@ -273,7 +273,18 @@ void _emit_instr(
     }
     case ir_opcode_get_index_ptr: {
         IR_INSTR_AS(get_index_ptr)
-        SET_DEST(builder.CreateGEP(LLVM_VALUE(instr->ptr), LLVM_VALUE(instr->index)));
+        ir_type base_type = ir_pointer_base(ir_typeof(instr->ptr));
+        if (base_type->kind == ir_type_kind_struct) {
+            llvm::Value *casted_ptr = builder.CreateBitCast(LLVM_VALUE(instr->ptr), builder.getInt8PtrTy());
+            llvm::Value *offset = builder.CreateMul(
+                builder.CreateZExt(LLVM_VALUE(instr->index), builder.getInt64Ty()),
+                builder.getInt64(base_type->size));
+            llvm::Value *offset_ptr = builder.CreateGEP(casted_ptr, offset);
+            llvm::Value *new_ptr = builder.CreateBitCast(offset_ptr, LLVM_TYPE(ir_typeof(_instr->dest)));
+            SET_DEST(new_ptr);
+        } else {
+            SET_DEST(builder.CreateGEP(LLVM_VALUE(instr->ptr), LLVM_VALUE(instr->index)));
+        }
         break;
     }
     case ir_opcode_load: {
