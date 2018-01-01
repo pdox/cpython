@@ -67,9 +67,6 @@ typedef struct _JITData {
     /* Blocks that will be moved to the end */
     move_entry *move_entry_list;
 
-    /* Private storage for each opcode */
-    int skip_eval_breaker;
-
     ir_label jump;
     ir_label jump_int;
     ir_label error;
@@ -85,9 +82,17 @@ typedef struct _JITData {
 #define GOTO_ERROR_IF(val)       BRANCH_IF((val), jd->error, IR_UNLIKELY)
 #define GOTO_ERROR_IF_NOT(val)   BRANCH_IF_NOT((val), jd->error, IR_UNLIKELY)
 #define GOTO_FAST_YIELD()        BRANCH(jd->exit)
-#define GOTO_FAST_BLOCK_END()    BRANCH(jd->fast_block_end)
-#define GOTO_FAST_YIELD_INTERNAL()        BRANCH(jd->exit)
-#define GOTO_FAST_BLOCK_END_INTERNAL()    BRANCH(jd->fast_block_end_int)
+#define GOTO_EXIT()              BRANCH(jd->exit)
+
+#define GOTO_FAST_BLOCK_END(why) do { \
+    SET_WHY(why); \
+    BRANCH(jd->fast_block_end); \
+} while (0)
+
+#define GOTO_FAST_BLOCK_END_INTERNAL(why) do { \
+    SET_WHY(why); \
+    BRANCH(jd->fast_block_end_int); \
+} while (0)
 
 #define MOVE_TO_END(_from_label, _to_label) do { \
     move_entry *m = PyMem_RawMalloc(sizeof(move_entry)); \
@@ -615,7 +620,7 @@ void _emit_fast_block_end(JITData *jd) {
     });
 
     IR_ASSERT(BITWISE_XOR(BOOL(jd->retval), BOOL(IR_PyErr_Occurred())));
-    GOTO_FAST_YIELD_INTERNAL();
+    GOTO_EXIT();
 }
 
 EMITTER_FOR(INVALID_OPCODE) {
@@ -933,8 +938,7 @@ EMITTER_FOR(RAISE_VARARGS) {
     case 0: {
         JVALUE ret = CALL_NATIVE(jd->sig_ioo, do_raise, exc, cause);
         BRANCH_IF_NOT(ret, fin, IR_UNLIKELY);
-        SET_WHY(WHY_EXCEPTION);
-        GOTO_FAST_BLOCK_END();
+        GOTO_FAST_BLOCK_END(WHY_EXCEPTION);
     }
     default:
         CALL_PyErr_SetString(PyExc_SystemError, "bad RAISE_VARARGS oparg");
@@ -946,8 +950,7 @@ EMITTER_FOR(RAISE_VARARGS) {
 
 EMITTER_FOR(RETURN_VALUE) {
     SET_RETVAL(POP());
-    SET_WHY(WHY_RETURN);
-    GOTO_FAST_BLOCK_END();
+    GOTO_FAST_BLOCK_END(WHY_RETURN);
 }
 
 EMITTER_FOR(GET_AITER) {
@@ -1138,7 +1141,6 @@ EMITTER_FOR(YIELD_FROM) {
 
     /* Receiver remains on the stack, retval is value to be yielded */
     STORE_FIELD(jd->f, PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr, STACKPTR());
-    SET_WHY(WHY_YIELD);
     assert(next_instr_index >= 2);
     STORE_FIELD(jd->f, PyFrameObject, f_lasti, ir_type_int, CONSTANT_INT(2*(next_instr_index - 2)));
     GOTO_FAST_YIELD();
@@ -1164,7 +1166,6 @@ EMITTER_FOR(YIELD_VALUE) {
         GOTO_ERROR_IF_NOT(wrapped);
     }
     STORE_FIELD(jd->f, PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr, STACKPTR());
-    SET_WHY(WHY_YIELD);
     GOTO_FAST_YIELD();
 }
 
@@ -1188,40 +1189,38 @@ EMITTER_FOR(POP_BLOCK) {
 
 EMITTER_FOR(END_FINALLY) {
     IR_LABEL_INIT(try_case_2);
-    IR_LABEL_INIT(skip_retval);
-    IR_LABEL_INIT(skip_silenced);
     IR_LABEL_INIT(try_case_3);
     IR_LABEL_INIT(normal_exit);
     IR_LABEL_INIT(dispatch);
 
     JVALUE status = POP();
+
+    /* Case 1: status is PyLong (WHY code) */
     BRANCH_IF_NOT(IR_PyLong_Check(status), try_case_2, IR_SEMILIKELY);
-    /* Case 1: PyLong_Check(status) is true */
     JTYPE sig1 = CREATE_SIGNATURE(ir_type_long, ir_type_pyobject_ptr);
-    SET_VALUE(jd->why, CAST(ir_type_int, CALL_NATIVE(sig1, PyLong_AsLong, status)));
-    IR_ASSERT(
-        LOGICAL_AND_NSC(
-            CMP_NE(jd->why, CONSTANT_INT(WHY_YIELD)),
-            CMP_NE(jd->why, CONSTANT_INT(WHY_EXCEPTION))));
-    JVALUE is_return = CMP_EQ(jd->why, CONSTANT_INT(WHY_RETURN));
-    JVALUE is_continue = CMP_EQ(jd->why, CONSTANT_INT(WHY_CONTINUE));
-    BRANCH_IF_NOT(LOGICAL_OR(is_return, is_continue), skip_retval, IR_SEMILIKELY);
-    SET_VALUE(jd->retval, POP());
-    LABEL(skip_retval);
-    BRANCH_IF_NOT(CMP_EQ(jd->why, CONSTANT_INT(WHY_SILENCED)), skip_silenced, IR_LIKELY);
-    /* An exception was silenced by 'with', we must
-    manually unwind the EXCEPT_HANDLER block which was
-    created when the exception was caught, otherwise
-    the stack will be in an inconsistent state. */
-    {
-        _pop_except(jd);
-        SET_WHY(WHY_NOT);
-        DECREF(status);
-        BRANCH(dispatch);
-    }
-    LABEL(skip_silenced);
+    JVALUE why = CAST(ir_type_int, CALL_NATIVE(sig1, PyLong_AsLong, status));
     DECREF(status);
-    GOTO_FAST_BLOCK_END();
+
+    IF(CMP_EQ(why, CONSTANT_INT(WHY_RETURN)), IR_SEMILIKELY, {
+        SET_VALUE(jd->retval, POP());
+        GOTO_FAST_BLOCK_END(WHY_RETURN);
+    });
+    IF(CMP_EQ(why, CONSTANT_INT(WHY_CONTINUE)), IR_SEMILIKELY, {
+        SET_VALUE(jd->retval, POP());
+        GOTO_FAST_BLOCK_END(WHY_CONTINUE);
+    });
+    IF(CMP_EQ(why, CONSTANT_INT(WHY_BREAK)), IR_SEMILIKELY, {
+        GOTO_FAST_BLOCK_END(WHY_BREAK);
+    });
+    IF(CMP_EQ(why, CONSTANT_INT(WHY_SILENCED)), IR_SEMILIKELY, {
+        /* An exception was silenced by 'with', we must
+        manually unwind the EXCEPT_HANDLER block which was
+        created when the exception was caught, otherwise
+        the stack will be in an inconsistent state. */
+        _pop_except(jd);
+        BRANCH(dispatch);
+    });
+    CRASH(); /* Shouldn't get here. Invalid why value? */
 
     LABEL(try_case_2);
     BRANCH_IF_NOT(IR_PyExceptionClass_Check(status), try_case_3, IR_SEMILIKELY);
@@ -1230,8 +1229,7 @@ EMITTER_FOR(END_FINALLY) {
         JVALUE tb = POP();
         JTYPE sig2 = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
         CALL_NATIVE(sig2, PyErr_Restore, status, exc, tb);
-        SET_WHY(WHY_EXCEPTION);
-        GOTO_FAST_BLOCK_END();
+        GOTO_FAST_BLOCK_END(WHY_EXCEPTION);
     }
 
     LABEL(try_case_3);
@@ -2584,8 +2582,7 @@ EMITTER_FOR(FOR_ITER) {
 }
 
 EMITTER_FOR(BREAK_LOOP) {
-    SET_WHY(WHY_BREAK);
-    GOTO_FAST_BLOCK_END();
+    GOTO_FAST_BLOCK_END(WHY_BREAK);
 }
 
 EMITTER_FOR(CONTINUE_LOOP) {
@@ -2593,8 +2590,7 @@ EMITTER_FOR(CONTINUE_LOOP) {
     JVALUE tmp = CALL_NATIVE(sig, PyLong_FromLong, CONSTANT_LONG(oparg));
     SET_RETVAL(tmp);
     GOTO_ERROR_IF_NOT(tmp);
-    SET_WHY(WHY_CONTINUE);
-    GOTO_FAST_BLOCK_END();
+    GOTO_FAST_BLOCK_END(WHY_CONTINUE);
 }
 
 /* SETUP_* are the same */
@@ -3215,11 +3211,10 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
 
     LABEL(jd->error_int);
     IR_ASSERT(CMP_EQ(jd->why, CONSTANT_INT(WHY_NOT)));
-    SET_WHY(WHY_EXCEPTION);
     IR_ASSERT(IR_PyErr_Occurred());
     JTYPE sig = CREATE_SIGNATURE(ir_type_int, ir_type_pyframeobject_ptr);
     CALL_NATIVE(sig, PyTraceBack_Here, jd->f);
-    GOTO_FAST_BLOCK_END_INTERNAL();
+    GOTO_FAST_BLOCK_END_INTERNAL(WHY_EXCEPTION);
 
     LABEL(jd->fast_block_end);
     COMPUTE_NEXT_INSTR_INDEX();
