@@ -68,6 +68,11 @@ typedef enum {
     ir_opcode_stack_peek,
     ir_opcode_stack_put,
     ir_opcode_check_eval_breaker,
+    ir_opcode_setup_block,
+    ir_opcode_pop_block,
+    ir_opcode_goto_error,   // error (i.e. raise exception)
+    ir_opcode_goto_fbe,     // fast_block_end
+    ir_opcode_yield,        // fast_yield
 } ir_opcode;
 
 #define IR_INSTR_AS(kind) \
@@ -82,7 +87,7 @@ int ir_instr_opcode_is_flow_control(ir_opcode opcode) {
 static inline
 int ir_opcode_is_python_specific(ir_opcode opcode) {
     return opcode >= ir_opcode_getlocal &&
-           opcode <= ir_opcode_check_eval_breaker;
+           opcode <= ir_opcode_yield;
 }
 
 IR_PROTOTYPE(ir_instr)
@@ -824,9 +829,111 @@ void ir_check_eval_breaker(ir_func func, int next_instr_index) {
     IR_INSTR_INSERT(ir_opcode_check_eval_breaker, ir_type_void);
 }
 
-char* ir_instr_repr(char *p, ir_instr _instr);
+/*****************************************************************************/
+
+typedef enum {
+    IR_PYBLOCK_ANY,            /* used for generic POP_BLOCK */
+    IR_PYBLOCK_LOOP,           /* inside loop (any kind) */
+    IR_PYBLOCK_EXCEPT,         /* inside try: of try/except */
+    IR_PYBLOCK_FINALLY_TRY,    /* inside try: of try/finally */
+    IR_PYBLOCK_FINALLY_END,    /* inside finally: */
+    IR_PYBLOCK_EXCEPT_HANDLER, /* inside except: */
+                               /* NOTE: in ceval, this also covers "finally:",
+                                  only when an exception has occurred. For static
+                                  analysis, we do not emit this for finally. */
+} ir_pyblock;
+
+IR_PROTOTYPE(ir_instr_setup_block)
+struct ir_instr_setup_block_t {
+    IR_INSTR_HEADER
+    ir_pyblock b_type;
+    ir_label b_handler;
+};
+
+static inline
+void ir_setup_block(ir_func func, ir_pyblock b_type, ir_label b_handler) {
+    IR_INSTR_ALLOC(ir_instr_setup_block, 0)
+    instr->b_type = b_type;
+    instr->b_handler = b_handler;
+    IR_INSTR_INSERT(ir_opcode_setup_block, ir_type_void);
+}
 
 /*****************************************************************************/
+
+IR_PROTOTYPE(ir_instr_pop_block)
+struct ir_instr_pop_block_t {
+    IR_INSTR_HEADER
+    ir_pyblock b_type;
+};
+
+static inline
+void ir_pop_block(ir_func func, ir_pyblock b_type) {
+    IR_INSTR_ALLOC(ir_instr_pop_block, 0)
+    instr->b_type = b_type;
+    IR_INSTR_INSERT(ir_opcode_pop_block, ir_type_void);
+}
+
+/*****************************************************************************/
+
+IR_PROTOTYPE(ir_instr_goto_error)
+struct ir_instr_goto_error_t {
+    IR_INSTR_HEADER
+    ir_value cond;
+};
+
+static inline
+void ir_goto_error(ir_func func, ir_value cond) {
+    IR_INSTR_ALLOC(ir_instr_goto_error, 0)
+    instr->cond = cond;
+    IR_INSTR_INSERT(ir_opcode_goto_error, ir_type_void);
+}
+
+/*****************************************************************************/
+
+typedef enum {
+    IR_FBE_EXCEPTION,
+    IR_FBE_RETURN,
+    IR_FBE_BREAK,
+    IR_FBE_CONTINUE,
+    IR_FBE_SILENCED,
+} ir_fbe_why;
+
+IR_PROTOTYPE(ir_instr_goto_fbe)
+struct ir_instr_goto_fbe_t {
+    IR_INSTR_HEADER
+    ir_fbe_why why;
+    ir_label continue_target;
+};
+
+static inline
+void ir_goto_fbe(ir_func func, ir_fbe_why why, ir_label continue_target) {
+    IR_INSTR_ALLOC(ir_instr_goto_fbe, 0)
+    instr->why = why;
+    instr->continue_target = continue_target;
+    IR_INSTR_INSERT(ir_opcode_goto_fbe, ir_type_void);
+}
+
+/*****************************************************************************/
+
+IR_PROTOTYPE(ir_instr_yield)
+struct ir_instr_yield_t {
+    IR_INSTR_HEADER
+    ir_value value;
+    ir_label resume_target;
+};
+
+static inline
+void ir_yield(ir_func func, ir_value value, ir_label resume_target) {
+    IR_INSTR_ALLOC(ir_instr_yield, 0)
+    assert(ir_type_equal(ir_typeof(value), ir_type_pyobject_ptr));
+    instr->value = value;
+    instr->resume_target = resume_target;
+    IR_INSTR_INSERT(ir_opcode_yield, ir_type_pyobject_ptr);
+}
+
+/*****************************************************************************/
+char* ir_instr_repr(char *p, ir_instr _instr);
+
 
 /* Insert an insertion into the function. This, along with _ir_instr_remove, should be
    the only code which mutates the instruction linked list.

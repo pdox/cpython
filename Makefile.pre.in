@@ -326,7 +326,6 @@ PYTHON_OBJS=	\
                 Python/ir_func.o \
                 Python/ir_type_system.o \
                 Python/ir_instructions.o \
-                Python/ir_lower.o \
                 Python/ir_libjit.o \
                 Python/ir_llvm.o \
 		Python/jeval.o \
@@ -1031,7 +1030,6 @@ PYTHON_HEADERS= \
                 $(srcdir)/Include/ir_type_system.h \
                 $(srcdir)/Include/ir_func.h \
                 $(srcdir)/Include/ir_instructions.h \
-                $(srcdir)/Include/ir_lower.h \
                 $(srcdir)/Include/SimpleOrcJit.h \
 		pyconfig.h \
 		$(PARSER_HEADERS) \

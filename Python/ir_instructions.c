@@ -59,6 +59,11 @@ _ir_opcode_repr(ir_opcode opcode) {
     OPCODE_CASE(stack_peek)
     OPCODE_CASE(stack_put)
     OPCODE_CASE(check_eval_breaker)
+    OPCODE_CASE(setup_block)
+    OPCODE_CASE(pop_block)
+    OPCODE_CASE(goto_error)
+    OPCODE_CASE(goto_fbe)
+    OPCODE_CASE(yield)
 
 #undef OPCODE_CASE
 
@@ -66,6 +71,30 @@ _ir_opcode_repr(ir_opcode opcode) {
     }
 }
 
+const char *
+_pyblock_id(ir_pyblock b_type) {
+    switch (b_type) {
+    case IR_PYBLOCK_ANY: return "any";
+    case IR_PYBLOCK_LOOP: return "loop";
+    case IR_PYBLOCK_EXCEPT: return "except";
+    case IR_PYBLOCK_FINALLY_TRY: return "finally_try";
+    case IR_PYBLOCK_FINALLY_END: return "finally_end";
+    case IR_PYBLOCK_EXCEPT_HANDLER: return "except_handler";
+    }
+    return "???";
+}
+
+const char *
+_why_id(ir_fbe_why why) {
+    switch (why) {
+    case IR_FBE_EXCEPTION: return "exception";
+    case IR_FBE_RETURN: return "return";
+    case IR_FBE_BREAK: return "break";
+    case IR_FBE_CONTINUE: return "continue";
+    case IR_FBE_SILENCED: return "silenced";
+    }
+    return "???";
+}
 
 char *
 ir_instr_repr(char *p, ir_instr _instr) {
@@ -297,6 +326,39 @@ ir_instr_repr(char *p, ir_instr _instr) {
         }
         case ir_opcode_check_eval_breaker: {
             //IR_INSTR_AS(check_eval_breaker)
+            break;
+        }
+        case ir_opcode_setup_block: {
+            IR_INSTR_AS(setup_block)
+            p += sprintf(p, "%s ", _pyblock_id(instr->b_type));
+            p = ir_label_repr(p, instr->b_handler);
+            break;
+        }
+        case ir_opcode_pop_block: {
+            IR_INSTR_AS(pop_block)
+            p += sprintf(p, "%s", _pyblock_id(instr->b_type));
+            break;
+        }
+        case ir_opcode_goto_error: {
+            IR_INSTR_AS(goto_error)
+            if (instr->cond != NULL) {
+                p = ir_value_repr(p, instr->cond);
+            }
+            break;
+        }
+        case ir_opcode_goto_fbe: {
+            IR_INSTR_AS(goto_fbe)
+            p += sprintf(p, "%s ", _why_id(instr->why));
+            if (instr->continue_target != NULL) {
+                p = ir_label_repr(p, instr->continue_target);
+            }
+            break;
+        }
+        case ir_opcode_yield: {
+            IR_INSTR_AS(yield)
+            p = ir_value_repr(p, instr->value);
+            p += sprintf(p, " ");
+            p = ir_label_repr(p, instr->resume_target);
             break;
         }
     }

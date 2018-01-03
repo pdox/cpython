@@ -63,6 +63,9 @@ typedef struct _JITData {
     ir_type sig_ioo;
     ir_type sig_iooo;
     ir_type sig_ifi; /* for _do_eval_breaker() helper */
+    ir_type dealloc_sig;
+    ir_type blocksetup_sig;
+    ir_type blockpop_sig;
 
     /* Blocks that will be moved to the end */
     move_entry *move_entry_list;
@@ -78,21 +81,47 @@ typedef struct _JITData {
     ir_label jmptab[1];
 } JITData;
 
-#define GOTO_ERROR()             BRANCH(jd->error)
-#define GOTO_ERROR_IF(val)       BRANCH_IF((val), jd->error, IR_UNLIKELY)
-#define GOTO_ERROR_IF_NOT(val)   BRANCH_IF_NOT((val), jd->error, IR_UNLIKELY)
+#define GOTO_ERROR()             ir_goto_error(jd->func, NULL)
+#define GOTO_ERROR_IF(val)       ir_goto_error(jd->func, (val))
+#define GOTO_ERROR_IF_NOT(val)   ir_goto_error(jd->func, NOTBOOL((val)))
 #define GOTO_FAST_YIELD()        BRANCH(jd->exit)
 #define GOTO_EXIT()              BRANCH(jd->exit)
 
-#define GOTO_FAST_BLOCK_END(why) do { \
-    SET_WHY(why); \
-    BRANCH(jd->fast_block_end); \
+#define GOTO_FAST_BLOCK_END(why) \
+    ir_goto_fbe(jd->func, IR_FBE_ ## why, NULL)
+
+#define GOTO_FAST_BLOCK_END_CONTINUE(continue_target) \
+    ir_goto_fbe(jd->func, IR_FBE_CONTINUE, continue_target)
+
+ir_label _instr_index_to_label(JITData *jd, int instr_index) {
+    Py_ssize_t inst_count = PyBytes_GET_SIZE(jd->co->co_code)/sizeof(_Py_CODEUNIT);
+    assert(instr_index >= 0);
+    assert(instr_index < inst_count);
+    return jd->jmptab[instr_index];
+}
+
+int _label_to_instr_index(JITData *jd, ir_label target) {
+    Py_ssize_t inst_count = PyBytes_GET_SIZE(jd->co->co_code)/sizeof(_Py_CODEUNIT);
+    Py_ssize_t i;
+    for (i = 0; i < inst_count; i++) {
+        if (jd->jmptab[i] == target) {
+            break;
+        }
+    }
+    assert(i < inst_count);
+    return i;
+}
+
+#define DO_SETUP_BLOCK(irkind, arg) do { \
+    int _instr_index = (arg) / sizeof(_Py_CODEUNIT); \
+    ir_label _target = _instr_index_to_label(jd, _instr_index); \
+    ir_setup_block(jd->func, IR_PYBLOCK_ ## irkind, _target); \
 } while (0)
 
-#define GOTO_FAST_BLOCK_END_INTERNAL(why) do { \
-    SET_WHY(why); \
-    BRANCH(jd->fast_block_end_int); \
+#define DO_POP_BLOCK(irkind) do { \
+    ir_pop_block(jd->func, IR_PYBLOCK_ ## irkind); \
 } while (0)
+
 
 #define MOVE_TO_END(_from_label, _to_label) do { \
     move_entry *m = PyMem_RawMalloc(sizeof(move_entry)); \
@@ -462,26 +491,6 @@ static void _unwind_except_helper(PyObject *s_type, PyObject *s_value, PyObject 
     JTYPE _sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr); \
     CALL_NATIVE(_sig, _unwind_except_helper, s_type, s_value, s_traceback); \
 } while (0)
-
-static inline
-void _setup_block(JITData *jd, int b_type, int b_handler) {
-    JTYPE sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyframeobject_ptr, ir_type_int, ir_type_int, ir_type_int);
-    CALL_NATIVE(sig, PyFrame_BlockSetup,
-        FRAMEPTR(), CONSTANT_INT(b_type), CONSTANT_INT(b_handler), STACK_LEVEL());
-}
-
-void _pop_except(JITData *jd) {
-    JTYPE sig = CREATE_SIGNATURE(ir_type_pytryblock_ptr, ir_type_pyframeobject_ptr);
-    JVALUE b = CALL_NATIVE(sig, PyFrame_BlockPop, jd->f);
-    IR_ASSERT(CMP_EQ(LOAD_FIELD(b, PyTryBlock, b_type, ir_type_int), CONSTANT_INT(EXCEPT_HANDLER)));
-    UNWIND_EXCEPT_HANDLER(b);
-}
-
-void _pop_block(JITData *jd) {
-    JTYPE sig = CREATE_SIGNATURE(ir_type_pytryblock_ptr, ir_type_pyframeobject_ptr);
-    JVALUE b = CALL_NATIVE(sig, PyFrame_BlockPop, jd->f);
-    UNWIND_BLOCK(b);
-}
 
 /* --- BEGIN EMITTERS --- */
 
@@ -938,7 +947,7 @@ EMITTER_FOR(RAISE_VARARGS) {
     case 0: {
         JVALUE ret = CALL_NATIVE(jd->sig_ioo, do_raise, exc, cause);
         BRANCH_IF_NOT(ret, fin, IR_UNLIKELY);
-        GOTO_FAST_BLOCK_END(WHY_EXCEPTION);
+        GOTO_FAST_BLOCK_END(EXCEPTION);
     }
     default:
         CALL_PyErr_SetString(PyExc_SystemError, "bad RAISE_VARARGS oparg");
@@ -950,7 +959,7 @@ EMITTER_FOR(RAISE_VARARGS) {
 
 EMITTER_FOR(RETURN_VALUE) {
     SET_RETVAL(POP());
-    GOTO_FAST_BLOCK_END(WHY_RETURN);
+    GOTO_FAST_BLOCK_END(RETURN);
 }
 
 EMITTER_FOR(GET_AITER) {
@@ -1170,20 +1179,12 @@ EMITTER_FOR(YIELD_VALUE) {
 }
 
 EMITTER_FOR(POP_EXCEPT) {
-    JLABEL handle_error = JLABEL_INIT("handle_error");
-    _pop_except(jd);
-
+    DO_POP_BLOCK(EXCEPT_HANDLER);
     CHECK_EVAL_BREAKER();
-
-    BEGIN_REMOTE_SECTION(handle_error);
-    CALL_PyErr_SetString(PyExc_SystemError,
-                         "popped block is not an except handler");
-    GOTO_ERROR();
-    END_REMOTE_SECTION(handle_error);
 }
 
 EMITTER_FOR(POP_BLOCK) {
-    _pop_block(jd);
+    DO_POP_BLOCK(ANY);
     CHECK_EVAL_BREAKER();
 }
 
@@ -1203,21 +1204,21 @@ EMITTER_FOR(END_FINALLY) {
 
     IF(CMP_EQ(why, CONSTANT_INT(WHY_RETURN)), IR_SEMILIKELY, {
         SET_VALUE(jd->retval, POP());
-        GOTO_FAST_BLOCK_END(WHY_RETURN);
+        GOTO_FAST_BLOCK_END(RETURN);
     });
     IF(CMP_EQ(why, CONSTANT_INT(WHY_CONTINUE)), IR_SEMILIKELY, {
         SET_VALUE(jd->retval, POP());
-        GOTO_FAST_BLOCK_END(WHY_CONTINUE);
+        GOTO_FAST_BLOCK_END(CONTINUE);
     });
     IF(CMP_EQ(why, CONSTANT_INT(WHY_BREAK)), IR_SEMILIKELY, {
-        GOTO_FAST_BLOCK_END(WHY_BREAK);
+        GOTO_FAST_BLOCK_END(BREAK);
     });
     IF(CMP_EQ(why, CONSTANT_INT(WHY_SILENCED)), IR_SEMILIKELY, {
         /* An exception was silenced by 'with', we must
         manually unwind the EXCEPT_HANDLER block which was
         created when the exception was caught, otherwise
         the stack will be in an inconsistent state. */
-        _pop_except(jd);
+        DO_POP_BLOCK(EXCEPT_HANDLER);
         BRANCH(dispatch);
     });
     CRASH(); /* Shouldn't get here. Invalid why value? */
@@ -1229,7 +1230,7 @@ EMITTER_FOR(END_FINALLY) {
         JVALUE tb = POP();
         JTYPE sig2 = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
         CALL_NATIVE(sig2, PyErr_Restore, status, exc, tb);
-        GOTO_FAST_BLOCK_END(WHY_EXCEPTION);
+        GOTO_FAST_BLOCK_END(EXCEPTION);
     }
 
     LABEL(try_case_3);
@@ -2582,30 +2583,27 @@ EMITTER_FOR(FOR_ITER) {
 }
 
 EMITTER_FOR(BREAK_LOOP) {
-    GOTO_FAST_BLOCK_END(WHY_BREAK);
+    GOTO_FAST_BLOCK_END(BREAK);
 }
 
 EMITTER_FOR(CONTINUE_LOOP) {
-    JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_long);
-    JVALUE tmp = CALL_NATIVE(sig, PyLong_FromLong, CONSTANT_LONG(oparg));
-    SET_RETVAL(tmp);
-    GOTO_ERROR_IF_NOT(tmp);
-    GOTO_FAST_BLOCK_END(WHY_CONTINUE);
+    assert(oparg % sizeof(_Py_CODEUNIT) == 0);
+    ir_label continue_target = _instr_index_to_label(jd, oparg / sizeof(_Py_CODEUNIT));
+    GOTO_FAST_BLOCK_END_CONTINUE(continue_target);
 }
 
-/* SETUP_* are the same */
 EMITTER_FOR(SETUP_LOOP) {
-    _setup_block(jd, SETUP_LOOP, INSTR_OFFSET() + oparg);
+    DO_SETUP_BLOCK(LOOP, INSTR_OFFSET() + oparg);
     CHECK_EVAL_BREAKER();
 }
 
 EMITTER_FOR(SETUP_EXCEPT) {
-    _setup_block(jd, SETUP_EXCEPT, INSTR_OFFSET() + oparg);
+    DO_SETUP_BLOCK(EXCEPT, INSTR_OFFSET() + oparg);
     CHECK_EVAL_BREAKER();
 }
 
 EMITTER_FOR(SETUP_FINALLY) {
-    _setup_block(jd, SETUP_FINALLY, INSTR_OFFSET() + oparg);
+    DO_SETUP_BLOCK(FINALLY_TRY, INSTR_OFFSET() + oparg);
     CHECK_EVAL_BREAKER();
 }
 
@@ -2632,7 +2630,7 @@ EMITTER_FOR(BEFORE_ASYNC_WITH) {
 
 EMITTER_FOR(SETUP_ASYNC_WITH) {
     JVALUE res = POP();
-    _setup_block(jd, SETUP_FINALLY, INSTR_OFFSET() + oparg);
+    DO_SETUP_BLOCK(FINALLY_TRY, INSTR_OFFSET() + oparg);
     PUSH(res);
     CHECK_EVAL_BREAKER();
 }
@@ -2658,7 +2656,7 @@ EMITTER_FOR(SETUP_WITH) {
 
     /* Setup the finally block before pushing the result
        of __enter__ on the stack. */
-    _setup_block(jd, SETUP_FINALLY, INSTR_OFFSET() + oparg);
+    DO_SETUP_BLOCK(FINALLY_TRY, INSTR_OFFSET() + oparg);
     PUSH(res);
     CHECK_EVAL_BREAKER();
 }
@@ -3114,6 +3112,9 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     jd->sig_io = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr);
     jd->sig_ioo = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
     jd->sig_iooo = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
+    jd->dealloc_sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr);
+    jd->blocksetup_sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyframeobject_ptr, ir_type_int, ir_type_int, ir_type_int);
+    jd->blockpop_sig = CREATE_SIGNATURE(ir_type_pytryblock_ptr, ir_type_pyframeobject_ptr);
 
     /* Arguments: f */
     jd->f = ir_func_get_argument(jd->func, 0);
@@ -3214,7 +3215,8 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     IR_ASSERT(IR_PyErr_Occurred());
     JTYPE sig = CREATE_SIGNATURE(ir_type_int, ir_type_pyframeobject_ptr);
     CALL_NATIVE(sig, PyTraceBack_Here, jd->f);
-    GOTO_FAST_BLOCK_END_INTERNAL(WHY_EXCEPTION);
+    SET_WHY(WHY_EXCEPTION);
+    BRANCH(jd->fast_block_end_int);
 
     LABEL(jd->fast_block_end);
     COMPUTE_NEXT_INSTR_INDEX();
@@ -3243,6 +3245,8 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
         jd->move_entry_list = NULL;
     }
 }
+
+void ir_lower(JITData *jd);
 
 int
 _PyJIT_CodeGen(PyCodeObject *co) {
@@ -3284,7 +3288,7 @@ _PyJIT_CodeGen(PyCodeObject *co) {
         ir_func_dump_file(jd->func, "/tmp/before.ir", "Before lowering");
     }
     //ir_verify_stack_effect(jd->func);
-    ir_lower(jd->func, jd->fastlocals, jd->stack_pointer, NULL);
+    ir_lower(jd);
     if (Py_JITDebugFlag > 1) {
         ir_func_dump_file(jd->func, "/tmp/after.ir", "After lowering");
     }
@@ -3304,4 +3308,269 @@ _PyJIT_CodeGen(PyCodeObject *co) {
     PyMem_RawFree(jd);
     co->co_jit_handle = handle;
     return 0;
+}
+
+static inline
+void _ir_lower_one_instr(JITData *jd, ir_func func, ir_instr _instr) {
+    switch (_instr->opcode) {
+    case ir_opcode_getlocal: {
+        IR_INSTR_AS(getlocal)
+        ir_value addr = ir_get_index_ptr(func, jd->fastlocals, ir_constant_int(func, instr->index, NULL));
+        ir_value tmp = ir_load(func, addr);
+        _ir_instr_replace_dest(func, tmp, _instr->dest);
+        break;
+    }
+    case ir_opcode_setlocal: {
+        IR_INSTR_AS(setlocal)
+        ir_value addr = ir_get_index_ptr(func, jd->fastlocals, ir_constant_int(func, instr->index, NULL));
+        ir_store(func, addr, instr->value);
+        break;
+    }
+    case ir_opcode_incref: {
+        IR_INSTR_AS(incref)
+        ir_value obj = instr->obj;
+        ir_label skip_incref = NULL;
+        if (instr->is_xincref) {
+            skip_incref = ir_label_new(func, "x_skip_incref");
+            ir_branch_if_not(func, obj, skip_incref, IR_UNLIKELY);
+        }
+#ifdef Py_REF_DEBUG
+        ir_value total_addr = ir_constant_pyssizet_ptr(func, &_Py_RefTotal, "&_Py_RefTotal");
+        ir_value old_total = ir_load(func, total_addr);
+        ir_value new_total = ir_add(func, old_total, ir_constant_pyssizet(func, 1, NULL));
+        ir_store(func, total_addr, new_total);
+#endif
+        ir_value addr = ir_get_element_ptr(func, obj, offsetof(PyObject, ob_refcnt), ir_type_pyssizet, "ob_refcnt");
+        ir_value old_value = ir_load(func, addr);
+        ir_value new_value = ir_add(func, old_value, ir_constant_pyssizet(func, 1, NULL));
+        ir_store(func, addr, new_value);
+        if (skip_incref) {
+            ir_label_here(func, skip_incref);
+        }
+        break;
+    }
+    case ir_opcode_decref: {
+        IR_INSTR_AS(decref)
+        ir_label skip_dealloc = ir_label_new(func, "decref_skip_dealloc");
+        ir_value obj = instr->obj;
+        if (instr->is_xdecref) {
+            ir_branch_if_not(func, obj, skip_dealloc, IR_UNLIKELY);
+        }
+#ifdef Py_REF_DEBUG
+        ir_value total_addr = ir_constant_pyssizet_ptr(func, &_Py_RefTotal, "&_Py_RefTotal");
+        ir_value old_total = ir_load(func, total_addr);
+        ir_value new_total = ir_sub(func, old_total, ir_constant_pyssizet(func, 1, NULL));
+        ir_store(func, total_addr, new_total);
+#endif
+        ir_value old_value = IR_LOAD_FIELD(func, obj, PyObject, ob_refcnt, ir_type_pyssizet);
+        ir_value new_value = ir_sub(func, old_value, ir_constant_pyssizet(func, 1, NULL));
+        IR_STORE_FIELD(func, obj, PyObject, ob_refcnt, ir_type_pyssizet, new_value);
+        ir_branch_if(func, new_value, skip_dealloc, IR_SEMILIKELY);
+        ir_value dealloc_func;
+#if defined(Py_DEBUG) || defined(Py_TRACE_REFS)
+        dealloc_func = ir_constant_from_ptr(func, jd->dealloc_sig, _Py_Dealloc, "_Py_Dealloc");
+#else
+        ir_value typeobj = IR_LOAD_FIELD(func, obj, PyObject, ob_type, ir_type_pytypeobject_ptr);
+        dealloc_func = IR_LOAD_FIELD(func, typeobj, PyTypeObject, tp_dealloc, jd->dealloc_sig);
+#endif
+        ir_value args[] = {obj};
+        ir_call(func, dealloc_func, 1, args);
+        ir_label_here(func, skip_dealloc);
+        break;
+    }
+    case ir_opcode_stackadj: {
+        IR_INSTR_AS(stackadj)
+        ir_value new_value =
+            ir_get_index_ptr(func, jd->stack_pointer, ir_constant_int(func, instr->amount, NULL));
+        ir_set_value(func, jd->stack_pointer, new_value);
+        break;
+    }
+    case ir_opcode_stack_peek: {
+        IR_INSTR_AS(stack_peek)
+        ir_value addr =
+            ir_get_index_ptr(func, jd->stack_pointer, ir_constant_int(func, -instr->offset, NULL));
+        ir_value tmp = ir_load(func, addr);
+        _ir_instr_replace_dest(func, tmp, _instr->dest);
+        break;
+    }
+    case ir_opcode_stack_put: {
+        IR_INSTR_AS(stack_put)
+        ir_value addr =
+            ir_get_index_ptr(func, jd->stack_pointer, ir_constant_int(func, -instr->offset, NULL));
+        ir_store(func, addr, instr->value);
+        break;
+    }
+    case ir_opcode_check_eval_breaker: {
+        //IR_INSTR_AS(check_eval_breaker)
+        //ir_value eval_breaker_addr = ir_constant_from_ptr(func, ir_type_int_ptr, &_PyRuntime.ceval.eval_breaker._value, "&_PyRuntime.ceval.eval_breaker._value");
+        //ir_value eval_breaker_value = ir_load(func, eval_breaker_addr);
+        //ir_branch_if(func, eval_breaker_value, eval_breaker_label, IR_UNLIKELY);
+        break;
+    }
+    case ir_opcode_setup_block: {
+        IR_INSTR_AS(setup_block)
+        int b_type;
+        if (instr->b_type == IR_PYBLOCK_FINALLY_END) {
+            break;
+        }
+        switch (instr->b_type) {
+        case IR_PYBLOCK_LOOP: b_type = SETUP_LOOP; break;
+        case IR_PYBLOCK_EXCEPT: b_type = SETUP_EXCEPT; break;
+        case IR_PYBLOCK_FINALLY_TRY: b_type = SETUP_FINALLY; break;
+        default: abort(); /* Not expected case */
+        }
+        int index = _label_to_instr_index(jd, instr->b_handler);
+        CALL_NATIVE(jd->blocksetup_sig, PyFrame_BlockSetup,
+            FRAMEPTR(), CONSTANT_INT(b_type), CONSTANT_INT(index * sizeof(_Py_CODEUNIT)), STACK_LEVEL());
+        break;
+    }
+    case ir_opcode_pop_block: {
+        IR_INSTR_AS(pop_block)
+        JVALUE b = CALL_NATIVE(jd->blockpop_sig, PyFrame_BlockPop, jd->f);
+        if (instr->b_type == IR_PYBLOCK_EXCEPT_HANDLER) {
+            IR_ASSERT(CMP_EQ(LOAD_FIELD(b, PyTryBlock, b_type, ir_type_int), CONSTANT_INT(EXCEPT_HANDLER)));
+            UNWIND_EXCEPT_HANDLER(b);
+        } else {
+            assert(instr->b_type == IR_PYBLOCK_ANY);
+            UNWIND_BLOCK(b);
+        }
+        break;
+    }
+    case ir_opcode_goto_error: {
+        IR_INSTR_AS(goto_error)
+        if (instr->cond != NULL) {
+            BRANCH_IF(instr->cond, jd->error, IR_UNLIKELY);
+        } else {
+            BRANCH(jd->error);
+        }
+        break;
+    }
+    case ir_opcode_goto_fbe: {
+        IR_INSTR_AS(goto_fbe)
+        int why = -1;
+        switch (instr->why) {
+        case IR_FBE_EXCEPTION: why = WHY_EXCEPTION; break;
+        case IR_FBE_RETURN: why = WHY_RETURN; break;
+        case IR_FBE_BREAK: why = WHY_BREAK; break;
+        case IR_FBE_CONTINUE: why = WHY_CONTINUE; break;
+        case IR_FBE_SILENCED: why = WHY_SILENCED; break;
+        }
+        if (instr->continue_target) {
+            int instr_index = _label_to_instr_index(jd, instr->continue_target);
+            JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_long);
+            JVALUE tmp = CALL_NATIVE(sig, PyLong_FromLong, CONSTANT_LONG(instr_index * sizeof(_Py_CODEUNIT)));
+            SET_RETVAL(tmp);
+            GOTO_ERROR_IF_NOT(tmp);
+        }
+        SET_WHY(why);
+        BRANCH(jd->fast_block_end);
+        break;
+    }
+    case ir_opcode_yield: {
+        //IR_INSTR_AS(yield)
+        break;
+    }
+    default:
+        Py_FatalError("Unhandled python-specific opcode");
+        break;
+    } // switch
+}
+
+void ir_lower(JITData *jd) {
+    ir_func func = jd->func;
+    ir_block b;
+    ir_instr _instr;
+    ir_instr _instr_next;
+
+    for (b = func->first_block; b != NULL; b = b->next) {
+        for (_instr = b->first_instr; _instr != NULL; _instr = _instr_next) {
+            _instr_next = _instr->next;
+            if (!ir_opcode_is_python_specific(_instr->opcode))
+                continue;
+
+            /* Set our insertion position to right after the instruction we're replacing */
+            func->current_block = b;
+            b->current_instr = _instr;
+
+            _ir_lower_one_instr(jd, func, _instr);
+
+            /* Reposition cursor to after _instr */
+            _instr_next = _instr->next;
+
+            /* Delete the original instruction */
+            _ir_instr_remove(func, b, _instr);
+        }
+    }
+}
+
+void ir_verify_stack_effect(ir_func func) {
+    ir_block b;
+    ir_instr _instr;
+    ssize_t num_blocks = ir_func_largest_block_index(func);
+    int *stack_at_entry = (int*)malloc(num_blocks * sizeof(int));
+    for (int i = 0; i < num_blocks; i++) {
+        stack_at_entry[i] = -1;
+    }
+    stack_at_entry[func->first_block->index] = 0;
+
+    int errors = 0;
+    int rerun = 1;
+    while (rerun) {
+        rerun = 0;
+        for (b = func->first_block; b != NULL; b = b->next) {
+            int entry_stack_level = stack_at_entry[b->index];
+            if (entry_stack_level == -1) {
+                rerun = 1;
+                continue;
+            }
+            int block_stack_effect = 0;
+            for (_instr = b->first_instr; _instr != NULL; _instr = _instr->next) {
+                if (_instr->opcode == ir_opcode_stackadj) {
+                    IR_INSTR_AS(stackadj)
+                    block_stack_effect += instr->amount;
+                } else if (ir_instr_opcode_is_flow_control(_instr->opcode)) {
+                    break;
+                }
+            }
+            assert(_instr != NULL && _instr->next == NULL);
+            int exit_stack_level = entry_stack_level + block_stack_effect;
+#define SET_AND_CHECK(_label) do { \
+    ir_label label = (_label); \
+    size_t index = label->block->index; \
+    if (stack_at_entry[index] == -1) { \
+        stack_at_entry[index] = exit_stack_level; \
+    } \
+    if (stack_at_entry[index] != exit_stack_level) { \
+        fprintf(stderr, "Stack level mismatch at branch from %p to %s (%p)\n", b, label->name ? label->name : "<NULL>", label->block); \
+        errors = 1; \
+    } \
+} while (0)
+            switch (_instr->opcode) {
+            case ir_opcode_branch: {
+                IR_INSTR_AS(branch)
+                SET_AND_CHECK(instr->target);
+                break;
+            }
+            case ir_opcode_branch_cond: {
+                IR_INSTR_AS(branch_cond)
+                SET_AND_CHECK(instr->if_true);
+                SET_AND_CHECK(instr->if_false);
+                break;
+            }
+            case ir_opcode_jumptable: {
+                IR_INSTR_AS(jumptable)
+                for (size_t i = 0; i < instr->table_size; i++) {
+                    SET_AND_CHECK(instr->table[i]);
+                }
+                break;
+            }
+            case ir_opcode_ret: {
+                assert(exit_stack_level == 0);
+            }
+            default: abort(); /* Unhandled flow control */
+            } // switch
+#undef SET_AND_CHECK
+        }
+    }
+    assert(!errors);
 }
