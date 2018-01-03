@@ -18,14 +18,11 @@ struct ir_block_t {
     ir_instr first_instr;
     ir_instr current_instr; /* NULL means 'insert before first_instr' */
     ir_instr last_instr;
-    ir_label labels; /* Linked list of labels */
+    ir_label label;
     size_t index;
 };
 
 struct ir_label_t {
-    /* Labels for each block are kept in a singly-linked list. This is NULL when not assigned. */
-    ir_label next;
-
     /* This is NULL when the label hasn't been assigned yet. */
     ir_block block;
     const char *name;
@@ -68,19 +65,6 @@ ir_value ir_func_get_argument(ir_func func, size_t i) {
     _type _varname = (_type)_ir_alloc(func->context, sizeof(_type ## _t) + (_extra), _alignof(_type ## _t));
 
 static inline
-void _ir_func_new_block(ir_func func) {
-    IR_FUNC_ALLOC(block, ir_block, 0)
-    block->first_instr = NULL;
-    block->current_instr = NULL;
-    block->last_instr = NULL;
-    block->labels = NULL;
-    block->index = (func->next_block_index)++;
-    ir_block after = func->current_block ? func->current_block : func->last_block;
-    IR_LL_INSERT_AFTER(func->first_block, func->last_block, after, block);
-    func->current_block = block;
-}
-
-static inline
 ir_type ir_typeof(ir_value v) {
     return v->type;
 }
@@ -109,7 +93,6 @@ const char* _ir_label_qualname(ir_func func, const char *name);
 static inline
 ir_label ir_label_new(ir_func func, const char *name) {
     IR_FUNC_ALLOC(ret, ir_label, 0)
-    ret->next = NULL;
     ret->block = NULL;
 #ifdef IR_DEBUG
     ret->name = _ir_label_qualname(func, name);

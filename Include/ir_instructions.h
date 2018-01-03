@@ -102,6 +102,8 @@ struct ir_instr_t {
 /* Forward declaration. Actual code is at the bottom of this file. */
 static inline
 void _ir_instr_insert(ir_func func, ir_instr _instr);
+static inline
+void _ir_func_new_block(ir_func func);
 
 #define IR_INSTR_HEADER    ir_instr_t base;
 #define IR_INSTR_ALLOC(_type, _extra_size) \
@@ -122,6 +124,7 @@ ir_value _ir_instr_insert_helper(ir_func func, ir_instr instr, ir_opcode opcode,
     return dest;
 }
 
+/* Replace the destination value of the current instruction */
 static inline
 void _ir_instr_replace_dest(ir_func func, ir_value old_dest, ir_value new_dest) {
     ir_block b = func->current_block;
@@ -593,22 +596,20 @@ void ir_branch(ir_func func, ir_label target) {
 static inline
 void ir_label_here(ir_func func, ir_label label) {
     assert(label->block == NULL);
-
-    if (func->current_block &&
-        func->current_block->current_instr != NULL) {
-        /* We're inserting a label into the middle of a block. Start a new one.
-           Leave the existing block with an unconditional branch.
-         */
-        ir_branch(func, label);
-    }
-    if (func->current_block == NULL) {
-        _ir_func_new_block(func);
-    }
     ir_block b = func->current_block;
-    assert(b->current_instr == NULL);
+    int ready_for_label = (b && b->label == NULL && b->current_instr == NULL);
+    if (!ready_for_label) {
+        ir_branch(func, label);
+        if (func->current_block == NULL) {
+            _ir_func_new_block(func);
+        }
+    }
+    b = func->current_block;
+    assert(b && b->label == NULL && b->current_instr == NULL);
+    b->label = label;
     label->block = b;
-    label->next = b->labels;
-    b->labels = label;
+
+
 }
 
 /*****************************************************************************/
@@ -919,21 +920,71 @@ IR_PROTOTYPE(ir_instr_yield)
 struct ir_instr_yield_t {
     IR_INSTR_HEADER
     ir_value value;
-    ir_label resume_target;
 };
 
 static inline
-void ir_yield(ir_func func, ir_value value, ir_label resume_target) {
+ir_value ir_yield(ir_func func, ir_value value) {
     IR_INSTR_ALLOC(ir_instr_yield, 0)
     assert(ir_type_equal(ir_typeof(value), ir_type_pyobject_ptr));
     instr->value = value;
-    instr->resume_target = resume_target;
-    IR_INSTR_INSERT(ir_opcode_yield, ir_type_pyobject_ptr);
+    return IR_INSTR_INSERT(ir_opcode_yield, ir_type_pyobject_ptr);
 }
 
 /*****************************************************************************/
 char* ir_instr_repr(char *p, ir_instr _instr);
 
+/* _ir_func_new_block:
+     Creates a new block after the current cursor position, and positions the cursor
+     at the start of the new block. If the cursor is in the middle of an existing block,
+     instructions after the current position will be moved into the new block.
+
+     For example, suppose the current IR looks like:
+
+         BLOCK1 -> BLOCK2 -> BLOCK3
+
+     With BLOCK2, the current block, containing:
+
+         [ INST1, INST2, INST3, ^, INST4, INST5 ]
+
+     With ^ the cursor position. After calling _ir_func_new_block, the IR will look like:
+
+         BLOCK1 -> BLOCK2A -> BLOCK2B -> BLOCK3
+
+     Where:
+
+         BLOCK2A = [ INST1, INST2, INST3 ]
+         BLOCK2B = [ ^, INST4, INST5 ]
+
+     This function doesn't know anything about instruction opcodes, so the caller
+     must guarantee that the previous block ends with a flow control instruction,
+     and that the new block receives a label.
+*/
+
+static inline
+void _ir_func_new_block(ir_func func) {
+    IR_FUNC_ALLOC(block, ir_block, 0)
+    block->first_instr = NULL;
+    block->current_instr = NULL;
+    block->last_instr = NULL;
+    block->label = NULL;
+    block->index = (func->next_block_index)++;
+    ir_block after = func->current_block ? func->current_block : func->last_block;
+    IR_LL_INSERT_AFTER(func->first_block, func->last_block, after, block);
+
+    ir_block cur = func->current_block;
+    if (cur != NULL && cur->current_instr != cur->last_instr) {
+        /* Detach all instructions after the current one */
+        ir_instr from_instr = cur->current_instr ? cur->current_instr->next : cur->first_instr;
+        ir_instr to_instr = cur->last_instr;
+        IR_LL_DETACH_CHAIN(cur->first_instr, cur->last_instr, from_instr, to_instr);
+
+        /* Attach into new block */
+        block->first_instr = from_instr;
+        block->current_instr = NULL;
+        block->last_instr = to_instr;
+    }
+    func->current_block = block;
+}
 
 /* Insert an insertion into the function. This, along with _ir_instr_remove, should be
    the only code which mutates the instruction linked list.
@@ -941,33 +992,6 @@ char* ir_instr_repr(char *p, ir_instr _instr);
 static inline
 void _ir_instr_insert(ir_func func, ir_instr _instr) {
     int terminates_block = ir_instr_opcode_is_flow_control(_instr->opcode);
-    if (terminates_block &&
-        func->current_block &&
-        func->current_block->current_instr != func->current_block->last_instr) {
-        /* We're adding a branch in the middle of an existing block. Yuck!
-           We have to split the block at the current instr, and then set the
-           insertion position to the top of the new block (at the last label).
-         */
-        assert(func->current_block->current_instr != NULL);
-        ir_block b = func->current_block;
-        _ir_func_new_block(func);
-        ir_block bnew = func->current_block;
-        assert(b->next == bnew);
-
-        /* Detach all instructions after the current one */
-        ir_instr from_instr = b->current_instr->next;
-        ir_instr to_instr = b->last_instr;
-        IR_LL_DETACH_CHAIN(b->first_instr, b->last_instr, from_instr, to_instr);
-
-        /* Attach into new block */
-        bnew->first_instr = from_instr;
-        bnew->current_instr = NULL;
-        bnew->last_instr = to_instr;
-
-        /* Move insertion position back to end of b */
-        func->current_block = b;
-        b->current_instr = b->last_instr;
-    }
     if (func->current_block == NULL) {
         _ir_func_new_block(func);
     }
@@ -975,8 +999,14 @@ void _ir_instr_insert(ir_func func, ir_instr _instr) {
     IR_LL_INSERT_AFTER(b->first_instr, b->last_instr, b->current_instr, _instr);
     b->current_instr = _instr;
     if (terminates_block) {
-        func->current_block = b->next;
-        assert(func->current_block == NULL || func->current_block->current_instr == NULL);
+        if (b->current_instr == b->last_instr) {
+            func->current_block = b->next;
+            if (func->current_block) {
+                func->current_block->current_instr = NULL;
+            }
+        } else {
+            _ir_func_new_block(func);
+        }
     }
 }
 

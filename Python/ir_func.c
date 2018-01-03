@@ -130,10 +130,8 @@ char* ir_func_dump(ir_func func) {
 
     ir_block b;
     for (b = func->first_block; b != NULL; b = b->next) {
-        ir_label label = b->labels;
-        while (label != NULL) {
-            p += sprintf(p, "%s:\n", label->name ? label->name : "<unnamed_label>");
-            label = label->next;
+        if (b->label) {
+            p += sprintf(p, "%s:\n", b->label->name ? b->label->name : "<unnamed_label>");
         }
         p = ir_block_repr(p, b);
         p += sprintf(p, "\n");

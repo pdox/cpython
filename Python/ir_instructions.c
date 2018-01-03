@@ -357,8 +357,6 @@ ir_instr_repr(char *p, ir_instr _instr) {
         case ir_opcode_yield: {
             IR_INSTR_AS(yield)
             p = ir_value_repr(p, instr->value);
-            p += sprintf(p, " ");
-            p = ir_label_repr(p, instr->resume_target);
             break;
         }
     }
