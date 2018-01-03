@@ -46,8 +46,8 @@
 #define BRANCH_IF(val, label, likelyhood)        ir_branch_if(jd->func, (val), (label), likelyhood)
 
 #define IF_ELSE(_cond, _likelyhood, _iftrue, _ifnot) do { \
-    ir_label iftrue_label = ir_label_new(jd->func, "iftrue:" #_cond); \
-    ir_label after_label = ir_label_new(jd->func, "after:" #_cond); \
+    ir_label iftrue_label = ir_label_new(jd->func, "iftrue." #_cond); \
+    ir_label after_label = ir_label_new(jd->func, "after." #_cond); \
     BRANCH_IF((_cond), iftrue_label, (_likelyhood)); \
     { _ifnot }; \
     BRANCH(after_label); \
@@ -57,14 +57,14 @@
 } while (0)
 
 #define IF(_cond, _likelyhood, _todo) do { \
-    ir_label after_label = ir_label_new(jd->func, "after_if:" #_cond); \
+    ir_label after_label = ir_label_new(jd->func, "after_if." #_cond); \
     BRANCH_IF_NOT((_cond), after_label, ir_invert_likelyhood(_likelyhood)); \
     { _todo }; \
     LABEL(after_label); \
 } while (0)
 
 #define IF_NOT(_cond, _likelyhood, _todo) do { \
-    ir_label after_label = ir_label_new(jd->func, "after_if_not:" #_cond); \
+    ir_label after_label = ir_label_new(jd->func, "after_if_not." #_cond); \
     BRANCH_IF((_cond), after_label, ir_invert_likelyhood(_likelyhood)); \
     { _todo }; \
     LABEL(after_label); \
@@ -154,8 +154,12 @@
 #define POINTER_ADD(ptr, n) \
     ir_get_index_ptr(jd->func, ptr, CONSTANT_INT(n))
 
-#define CRASH() \
-    STORE(CONSTANT_PTR(ir_type_int_ptr, 0), CONSTANT_INT(0))
+#define CRASH() do { \
+    IR_LABEL_INIT(crashpoint); \
+    LABEL(crashpoint); \
+    STORE(CONSTANT_PTR(ir_type_int_ptr, 0), CONSTANT_INT(0)); \
+    BRANCH(crashpoint); \
+} while (0)
 
 #ifdef Py_DEBUG
 static void _do_assert(int expr, const char *expr_str) {

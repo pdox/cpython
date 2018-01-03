@@ -33,6 +33,7 @@ typedef struct _JITData {
 
     ir_value tstate;
     ir_value f;
+    ir_value throwflag;
     ir_value next_instr_index; /* only set during special control flow */
     ir_value stack_pointer;
     ir_value fastlocals;
@@ -69,6 +70,9 @@ typedef struct _JITData {
 
     /* Blocks that will be moved to the end */
     move_entry *move_entry_list;
+
+    int is_gen;
+    ir_label body_start;
 
     ir_label jump;
     ir_label jump_int;
@@ -167,6 +171,7 @@ int _label_to_instr_index(JITData *jd, ir_label target) {
     STACKADJ(1); \
 } while (0)
 
+/* Warning: Swapping stackadj/peek here may break ir_yield value substitution */
 #define POP()          (STACKADJ(-1), PEEK(0))
 
 #define LOAD_VALUE_STACK()  LOAD_FIELD(FRAMEPTR(), PyFrameObject, f_valuestack, ir_type_pyobject_ptr_ptr)
@@ -3074,7 +3079,7 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     assert(PyBytes_GET_SIZE(co->co_code) % sizeof(_Py_CODEUNIT) == 0);
     assert(_Py_IS_ALIGNED(PyBytes_AS_STRING(co->co_code), sizeof(_Py_CODEUNIT)));
 
-    int is_gen = (co->co_flags & (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR));
+    jd->is_gen = (co->co_flags & (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR));
     _Py_CODEUNIT *code = (_Py_CODEUNIT*)PyBytes_AS_STRING(co->co_code);
     Py_ssize_t i;
     Py_ssize_t inst_count = PyBytes_GET_SIZE(co->co_code)/sizeof(_Py_CODEUNIT);
@@ -3116,8 +3121,10 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     jd->blocksetup_sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyframeobject_ptr, ir_type_int, ir_type_int, ir_type_int);
     jd->blockpop_sig = CREATE_SIGNATURE(ir_type_pytryblock_ptr, ir_type_pyframeobject_ptr);
 
-    /* Arguments: f */
+    /* Arguments: f, throwflag */
     jd->f = ir_func_get_argument(jd->func, 0);
+    jd->throwflag = ir_func_get_argument(jd->func, 1);
+
     jd->retval = ir_value_new(jd->func, ir_type_pyobject_ptr);
     jd->why = ir_value_new(jd->func, ir_type_int);
     jd->stack_pointer = ir_value_new(jd->func, ir_type_pyobject_ptr_ptr);
@@ -3149,6 +3156,10 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     /* assert f->f_lasti >= -1 */
     IR_ASSERT(CMP_GE(LOAD_FIELD(jd->f, PyFrameObject, f_lasti, ir_type_int), CONSTANT_INT(-1)));
 
+    if (jd->is_gen) {
+        GOTO_ERROR_IF(jd->throwflag);
+    }
+
 #ifdef Py_DEBUG
     /* PyEval_EvalFrameEx() must not be called with an exception set,
        because it can clear it (directly or indirectly) and so the
@@ -3157,16 +3168,18 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
 #endif
 
     /* Begin function body */
-    if (is_gen) {
+    if (jd->is_gen) {
         /* For generator, jump to the next instruction as determined by f_lasti */
         COMPUTE_NEXT_INSTR_INDEX();
         CHECK_EVAL_BREAKER_SPECIAL();
         ir_jumptable(jd->func, jd->next_instr_index, jd->jmptab, inst_count);
-    } else {
-        /* Normal function, always starts at 0. */
-        SET_VALUE(jd->next_instr_index, CONSTANT_INT(0));
-        CHECK_EVAL_BREAKER_SPECIAL();
     }
+
+    /* Normal function entry (this is also the
+       first yield entry point for generators) */
+    LABEL(jd->body_start);
+    SET_VALUE(jd->next_instr_index, CONSTANT_INT(0));
+    CHECK_EVAL_BREAKER_SPECIAL();
 
     for (i = 0; i < inst_count; i++) {
         int opcode = _Py_OPCODE(code[i]);
@@ -3264,8 +3277,8 @@ _PyJIT_CodeGen(PyCodeObject *co) {
     jd->co = co;
     jd->context = ir_context_new();
 
-    /* func(f); */
-    ir_type argtypes[] = { ir_type_pyframeobject_ptr };
+    /* func(f, throwflag); */
+    ir_type argtypes[] = { ir_type_pyframeobject_ptr, ir_type_int };
     sig = ir_create_function_type(jd->context, ir_type_pyobject_ptr, sizeof(argtypes)/sizeof(argtypes[0]), argtypes);
     jd->func = ir_func_new(jd->context, sig);
 
@@ -3276,6 +3289,7 @@ _PyJIT_CodeGen(PyCodeObject *co) {
     jd->fast_block_end = ir_label_new(jd->func, "fast_block_end");
     jd->fast_block_end_int = ir_label_new(jd->func, "fast_block_end_int");
     jd->exit = ir_label_new(jd->func, "exit");
+    jd->body_start = ir_label_new(jd->func, "body_start");
     for (i = 0; i < inst_count; i++) {
         sprintf(namebuf, "inst_%ld", (long)i);
         jd->jmptab[i] = ir_label_new(jd->func, namebuf);

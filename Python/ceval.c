@@ -548,12 +548,13 @@ PyEval_EvalFrameEx(PyFrameObject *f, int throwflag)
     if (Py_JITFlag != 0) {
         if (!Py_JITDebugFunc || strcmp(Py_JITDebugFunc, PyUnicode_AsUTF8(f->f_code->co_name)) == 0) {
             if (!Py_JITDebugFile || strstr(PyUnicode_AsUTF8(f->f_code->co_filename), Py_JITDebugFile) != NULL) {
-                if (!tstate->use_tracing && !_Py_TracingPossible && !PyDTrace_LINE_ENABLED() && !throwflag) {
-                    return PyJIT_Execute(f);
+                if (!tstate->use_tracing && !_Py_TracingPossible && !PyDTrace_LINE_ENABLED()) {
+                    return PyJIT_Execute(f, throwflag);
                 }
             }
         }
     }
+    assert(f->f_jit_resume == 0); /* Not safe to mix JIT and interpreter for generators */
     return tstate->interp->eval_frame(f, throwflag);
 }
 

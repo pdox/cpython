@@ -10,7 +10,7 @@ extern int Py_JITDebugFlag;
 extern char *Py_JITDebugFunc;
 extern char *Py_JITDebugFile;
 
-typedef PyObject* (*PyJIT_EntryPoint)(PyFrameObject *f);
+typedef PyObject* (*PyJIT_EntryPoint)(PyFrameObject *f, int throwflag);
 
 typedef struct {
     void *context;
@@ -20,7 +20,7 @@ typedef struct {
 extern int _PyJIT_CodeGen(PyCodeObject *co);
 
 static inline PyObject*
-PyJIT_Execute(PyFrameObject *f) {
+PyJIT_Execute(PyFrameObject *f, int throwflag) {
     PyCodeObject *co = f->f_code;
     if (co->co_jit_handle == NULL) {
         if (Py_JITDebugFlag > 0) {
@@ -34,7 +34,13 @@ PyJIT_Execute(PyFrameObject *f) {
         }
         assert(co->co_jit_handle != NULL);
     }
-    return ((PyJIT_Handle*)co->co_jit_handle)->entry(f);
+    if (Py_JITDebugFlag > 4) {
+        fprintf(stderr, "Calling %s from %s (f->f_code == %p)\n",
+            PyUnicode_AsUTF8(co->co_name),
+            PyUnicode_AsUTF8(co->co_filename),
+            co);
+    }
+    return ((PyJIT_Handle*)co->co_jit_handle)->entry(f, throwflag);
 }
 
 #ifdef __cplusplus
