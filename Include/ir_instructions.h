@@ -99,6 +99,14 @@ struct ir_instr_t {
                       type is considered ir_type_void in this case. */
 };
 
+/* Get the values that are used as operands by '_instr'.
+   This does not include the instruction's return (dest) value.
+   The return value will be a borrowed reference to an array of
+   length *count. The reference is invalidated when either
+   ir_get_uses() is called again, or the IR is modified.
+ */
+ir_value* ir_get_uses(ir_instr _instr, size_t *count);
+
 /* Forward declaration. Actual code is at the bottom of this file. */
 static inline
 void _ir_instr_insert(ir_func func, ir_instr _instr);
@@ -311,8 +319,9 @@ ir_value ir_ternary(ir_func func, ir_value cond, ir_value if_true, ir_value if_f
 IR_PROTOTYPE(ir_instr_call)
 struct ir_instr_call_t {
     IR_INSTR_HEADER
-    ir_value target;
     int arg_count;
+    /* Don't change the layout below without also fixing ir_get_uses */
+    ir_value target;
     ir_value arg[1];
 };
 
@@ -691,12 +700,13 @@ void ir_jumptable(ir_func func, ir_value index, ir_label *table, size_t table_si
 IR_PROTOTYPE(ir_instr_ret)
 struct ir_instr_ret_t {
     IR_INSTR_HEADER
-    ir_value value;
+    ir_value value; /* may be NULL to indicate void return */
 };
 
 static inline
 void ir_ret(ir_func func, ir_value value) {
     IR_INSTR_ALLOC(ir_instr_ret, 0)
+    assert(ir_type_equal(ir_typeof(value), func->sig->param[0]));
     instr->value = value;
     IR_INSTR_INSERT(ir_opcode_ret, ir_type_void);
 }
