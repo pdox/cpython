@@ -26,6 +26,12 @@ typedef struct move_entry {
     struct move_entry *next;
 } move_entry;
 
+typedef struct resume_entry {
+    int f_lasti;
+    ir_label resume_point;
+    struct resume_entry *next;
+} resume_entry;
+
 typedef struct _JITData {
     PyCodeObject *co; /* Borrowed reference */
     ir_context context;
@@ -81,14 +87,24 @@ typedef struct _JITData {
     ir_label fast_block_end;
     ir_label fast_block_end_int;
     ir_label exit;
+    ir_label yield_dispatch;
+
+    resume_entry *resume_entry_list;
 
     ir_label jmptab[1];
 } JITData;
 
+#define ADD_RESUME_ENTRY(_f_lasti, _resume_point) do { \
+    resume_entry *e = (resume_entry*)PyMem_RawMalloc(sizeof(resume_entry)); \
+    e->f_lasti = (_f_lasti); \
+    e->resume_point = (_resume_point); \
+    e->next = jd->resume_entry_list; \
+    jd->resume_entry_list = e; \
+} while (0)
+
 #define GOTO_ERROR()             ir_goto_error(jd->func, NULL)
 #define GOTO_ERROR_IF(val)       ir_goto_error(jd->func, (val))
 #define GOTO_ERROR_IF_NOT(val)   ir_goto_error(jd->func, NOTBOOL((val)))
-#define GOTO_FAST_YIELD()        BRANCH(jd->exit)
 #define GOTO_EXIT()              BRANCH(jd->exit)
 
 #define GOTO_FAST_BLOCK_END(why) \
@@ -125,7 +141,6 @@ int _label_to_instr_index(JITData *jd, ir_label target) {
 #define DO_POP_BLOCK(irkind) do { \
     ir_pop_block(jd->func, IR_PYBLOCK_ ## irkind); \
 } while (0)
-
 
 #define MOVE_TO_END(_from_label, _to_label) do { \
     move_entry *m = PyMem_RawMalloc(sizeof(move_entry)); \
@@ -1119,12 +1134,13 @@ EMITTER_FOR(GET_AWAITABLE) {
 
 EMITTER_FOR(YIELD_FROM) {
     _Py_IDENTIFIER(send);
-    JLABEL fast_send = JLABEL_INIT("fast_send");
-    JLABEL v_is_none = JLABEL_INIT("v_is_none");
-    JLABEL after_getting_retval = JLABEL_INIT("after_getting_retval");
-    JLABEL handle_null_retval = JLABEL_INIT("handle_null_retval");
+    IR_LABEL_INIT(fast_send);
+    IR_LABEL_INIT(v_is_none);
+    IR_LABEL_INIT(after_getting_yieldval);
+    IR_LABEL_INIT(handle_null_yieldval);
     JVALUE v = POP();
     JVALUE receiver = TOP();
+    JVALUE yieldval = JVALUE_CREATE(ir_type_pyobject_ptr);
 
     BRANCH_IF(
         LOGICAL_OR(IR_PyGen_CheckExact(receiver), IR_PyCoro_CheckExact(receiver)),
@@ -1135,32 +1151,29 @@ EMITTER_FOR(YIELD_FROM) {
     BRANCH_IF(CMP_EQ(v, CONSTANT_PYOBJ(Py_None)), v_is_none, IR_SEMILIKELY);
     /* v is not None */
     JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_void_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
-    SET_VALUE(jd->retval,
+    SET_VALUE(yieldval,
         CALL_NATIVE(sig, _PyObject_CallMethodIdObjArgs,
             receiver, CONSTANT_PTR(ir_type_void_ptr, &PyId_send), v, CONSTANT_PYOBJ(NULL)));
-    BRANCH(after_getting_retval);
+    BRANCH(after_getting_yieldval);
     LABEL(v_is_none);
     JVALUE receiver_type = IR_Py_TYPE(receiver);
     JVALUE tp_iternext = LOAD_FIELD(receiver_type, PyTypeObject, tp_iternext, jd->sig_oo);
-    SET_VALUE(jd->retval, CALL_INDIRECT(tp_iternext, receiver));
-    BRANCH(after_getting_retval);
+    SET_VALUE(yieldval, CALL_INDIRECT(tp_iternext, receiver));
+    BRANCH(after_getting_yieldval);
 
     LABEL(fast_send);
-    SET_VALUE(jd->retval, CALL_NATIVE(jd->sig_ooo, _PyGen_Send, receiver, v));
-    BRANCH(after_getting_retval);
+    SET_VALUE(yieldval, CALL_NATIVE(jd->sig_ooo, _PyGen_Send, receiver, v));
+    BRANCH(after_getting_yieldval);
 
-    LABEL(after_getting_retval);
+    LABEL(after_getting_yieldval);
     DECREF(v);
-    BRANCH_IF_NOT(jd->retval, handle_null_retval, IR_SOMETIMES);
+    BRANCH_IF_NOT(yieldval, handle_null_yieldval, IR_SOMETIMES);
 
-    /* Receiver remains on the stack, retval is value to be yielded */
-    STORE_FIELD(jd->f, PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr, STACKPTR());
-    assert(next_instr_index >= 2);
-    STORE_FIELD(jd->f, PyFrameObject, f_lasti, ir_type_int, CONSTANT_INT(2*(next_instr_index - 2)));
-    GOTO_FAST_YIELD();
+    /* Receiver remains on the stack */
+    ir_yield(jd->func, yieldval, next_instr_index - 1);
 
     /* Exiting from 'yield from' */
-    LABEL(handle_null_retval);
+    LABEL(handle_null_yieldval);
     JVALUE val = JVALUE_CREATE(ir_type_pyobject_ptr);
     SET_VALUE(val, CONSTANT_PYOBJ(NULL));
     JTYPE sig2 = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr_ptr);
@@ -1172,15 +1185,14 @@ EMITTER_FOR(YIELD_FROM) {
 }
 
 EMITTER_FOR(YIELD_VALUE) {
-    SET_RETVAL(POP());
+    JVALUE v = POP();
     if (jd->co->co_flags & CO_ASYNC_GENERATOR) {
-        JVALUE wrapped = CALL_NATIVE(jd->sig_oo, _PyAsyncGenValueWrapperNew, jd->retval);
-        DECREF(jd->retval);
-        SET_VALUE(jd->retval, wrapped);
+        JVALUE wrapped = CALL_NATIVE(jd->sig_oo, _PyAsyncGenValueWrapperNew, v);
+        DECREF(v);
         GOTO_ERROR_IF_NOT(wrapped);
+        v = wrapped;
     }
-    STORE_FIELD(jd->f, PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr, STACKPTR());
-    GOTO_FAST_YIELD();
+    ir_yield(jd->func, v, next_instr_index);
 }
 
 EMITTER_FOR(POP_EXCEPT) {
@@ -3157,6 +3169,14 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     IR_ASSERT(CMP_GE(LOAD_FIELD(jd->f, PyFrameObject, f_lasti, ir_type_int), CONSTANT_INT(-1)));
 
     if (jd->is_gen) {
+        BRANCH(jd->yield_dispatch);
+    }
+
+    /* Normal function entry (this is also the
+       first yield entry point for generators) */
+    LABEL(jd->body_start);
+
+    if (jd->is_gen) {
         GOTO_ERROR_IF(jd->throwflag);
     }
 
@@ -3167,17 +3187,6 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     IR_ASSERT(NOTBOOL(IR_PyErr_Occurred()));
 #endif
 
-    /* Begin function body */
-    if (jd->is_gen) {
-        /* For generator, jump to the next instruction as determined by f_lasti */
-        COMPUTE_NEXT_INSTR_INDEX();
-        CHECK_EVAL_BREAKER_SPECIAL();
-        ir_jumptable(jd->func, jd->next_instr_index, jd->jmptab, inst_count);
-    }
-
-    /* Normal function entry (this is also the
-       first yield entry point for generators) */
-    LABEL(jd->body_start);
     SET_VALUE(jd->next_instr_index, CONSTANT_INT(0));
     CHECK_EVAL_BREAKER_SPECIAL();
 
@@ -3245,6 +3254,10 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     JVALUE ret = IR_Py_CheckFunctionResult(NULL, jd->retval, "PyJIT_EvalFrame");
     ir_ret(jd->func, ret);
 
+    LABEL(jd->yield_dispatch);
+    /* To be filled in by ir_lower() */
+    CRASH();
+
     /* Move extra sections to end */
     {
         move_entry *m = jd->move_entry_list;
@@ -3280,7 +3293,7 @@ _PyJIT_CodeGen(PyCodeObject *co) {
     /* func(f, throwflag); */
     ir_type argtypes[] = { ir_type_pyframeobject_ptr, ir_type_int };
     sig = ir_create_function_type(jd->context, ir_type_pyobject_ptr, sizeof(argtypes)/sizeof(argtypes[0]), argtypes);
-    jd->func = ir_func_new(jd->context, sig);
+    jd->func = ir_func_new(jd->context, PyUnicode_AsUTF8(co->co_name), sig);
 
     jd->jump = ir_label_new(jd->func, "jump");
     jd->jump_int = ir_label_new(jd->func, "jump_int");
@@ -3289,6 +3302,7 @@ _PyJIT_CodeGen(PyCodeObject *co) {
     jd->fast_block_end = ir_label_new(jd->func, "fast_block_end");
     jd->fast_block_end_int = ir_label_new(jd->func, "fast_block_end_int");
     jd->exit = ir_label_new(jd->func, "exit");
+    jd->yield_dispatch = ir_label_new(jd->func, "yield_dispatch");
     jd->body_start = ir_label_new(jd->func, "body_start");
     for (i = 0; i < inst_count; i++) {
         sprintf(namebuf, "inst_%ld", (long)i);
@@ -3481,7 +3495,43 @@ void _ir_lower_one_instr(JITData *jd, ir_func func, ir_instr _instr) {
         break;
     }
     case ir_opcode_yield: {
-        //IR_INSTR_AS(yield)
+        IR_INSTR_AS(yield)
+        IR_LABEL_INIT(resume);
+        int next_instr_index = instr->next_instr_index;
+        _Py_CODEUNIT *code = (_Py_CODEUNIT*)PyBytes_AS_STRING(jd->co->co_code);
+        assert(next_instr_index >= 0);
+        assert((size_t)next_instr_index < PyBytes_GET_SIZE(jd->co->co_code) / sizeof(_Py_CODEUNIT));
+        int yf = (_Py_OPCODE(code[next_instr_index]) == YIELD_FROM);
+        int yield_f_lasti = sizeof(_Py_CODEUNIT) * (next_instr_index - 1);
+        assert(yield_f_lasti >= 0);
+        ADD_RESUME_ENTRY(yield_f_lasti, resume);
+
+        SET_RETVAL(instr->value);
+        STORE_FIELD(jd->f, PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr, STACKPTR());
+        STORE_FIELD(jd->f, PyFrameObject, f_lasti, ir_type_int, CONSTANT_INT(yield_f_lasti));
+        /* TODO: Save stack */
+        BRANCH(jd->exit);
+
+        /* ~~~ Magic happens ~~~ */
+
+        LABEL(resume);
+        /* TODO: Restore stack */
+        GOTO_ERROR_IF(jd->throwflag);
+        IR_ASSERT(NOTBOOL(IR_PyErr_Occurred()));
+        CHECK_EVAL_BREAKER();
+        BRANCH(jd->jmptab[next_instr_index]);
+
+        if (yf) {
+            /* There is terrible code in genobject.c which increments f_lasti
+               when an exception is thrown on a YIELD FROM. Handle this case */
+            IR_LABEL_INIT(resume_extra);
+            ADD_RESUME_ENTRY(yield_f_lasti + sizeof(_Py_CODEUNIT), resume_extra);
+            LABEL(resume_extra);
+            GOTO_ERROR_IF(jd->throwflag);
+            IR_ASSERT(NOTBOOL(IR_PyErr_Occurred()));
+            CHECK_EVAL_BREAKER();
+            BRANCH(jd->jmptab[next_instr_index + 1]);
+        }
         break;
     }
     default:
@@ -3515,6 +3565,31 @@ void ir_lower(JITData *jd) {
             _ir_instr_remove(func, b, _instr);
         }
     }
+
+    /* Fill in the yield_dispatch section */
+    b = jd->yield_dispatch->block;
+    assert(b != NULL);
+
+    /* Set insertion position to front of block */
+    func->current_block = b;
+    b->current_instr = NULL;
+
+    /* TODO: Find a less quadratic way to do this dispatch */
+    JVALUE f_lasti = LOAD_FIELD(jd->f, PyFrameObject, f_lasti, ir_type_int);
+
+    /* Handle generator start */
+    BRANCH_IF(CMP_LT(f_lasti, CONSTANT_INT(0)), jd->body_start, IR_SEMILIKELY);
+
+    /* Handle each resume point */
+    resume_entry *re = jd->resume_entry_list;
+    resume_entry *re_next;
+    while (re != NULL) {
+        BRANCH_IF(CMP_EQ(f_lasti, CONSTANT_INT(re->f_lasti)), re->resume_point, IR_SEMILIKELY);
+        re_next = re->next;
+        PyMem_RawFree(re);
+        re = re_next;
+    }
+    jd->resume_entry_list = NULL;
 }
 
 void ir_verify_stack_effect(ir_func func) {

@@ -554,7 +554,6 @@ PyEval_EvalFrameEx(PyFrameObject *f, int throwflag)
             }
         }
     }
-    assert(f->f_jit_resume == 0); /* Not safe to mix JIT and interpreter for generators */
     return tstate->interp->eval_frame(f, throwflag);
 }
 

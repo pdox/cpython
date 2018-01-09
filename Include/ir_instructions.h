@@ -930,14 +930,16 @@ IR_PROTOTYPE(ir_instr_yield)
 struct ir_instr_yield_t {
     IR_INSTR_HEADER
     ir_value value;
+    int next_instr_index;
 };
 
 static inline
-ir_value ir_yield(ir_func func, ir_value value) {
+void ir_yield(ir_func func, ir_value value, int next_instr_index) {
     IR_INSTR_ALLOC(ir_instr_yield, 0)
     assert(ir_type_equal(ir_typeof(value), ir_type_pyobject_ptr));
     instr->value = value;
-    return IR_INSTR_INSERT(ir_opcode_yield, ir_type_pyobject_ptr);
+    instr->next_instr_index = next_instr_index;
+    IR_INSTR_INSERT(ir_opcode_yield, ir_type_void);
 }
 
 /*****************************************************************************/

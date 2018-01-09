@@ -32,6 +32,7 @@ struct ir_label_t {
 
 struct ir_func_t {
     ir_context context;
+    char *name;
     ir_type sig;
     ir_block first_block;
     ir_block current_block; /* NULL means 'insert after last_block' */
@@ -52,7 +53,7 @@ struct ir_func_t {
 };
 
 /* Start a new function in this context. 'sig' must be a function pointer type. */
-ir_func ir_func_new(ir_context context, ir_type sig);
+ir_func ir_func_new(ir_context context, const char *name, ir_type sig);
 
 /* Get the value corresponding to the i'th argument to this function */
 static inline

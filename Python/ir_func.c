@@ -7,12 +7,13 @@
 #include <stdlib.h>
 #include "ir.h"
 
-ir_func ir_func_new(ir_context context, ir_type sig) {
+ir_func ir_func_new(ir_context context, const char *name, ir_type sig) {
     size_t i;
     IR_ALLOC(func, ir_func, sizeof(ir_value) * sig->param_count)
     assert(sig->kind == ir_type_kind_function);
     memset(func, 0, sizeof(ir_func_t));
     func->context = context;
+    func->name = _ir_strdup(context, name);
     func->sig = sig;
     func->param_count = sig->param_count;
     for (i = 0; i < sig->param_count; i++) {
