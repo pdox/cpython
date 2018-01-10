@@ -612,19 +612,18 @@ static inline
 void ir_label_here(ir_func func, ir_label label) {
     assert(label->block == NULL);
     ir_block b = func->current_block;
-    int ready_for_label = (b && b->label == NULL && b->current_instr == NULL);
-    if (!ready_for_label) {
+    if (b && !(b->label == NULL && b->current_instr == NULL)) {
         ir_branch(func, label);
-        if (func->current_block == NULL) {
-            _ir_func_new_block(func);
-        }
+        b = func->current_block;
+        assert(b == NULL || b->current_instr == NULL);
     }
-    b = func->current_block;
+    if (!b) {
+        _ir_func_new_block(func);
+        b = func->current_block;
+    }
     assert(b && b->label == NULL && b->current_instr == NULL);
     b->label = label;
     label->block = b;
-
-
 }
 
 /*****************************************************************************/
