@@ -58,15 +58,23 @@ void ir_func_verify(ir_func func) {
     ir_block b_prev = NULL;
     ir_block b;
     for (b = func->first_block; b != NULL; b = b->next) {
+        /* Make sure the block linked list is correct */
         assert(b_prev == b->prev);
         b_prev = b;
 
+        /* Scan instructions */
         ir_instr _instr;
         ir_instr _instr_prev = NULL;
         int found_branch = 0;
         for (_instr = b->first_instr; _instr != NULL; _instr = _instr->next) {
             assert(_instr_prev == _instr->prev);
             _instr_prev = _instr;
+
+            if (ir_instr_opcode_needs_to_start_block(_instr->opcode)) {
+                assert(_instr == b->first_instr &&
+                       "Instruction not at start of block");
+                assert(_instr->prev == NULL);
+            }
 
             if (ir_instr_opcode_is_flow_control(_instr->opcode)) {
                 assert(_instr == b->last_instr &&
@@ -104,6 +112,7 @@ void ir_func_verify(ir_func func) {
                 assert(_instr->next != NULL);
             }
         }
+        /* Every block must end with a control flow op */
         assert(found_branch);
     }
 }

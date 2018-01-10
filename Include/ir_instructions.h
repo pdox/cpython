@@ -85,6 +85,12 @@ int ir_instr_opcode_is_flow_control(ir_opcode opcode) {
 }
 
 static inline
+int ir_instr_opcode_needs_to_start_block(ir_opcode opcode) {
+    return opcode == ir_opcode_setup_block ||
+           opcode == ir_opcode_pop_block;
+}
+
+static inline
 int ir_opcode_is_python_specific(ir_opcode opcode) {
     return opcode >= ir_opcode_getlocal &&
            opcode <= ir_opcode_yield;
@@ -1004,10 +1010,19 @@ void _ir_func_new_block(ir_func func) {
 static inline
 void _ir_instr_insert(ir_func func, ir_instr _instr) {
     int terminates_block = ir_instr_opcode_is_flow_control(_instr->opcode);
-    if (func->current_block == NULL) {
-        _ir_func_new_block(func);
-    }
+    int needs_to_start_block = ir_instr_opcode_needs_to_start_block(_instr->opcode);
     ir_block b = func->current_block;
+    if (needs_to_start_block && b && b->current_instr != NULL) {
+        ir_label label = ir_label_new(func, "needs_to_start");
+        ir_branch(func, label);
+        ir_label_here(func, label);
+        b = func->current_block;
+    }
+    if (b == NULL) {
+        _ir_func_new_block(func);
+        b = func->current_block;
+    }
+    assert(!needs_to_start_block || b->first_instr == NULL);
     IR_LL_INSERT_AFTER(b->first_instr, b->last_instr, b->current_instr, _instr);
     b->current_instr = _instr;
     if (terminates_block) {
@@ -1019,6 +1034,13 @@ void _ir_instr_insert(ir_func func, ir_instr _instr) {
         } else {
             _ir_func_new_block(func);
         }
+    } else if (_instr->next != NULL &&
+              ir_instr_opcode_needs_to_start_block(_instr->next->opcode)) {
+        /* We inserted _instr immediately before another instruction that wants
+           to be at the start of a block. Create a new block to keep it happy. */
+        ir_label label = ir_label_new(func, "needs_to_start_fixup");
+        ir_branch(func, label);
+        ir_label_here(func, label);
     }
 }
 

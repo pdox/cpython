@@ -37,19 +37,6 @@ typedef struct _JITData {
     ir_context context;
     ir_func func;
 
-    ir_value tstate;
-    ir_value f;
-    ir_value throwflag;
-    ir_value next_instr_index; /* only set during special control flow */
-    ir_value stack_pointer;
-    ir_value fastlocals;
-    ir_value retval;
-    ir_value why;
-
-    /* Temporary stack is used for call_function */
-    ir_value tmpstack;
-    size_t tmpstack_size;
-
     /* Some common function signature types:
 
        v = void
@@ -90,6 +77,19 @@ typedef struct _JITData {
     ir_label yield_dispatch;
 
     resume_entry *resume_entry_list;
+
+    ir_value tstate;
+    ir_value f;
+    ir_value throwflag;
+    ir_value next_instr_index; /* only set during special control flow */
+    ir_value stack_pointer;
+    ir_value fastlocals;
+    ir_value retval;
+    ir_value why;
+
+    /* Temporary stack is used for call_function */
+    ir_value tmpstack;
+    size_t tmpstack_size;
 
     ir_label jmptab[1];
 } JITData;
@@ -3090,11 +3090,26 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     assert(PyBytes_GET_SIZE(co->co_code) <= INT_MAX);
     assert(PyBytes_GET_SIZE(co->co_code) % sizeof(_Py_CODEUNIT) == 0);
     assert(_Py_IS_ALIGNED(PyBytes_AS_STRING(co->co_code), sizeof(_Py_CODEUNIT)));
-
-    jd->is_gen = (co->co_flags & (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR));
     _Py_CODEUNIT *code = (_Py_CODEUNIT*)PyBytes_AS_STRING(co->co_code);
     Py_ssize_t i;
     Py_ssize_t inst_count = PyBytes_GET_SIZE(co->co_code)/sizeof(_Py_CODEUNIT);
+
+    jd->is_gen = (co->co_flags & (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR));
+    jd->jump = ir_label_new(jd->func, "jump");
+    jd->jump_int = ir_label_new(jd->func, "jump_int");
+    jd->error = ir_label_new(jd->func, "error");
+    jd->error_int = ir_label_new(jd->func, "error_int");
+    jd->fast_block_end = ir_label_new(jd->func, "fast_block_end");
+    jd->fast_block_end_int = ir_label_new(jd->func, "fast_block_end_int");
+    jd->exit = ir_label_new(jd->func, "exit");
+    jd->yield_dispatch = ir_label_new(jd->func, "yield_dispatch");
+    jd->body_start = ir_label_new(jd->func, "body_start");
+
+    char namebuf[64];
+    for (i = 0; i < inst_count; i++) {
+        sprintf(namebuf, "inst_%ld", (long)i);
+        jd->jmptab[i] = ir_label_new(jd->func, namebuf);
+    }
 
     /* Setup temporary stack */
     jd->tmpstack_size = 6; /* 6 needed by fast_block_unwind */
@@ -3276,9 +3291,7 @@ void ir_lower(JITData *jd);
 
 int
 _PyJIT_CodeGen(PyCodeObject *co) {
-    char namebuf[32];
     ir_type sig;
-    Py_ssize_t i;
     Py_ssize_t inst_count = PyBytes_GET_SIZE(co->co_code)/sizeof(_Py_CODEUNIT);
     size_t total_size = sizeof(JITData) + inst_count * sizeof(ir_label);
     JITData *jd = PyMem_RawMalloc(total_size);
@@ -3295,19 +3308,6 @@ _PyJIT_CodeGen(PyCodeObject *co) {
     sig = ir_create_function_type(jd->context, ir_type_pyobject_ptr, sizeof(argtypes)/sizeof(argtypes[0]), argtypes);
     jd->func = ir_func_new(jd->context, PyUnicode_AsUTF8(co->co_name), sig);
 
-    jd->jump = ir_label_new(jd->func, "jump");
-    jd->jump_int = ir_label_new(jd->func, "jump_int");
-    jd->error = ir_label_new(jd->func, "error");
-    jd->error_int = ir_label_new(jd->func, "error_int");
-    jd->fast_block_end = ir_label_new(jd->func, "fast_block_end");
-    jd->fast_block_end_int = ir_label_new(jd->func, "fast_block_end_int");
-    jd->exit = ir_label_new(jd->func, "exit");
-    jd->yield_dispatch = ir_label_new(jd->func, "yield_dispatch");
-    jd->body_start = ir_label_new(jd->func, "body_start");
-    for (i = 0; i < inst_count; i++) {
-        sprintf(namebuf, "inst_%ld", (long)i);
-        jd->jmptab[i] = ir_label_new(jd->func, namebuf);
-    }
     translate_bytecode(jd, co);
 #ifdef IR_DEBUG
     ir_func_verify(jd->func);
