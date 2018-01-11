@@ -101,16 +101,21 @@ typedef struct _JITData {
     jd->resume_entry_list = e; \
 } while (0)
 
-#define GOTO_ERROR()             ir_goto_error(jd->func, NULL)
-#define GOTO_ERROR_IF(val)       ir_goto_error(jd->func, (val))
-#define GOTO_ERROR_IF_NOT(val)   ir_goto_error(jd->func, NOTBOOL((val)))
+#define GOTO_ERROR_IF(val) do { \
+    IR_LABEL_INIT(fallthrough); \
+    ir_goto_error(jd->func, (val), fallthrough, jd->error); \
+    LABEL(fallthrough); \
+} while (0)
+#define GOTO_ERROR_IF_NOT(val)   GOTO_ERROR_IF(NOTBOOL((val)))
+
+#define GOTO_ERROR()             ir_goto_error(jd->func, NULL, NULL, jd->error)
 #define GOTO_EXIT()              BRANCH(jd->exit)
 
 #define GOTO_FAST_BLOCK_END(why) \
-    ir_goto_fbe(jd->func, IR_FBE_ ## why, NULL)
+    ir_goto_fbe(jd->func, IR_FBE_ ## why, NULL, jd->fast_block_end)
 
 #define GOTO_FAST_BLOCK_END_CONTINUE(continue_target) \
-    ir_goto_fbe(jd->func, IR_FBE_CONTINUE, continue_target)
+    ir_goto_fbe(jd->func, IR_FBE_CONTINUE, continue_target, jd->fast_block_end)
 
 ir_label _instr_index_to_label(JITData *jd, int instr_index) {
     Py_ssize_t inst_count = PyBytes_GET_SIZE(jd->co->co_code)/sizeof(_Py_CODEUNIT);
@@ -214,6 +219,8 @@ int _label_to_instr_index(JITData *jd, ir_label target) {
  */
 #define CHECK_EVAL_BREAKER()         _emit_check_eval_breaker(jd, CONSTANT_INT(next_instr_index))
 #define CHECK_EVAL_BREAKER_SPECIAL() _emit_check_eval_breaker(jd, jd->next_instr_index)
+#define CHECK_EVAL_BREAKER_EX(_next_instr_index) \
+    _emit_check_eval_breaker(jd, CONSTANT_INT(_next_instr_index))
 
 /* ------------------- Macros and include copied from ceval.c ------------------- */
 #define GIL_REQUEST _Py_atomic_load_relaxed(&_PyRuntime.ceval.gil_drop_request)
@@ -967,6 +974,7 @@ EMITTER_FOR(RAISE_VARARGS) {
         JVALUE ret = CALL_NATIVE(jd->sig_ioo, do_raise, exc, cause);
         BRANCH_IF_NOT(ret, fin, IR_UNLIKELY);
         GOTO_FAST_BLOCK_END(EXCEPTION);
+        break;
     }
     default:
         CALL_PyErr_SetString(PyExc_SystemError, "bad RAISE_VARARGS oparg");
@@ -1169,7 +1177,11 @@ EMITTER_FOR(YIELD_FROM) {
     BRANCH_IF_NOT(yieldval, handle_null_yieldval, IR_SOMETIMES);
 
     /* Receiver remains on the stack */
-    ir_yield(jd->func, yieldval, next_instr_index - 1);
+    ir_yield(jd->func,
+             yieldval,
+             next_instr_index - 1,
+             jd->jmptab[next_instr_index - 1],
+             jd->jmptab[next_instr_index]);
 
     /* Exiting from 'yield from' */
     LABEL(handle_null_yieldval);
@@ -1191,7 +1203,7 @@ EMITTER_FOR(YIELD_VALUE) {
         GOTO_ERROR_IF_NOT(wrapped);
         v = wrapped;
     }
-    ir_yield(jd->func, v, next_instr_index);
+    ir_yield(jd->func, v, next_instr_index, jd->jmptab[next_instr_index], NULL);
 }
 
 EMITTER_FOR(POP_EXCEPT) {
@@ -3307,12 +3319,12 @@ _PyJIT_CodeGen(PyCodeObject *co) {
     jd->func = ir_func_new(jd->context, PyUnicode_AsUTF8(co->co_name), sig);
 
     translate_bytecode(jd, co);
-#ifdef IR_DEBUG
-    ir_func_verify(jd->func);
-#endif
     if (Py_JITDebugFlag > 1) {
         ir_func_dump_file(jd->func, "/tmp/before.ir", "Before lowering");
     }
+#ifdef IR_DEBUG
+    ir_func_verify(jd->func);
+#endif
     //ir_verify_stack_effect(jd->func);
     ir_lower(jd);
     if (Py_JITDebugFlag > 1) {
@@ -3465,9 +3477,10 @@ void _ir_lower_one_instr(JITData *jd, ir_func func, ir_instr _instr) {
     case ir_opcode_goto_error: {
         IR_INSTR_AS(goto_error)
         if (instr->cond != NULL) {
-            BRANCH_IF(instr->cond, jd->error, IR_UNLIKELY);
+            ir_branch_cond(jd->func, instr->cond, instr->error, instr->fallthrough,
+                           IR_UNLIKELY, ir_invert_likelyhood(IR_UNLIKELY));
         } else {
-            BRANCH(jd->error);
+            BRANCH(instr->error);
         }
         break;
     }
@@ -3489,18 +3502,14 @@ void _ir_lower_one_instr(JITData *jd, ir_func func, ir_instr _instr) {
             GOTO_ERROR_IF_NOT(tmp);
         }
         SET_WHY(why);
-        BRANCH(jd->fast_block_end);
+        BRANCH(instr->fast_block_end);
         break;
     }
     case ir_opcode_yield: {
         IR_INSTR_AS(yield)
         IR_LABEL_INIT(resume);
-        int next_instr_index = instr->next_instr_index;
-        _Py_CODEUNIT *code = (_Py_CODEUNIT*)PyBytes_AS_STRING(jd->co->co_code);
-        assert(next_instr_index >= 0);
-        assert((size_t)next_instr_index < PyBytes_GET_SIZE(jd->co->co_code) / sizeof(_Py_CODEUNIT));
-        int yf = (_Py_OPCODE(code[next_instr_index]) == YIELD_FROM);
-        int yield_f_lasti = sizeof(_Py_CODEUNIT) * (next_instr_index - 1);
+        int resume_instr_index = instr->resume_instr_index;
+        int yield_f_lasti = sizeof(_Py_CODEUNIT) * (resume_instr_index - 1);
         assert(yield_f_lasti >= 0);
         ADD_RESUME_ENTRY(yield_f_lasti, resume);
 
@@ -3516,10 +3525,10 @@ void _ir_lower_one_instr(JITData *jd, ir_func func, ir_instr _instr) {
         /* TODO: Restore stack */
         GOTO_ERROR_IF(jd->throwflag);
         IR_ASSERT(NOTBOOL(IR_PyErr_Occurred()));
-        CHECK_EVAL_BREAKER();
-        BRANCH(jd->jmptab[next_instr_index]);
+        CHECK_EVAL_BREAKER_EX(resume_instr_index);
+        BRANCH(instr->resume_inst_label);
 
-        if (yf) {
+        if (instr->throw_inst_label) {
             /* There is terrible code in genobject.c which increments f_lasti
                when an exception is thrown on a YIELD FROM. Handle this case */
             IR_LABEL_INIT(resume_extra);
@@ -3527,8 +3536,8 @@ void _ir_lower_one_instr(JITData *jd, ir_func func, ir_instr _instr) {
             LABEL(resume_extra);
             GOTO_ERROR_IF(jd->throwflag);
             IR_ASSERT(NOTBOOL(IR_PyErr_Occurred()));
-            CHECK_EVAL_BREAKER();
-            BRANCH(jd->jmptab[next_instr_index + 1]);
+            CHECK_EVAL_BREAKER_EX(resume_instr_index + 1);
+            BRANCH(instr->throw_inst_label);
         }
         break;
     }

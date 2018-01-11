@@ -110,6 +110,33 @@ void ir_func_verify(ir_func func) {
                 }
                 case ir_opcode_ret:
                     break;
+                case ir_opcode_goto_error: {
+                    IR_INSTR_AS(goto_error)
+                    assert(instr->error->block != NULL);
+                    if (instr->cond) {
+                        assert(instr->fallthrough);
+                        assert(instr->fallthrough->block != NULL);
+                    } else {
+                        assert(instr->fallthrough == NULL);
+                    }
+                    break;
+                }
+                case ir_opcode_goto_fbe: {
+                    IR_INSTR_AS(goto_fbe)
+                    if (instr->continue_target) {
+                        assert(instr->continue_target->block != NULL);
+                    }
+                    assert(instr->fast_block_end->block != NULL);
+                    break;
+                }
+                case ir_opcode_yield: {
+                    IR_INSTR_AS(yield)
+                    assert(instr->resume_inst_label->block != NULL);
+                    if (instr->throw_inst_label) {
+                        assert(instr->throw_inst_label->block != NULL);
+                    }
+                    break;
+                }
                 case ir_opcode_yield_dispatch: {
                     IR_INSTR_AS(yield_dispatch)
                     assert(instr->body_start->block != NULL);
@@ -136,6 +163,7 @@ char* ir_func_dump(ir_func func) {
     char *buf = (char*)malloc(1024*1024 + 200 * num_values + 200 * num_blocks);
     char *p = buf;
     p += sprintf(p, "DUMPING FUNCTION:\n");
+    p += sprintf(p, "  Name: %s\n", func->name);
     p += sprintf(p, "  Signature: ");
     p = ir_type_repr(p, func->sig);
     p += sprintf(p, "\n");

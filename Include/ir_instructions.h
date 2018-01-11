@@ -86,8 +86,10 @@ typedef enum {
 
 static inline
 int ir_instr_opcode_is_flow_control(ir_opcode opcode) {
-    return opcode >= ir_opcode_branch &&
-           opcode <= ir_opcode_ret;
+    return (opcode >= ir_opcode_branch &&
+            opcode <= ir_opcode_ret) ||
+           (opcode >= ir_opcode_goto_error &&
+            opcode <= ir_opcode_yield_dispatch);
 }
 
 static inline
@@ -897,12 +899,16 @@ IR_PROTOTYPE(ir_instr_goto_error)
 struct ir_instr_goto_error_t {
     IR_INSTR_HEADER
     ir_value cond;
+    ir_label fallthrough;
+    ir_label error;
 };
 
 static inline
-void ir_goto_error(ir_func func, ir_value cond) {
+void ir_goto_error(ir_func func, ir_value cond, ir_label fallthrough, ir_label error) {
     IR_INSTR_ALLOC(ir_instr_goto_error, 0)
     instr->cond = cond;
+    instr->fallthrough = fallthrough;
+    instr->error = error;
     IR_INSTR_INSERT(ir_opcode_goto_error, ir_type_void);
 }
 
@@ -921,13 +927,15 @@ struct ir_instr_goto_fbe_t {
     IR_INSTR_HEADER
     ir_fbe_why why;
     ir_label continue_target;
+    ir_label fast_block_end;
 };
 
 static inline
-void ir_goto_fbe(ir_func func, ir_fbe_why why, ir_label continue_target) {
+void ir_goto_fbe(ir_func func, ir_fbe_why why, ir_label continue_target, ir_label fast_block_end) {
     IR_INSTR_ALLOC(ir_instr_goto_fbe, 0)
     instr->why = why;
     instr->continue_target = continue_target;
+    instr->fast_block_end = fast_block_end;
     IR_INSTR_INSERT(ir_opcode_goto_fbe, ir_type_void);
 }
 
@@ -937,15 +945,24 @@ IR_PROTOTYPE(ir_instr_yield)
 struct ir_instr_yield_t {
     IR_INSTR_HEADER
     ir_value value;
-    int next_instr_index;
+    int resume_instr_index;
+    ir_label resume_inst_label;
+    ir_label throw_inst_label; /* YIELD_FROM only */
 };
 
 static inline
-void ir_yield(ir_func func, ir_value value, int next_instr_index) {
+void ir_yield(
+        ir_func func,
+        ir_value value,
+        int resume_instr_index,
+        ir_label resume_inst_label,
+        ir_label throw_inst_label) {
     IR_INSTR_ALLOC(ir_instr_yield, 0)
     assert(ir_type_equal(ir_typeof(value), ir_type_pyobject_ptr));
     instr->value = value;
-    instr->next_instr_index = next_instr_index;
+    instr->resume_instr_index = resume_instr_index;
+    instr->resume_inst_label = resume_inst_label;
+    instr->throw_inst_label = throw_inst_label;
     IR_INSTR_INSERT(ir_opcode_yield, ir_type_void);
 }
 
@@ -1049,7 +1066,14 @@ void ir_cursor_insert(ir_func func, ir_instr _instr) {
             b = func->current_block;
         }
         assert(b->current_instr == NULL);
-    } else if (ir_instr_opcode_needs_to_be_at_front(_instr->opcode)) {
+    } else {
+        /* If we're not inserting a label, make sure we're not
+           at the start of a block, or immediately after control flow. */
+        assert(b->current_instr != NULL);
+        assert(!ir_instr_opcode_is_flow_control(b->current_instr->opcode));
+    }
+
+    if (ir_instr_opcode_needs_to_be_at_front(_instr->opcode)) {
         assert(b->first_instr != NULL); /* Block needs a label first */
         if (b->current_instr != b->first_instr) {
             ir_label needs_to_be_at_front = ir_label_new(func, "needs_to_be_at_front");

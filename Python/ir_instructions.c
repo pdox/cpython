@@ -527,7 +527,13 @@ ir_instr_repr(char *p, ir_instr _instr) {
             IR_INSTR_AS(goto_error)
             if (instr->cond != NULL) {
                 p = ir_value_repr(p, instr->cond);
+                p += sprintf(p, " ");
             }
+            if (instr->fallthrough) {
+                p = ir_label_repr(p, instr->fallthrough);
+                p += sprintf(p, " ");
+            }
+            p = ir_label_repr(p, instr->error);
             break;
         }
         case ir_opcode_goto_fbe: {
@@ -535,12 +541,20 @@ ir_instr_repr(char *p, ir_instr _instr) {
             p += sprintf(p, "%s ", _why_id(instr->why));
             if (instr->continue_target != NULL) {
                 p = ir_label_repr(p, instr->continue_target);
+                p += sprintf(p, " ");
             }
+            p = ir_label_repr(p, instr->fast_block_end);
             break;
         }
         case ir_opcode_yield: {
             IR_INSTR_AS(yield)
             p = ir_value_repr(p, instr->value);
+            p += sprintf(p, " %d ", instr->resume_instr_index);
+            p = ir_label_repr(p, instr->resume_inst_label);
+            if (instr->throw_inst_label) {
+                p += sprintf(p, " ");
+                p = ir_label_repr(p, instr->throw_inst_label);
+            }
             break;
         }
         case ir_opcode_yield_dispatch: {
