@@ -74,7 +74,6 @@ typedef struct _JITData {
     ir_label fast_block_end;
     ir_label fast_block_end_int;
     ir_label exit;
-    ir_label yield_dispatch;
 
     resume_entry *resume_entry_list;
 
@@ -3102,7 +3101,6 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     jd->fast_block_end = ir_label_new(jd->func, "fast_block_end");
     jd->fast_block_end_int = ir_label_new(jd->func, "fast_block_end_int");
     jd->exit = ir_label_new(jd->func, "exit");
-    jd->yield_dispatch = ir_label_new(jd->func, "yield_dispatch");
     jd->body_start = ir_label_new(jd->func, "body_start");
 
     char namebuf[64];
@@ -3184,7 +3182,8 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     IR_ASSERT(CMP_GE(LOAD_FIELD(jd->f, PyFrameObject, f_lasti, ir_type_int), CONSTANT_INT(-1)));
 
     if (jd->is_gen) {
-        BRANCH(jd->yield_dispatch);
+        /* To be filled in by ir_lower() */
+        ir_yield_dispatch(jd->func, jd->body_start);
     }
 
     /* Normal function entry (this is also the
@@ -3269,9 +3268,8 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     JVALUE ret = IR_Py_CheckFunctionResult(NULL, jd->retval, "PyJIT_EvalFrame");
     ir_ret(jd->func, ret);
 
-    LABEL(jd->yield_dispatch);
-    /* To be filled in by ir_lower() */
-    CRASH();
+    /* Close the cursor */
+    ir_cursor_close(jd->func);
 
     /* Move extra sections to end */
     {
@@ -3540,6 +3538,32 @@ void _ir_lower_one_instr(JITData *jd, ir_func func, ir_instr _instr) {
     } // switch
 }
 
+ static inline
+void _ir_lower_yield_dispatch(JITData *jd, ir_instr _instr) {
+    IR_INSTR_AS(yield_dispatch)
+    assert(_instr->opcode == ir_opcode_yield_dispatch);
+
+    /* TODO: Find a less quadratic way to do this dispatch */
+    JVALUE f_lasti = LOAD_FIELD(jd->f, PyFrameObject, f_lasti, ir_type_int);
+
+    /* Handle generator start */
+    BRANCH_IF(CMP_LT(f_lasti, CONSTANT_INT(0)), instr->body_start, IR_SEMILIKELY);
+
+    /* Handle each resume point */
+    resume_entry *re = jd->resume_entry_list;
+    resume_entry *re_next;
+    while (re != NULL) {
+        BRANCH_IF(CMP_EQ(f_lasti, CONSTANT_INT(re->f_lasti)), re->resume_point, IR_SEMILIKELY);
+        re_next = re->next;
+        PyMem_RawFree(re);
+        re = re_next;
+    }
+    jd->resume_entry_list = NULL;
+
+    /* Should be unreachable */
+    CRASH();
+}
+
 void ir_lower(JITData *jd) {
     ir_func func = jd->func;
     ir_block b;
@@ -3552,44 +3576,51 @@ void ir_lower(JITData *jd) {
             if (!ir_opcode_is_python_specific(_instr->opcode))
                 continue;
 
-            /* Set our insertion position to right after the instruction we're replacing */
-            func->current_block = b;
-            b->current_instr = _instr;
+            /* yield_dispatch is handled in the second pass */
+            if (_instr->opcode == ir_opcode_yield_dispatch)
+                continue;
 
+            /* Resume scan at prev instruction */
+            _instr_next = _instr->prev;
+
+            /* Set our position to the instruction we're replacing */
+            ir_cursor_open(func, b, _instr);
+
+            /* Unlink the instruction we're about to lower */
+            ir_cursor_remove(func);
+
+            /* Insert lowered version */
             _ir_lower_one_instr(jd, func, _instr);
 
-            /* Reposition cursor to after _instr */
-            _instr_next = _instr->next;
-
-            /* Delete the original instruction */
-            _ir_instr_remove(func, b, _instr);
+            /* Close cursor */
+            ir_cursor_close(func);
         }
     }
 
     /* Fill in the yield_dispatch section */
-    b = jd->yield_dispatch->block;
-    assert(b != NULL);
+    if (jd->is_gen) {
+        for (b = func->first_block; b != NULL; b = b->next) {
+            for (_instr = b->first_instr; _instr != NULL; _instr = _instr_next) {
+                _instr_next = _instr->next;
+                if (_instr->opcode == ir_opcode_yield_dispatch) {
+                    /* Resume scan at prev instruction */
+                    _instr_next = _instr->prev;
 
-    /* Set insertion position to front of block */
-    func->current_block = b;
-    b->current_instr = NULL;
+                    /* Set our position to the instruction we're replacing */
+                    ir_cursor_open(func, b, _instr);
 
-    /* TODO: Find a less quadratic way to do this dispatch */
-    JVALUE f_lasti = LOAD_FIELD(jd->f, PyFrameObject, f_lasti, ir_type_int);
+                    /* Unlink the instruction we're about to lower */
+                    ir_cursor_remove(func);
 
-    /* Handle generator start */
-    BRANCH_IF(CMP_LT(f_lasti, CONSTANT_INT(0)), jd->body_start, IR_SEMILIKELY);
+                    /* Insert lowered version */
+                    _ir_lower_yield_dispatch(jd, _instr);
 
-    /* Handle each resume point */
-    resume_entry *re = jd->resume_entry_list;
-    resume_entry *re_next;
-    while (re != NULL) {
-        BRANCH_IF(CMP_EQ(f_lasti, CONSTANT_INT(re->f_lasti)), re->resume_point, IR_SEMILIKELY);
-        re_next = re->next;
-        PyMem_RawFree(re);
-        re = re_next;
+                    /* Close cursor */
+                    ir_cursor_close(func);
+                }
+            }
+        }
     }
-    jd->resume_entry_list = NULL;
 }
 
 void ir_verify_stack_effect(ir_func func) {

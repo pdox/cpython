@@ -16,9 +16,8 @@ struct ir_block_t {
     ir_block prev;
     ir_block next;
     ir_instr first_instr;
-    ir_instr current_instr; /* NULL means 'insert before first_instr' */
+    ir_instr current_instr;
     ir_instr last_instr;
-    ir_label label;
     size_t index;
 };
 
@@ -34,6 +33,7 @@ struct ir_func_t {
     ir_context context;
     char *name;
     ir_type sig;
+    ir_label entry_label;
     ir_block first_block;
     ir_block current_block; /* NULL means 'insert after last_block' */
     ir_block last_block;

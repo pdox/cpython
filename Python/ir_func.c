@@ -19,6 +19,11 @@ ir_func ir_func_new(ir_context context, const char *name, ir_type sig) {
     for (i = 0; i < sig->param_count; i++) {
         func->param[i] = ir_value_new(func, sig->param[i]);
     }
+    func->entry_label = ir_label_new(func, "entry");
+
+    /* Open a cursor at the entry block */
+    _ir_func_new_block(func);
+    ir_label_here(func, func->entry_label);
     return func;
 }
 
@@ -62,6 +67,10 @@ void ir_func_verify(ir_func func) {
         assert(b_prev == b->prev);
         b_prev = b;
 
+        /* First instruction must always be a label */
+        assert(b->first_instr != NULL);
+        assert(b->first_instr->opcode == ir_opcode_label_here);
+
         /* Scan instructions */
         ir_instr _instr;
         ir_instr _instr_prev = NULL;
@@ -70,12 +79,10 @@ void ir_func_verify(ir_func func) {
             assert(_instr_prev == _instr->prev);
             _instr_prev = _instr;
 
-            if (ir_instr_opcode_needs_to_start_block(_instr->opcode)) {
-                assert(_instr == b->first_instr &&
-                       "Instruction not at start of block");
-                assert(_instr->prev == NULL);
+            if (ir_instr_opcode_needs_to_be_at_front(_instr->opcode)) {
+                assert(_instr == b->first_instr->next &&
+                       "Instruction not at front of block");
             }
-
             if (ir_instr_opcode_is_flow_control(_instr->opcode)) {
                 assert(_instr == b->last_instr &&
                        "Flow control inside block");
@@ -103,6 +110,11 @@ void ir_func_verify(ir_func func) {
                 }
                 case ir_opcode_ret:
                     break;
+                case ir_opcode_yield_dispatch: {
+                    IR_INSTR_AS(yield_dispatch)
+                    assert(instr->body_start->block != NULL);
+                    break;
+                }
                 default:
                     Py_FatalError("Unhandled branch opcode");
                     break;
@@ -140,9 +152,6 @@ char* ir_func_dump(ir_func func) {
 
     ir_block b;
     for (b = func->first_block; b != NULL; b = b->next) {
-        if (b->label) {
-            p += sprintf(p, "%s:\n", b->label->name ? b->label->name : "<unnamed_label>");
-        }
         p = ir_block_repr(p, b);
         p += sprintf(p, "\n");
     }

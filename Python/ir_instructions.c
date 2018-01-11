@@ -101,6 +101,9 @@ ir_value* ir_get_uses(ir_instr _instr, size_t *count) {
         *u++ = instr->src;
         break;
     }
+    case ir_opcode_label_here: {
+        break;
+    }
     case ir_opcode_info_here:
         break;
     case ir_opcode_branch:
@@ -168,6 +171,8 @@ ir_value* ir_get_uses(ir_instr _instr, size_t *count) {
         *u++ = instr->value;
         break;
     }
+    case ir_opcode_yield_dispatch:
+        break;
     } // switch
     *count = u - uses;
     assert(*count <= 5);
@@ -218,6 +223,7 @@ _ir_opcode_repr(ir_opcode opcode) {
     OPCODE_CASE(constant)
     OPCODE_CASE(cast)
     OPCODE_CASE(set_value)
+    OPCODE_CASE(label_here)
     OPCODE_CASE(info_here)
     OPCODE_CASE(branch)
     OPCODE_CASE(branch_cond)
@@ -236,6 +242,7 @@ _ir_opcode_repr(ir_opcode opcode) {
     OPCODE_CASE(goto_error)
     OPCODE_CASE(goto_fbe)
     OPCODE_CASE(yield)
+    OPCODE_CASE(yield_dispatch)
 
 #undef OPCODE_CASE
 
@@ -412,6 +419,11 @@ ir_instr_repr(char *p, ir_instr _instr) {
             p = ir_value_repr(p, instr->value);
             break;
         }
+        case ir_opcode_label_here: {
+            IR_INSTR_AS(label_here)
+            p = ir_label_repr(p, instr->label);
+            break;
+        }
         case ir_opcode_info_here: {
             IR_INSTR_AS(info_here)
             p += sprintf(p, "%s:", instr->info);
@@ -529,6 +541,11 @@ ir_instr_repr(char *p, ir_instr _instr) {
         case ir_opcode_yield: {
             IR_INSTR_AS(yield)
             p = ir_value_repr(p, instr->value);
+            break;
+        }
+        case ir_opcode_yield_dispatch: {
+            IR_INSTR_AS(yield_dispatch)
+            p = ir_label_repr(p, instr->body_start);
             break;
         }
     }

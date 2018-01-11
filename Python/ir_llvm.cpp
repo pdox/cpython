@@ -446,6 +446,9 @@ void _emit_instr(_TranslationContext &ctx, ir_block b, ir_instr _instr) {
         SET_DEST(LLVM_VALUE(instr->src));
         break;
     }
+    case ir_opcode_label_here: {
+        break;
+    }
     case ir_opcode_info_here: {
         break;
     }

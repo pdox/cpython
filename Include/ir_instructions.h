@@ -50,6 +50,9 @@ typedef enum {
     /* set register. Not present in SSA form */
     ir_opcode_set_value,   // existing_value = value;
 
+    /* label */
+    ir_opcode_label_here,
+
     /* user-specified debug info */
     ir_opcode_info_here,   // info (string) embedded at a specific point
 
@@ -70,9 +73,12 @@ typedef enum {
     ir_opcode_check_eval_breaker,
     ir_opcode_setup_block,
     ir_opcode_pop_block,
+
+    /* Python-specific flow control */
     ir_opcode_goto_error,   // error (i.e. raise exception)
     ir_opcode_goto_fbe,     // fast_block_end
     ir_opcode_yield,        // fast_yield
+    ir_opcode_yield_dispatch, // yield dispatch table
 } ir_opcode;
 
 #define IR_INSTR_AS(kind) \
@@ -85,7 +91,7 @@ int ir_instr_opcode_is_flow_control(ir_opcode opcode) {
 }
 
 static inline
-int ir_instr_opcode_needs_to_start_block(ir_opcode opcode) {
+int ir_instr_opcode_needs_to_be_at_front(ir_opcode opcode) {
     return opcode == ir_opcode_setup_block ||
            opcode == ir_opcode_pop_block;
 }
@@ -93,7 +99,7 @@ int ir_instr_opcode_needs_to_start_block(ir_opcode opcode) {
 static inline
 int ir_opcode_is_python_specific(ir_opcode opcode) {
     return opcode >= ir_opcode_getlocal &&
-           opcode <= ir_opcode_yield;
+           opcode <= ir_opcode_yield_dispatch;
 }
 
 IR_PROTOTYPE(ir_instr)
@@ -115,9 +121,7 @@ ir_value* ir_get_uses(ir_instr _instr, size_t *count);
 
 /* Forward declaration. Actual code is at the bottom of this file. */
 static inline
-void _ir_instr_insert(ir_func func, ir_instr _instr);
-static inline
-void _ir_func_new_block(ir_func func);
+void ir_cursor_insert(ir_func func, ir_instr _instr);
 
 #define IR_INSTR_HEADER    ir_instr_t base;
 #define IR_INSTR_ALLOC(_type, _extra_size) \
@@ -134,7 +138,7 @@ ir_value _ir_instr_insert_helper(ir_func func, ir_instr instr, ir_opcode opcode,
     if (dest) {
         dest->def = (opcode == ir_opcode_set_value) ? NULL : instr;
     }
-    _ir_instr_insert(func, instr);
+    ir_cursor_insert(func, instr);
     return dest;
 }
 
@@ -608,22 +612,20 @@ void ir_branch(ir_func func, ir_label target) {
     IR_INSTR_INSERT(ir_opcode_branch, ir_type_void);
 }
 
+/*****************************************************************************/
+
+IR_PROTOTYPE(ir_instr_label_here)
+struct ir_instr_label_here_t {
+    IR_INSTR_HEADER
+    ir_label label;
+};
+
 static inline
 void ir_label_here(ir_func func, ir_label label) {
+    IR_INSTR_ALLOC(ir_instr_label_here, 0)
     assert(label->block == NULL);
-    ir_block b = func->current_block;
-    if (b && !(b->label == NULL && b->current_instr == NULL)) {
-        ir_branch(func, label);
-        b = func->current_block;
-        assert(b == NULL || b->current_instr == NULL);
-    }
-    if (!b) {
-        _ir_func_new_block(func);
-        b = func->current_block;
-    }
-    assert(b && b->label == NULL && b->current_instr == NULL);
-    b->label = label;
-    label->block = b;
+    instr->label = label;
+    IR_INSTR_INSERT(ir_opcode_label_here, ir_type_void);
 }
 
 /*****************************************************************************/
@@ -948,6 +950,24 @@ void ir_yield(ir_func func, ir_value value, int next_instr_index) {
 }
 
 /*****************************************************************************/
+
+IR_PROTOTYPE(ir_instr_yield_dispatch)
+struct ir_instr_yield_dispatch_t {
+    IR_INSTR_HEADER
+    /* Do not change below without fixing ir_list_outgoing_labels() */
+    ir_label body_start;
+};
+
+static inline
+void ir_yield_dispatch(ir_func func, ir_label body_start) {
+    IR_INSTR_ALLOC(ir_instr_yield_dispatch, 0)
+    assert(body_start);
+    instr->body_start = body_start;
+    IR_INSTR_INSERT(ir_opcode_yield_dispatch, ir_type_void);
+}
+
+/*****************************************************************************/
+
 char* ir_instr_repr(char *p, ir_instr _instr);
 
 /* _ir_func_new_block:
@@ -983,7 +1003,6 @@ void _ir_func_new_block(ir_func func) {
     block->first_instr = NULL;
     block->current_instr = NULL;
     block->last_instr = NULL;
-    block->label = NULL;
     block->index = (func->next_block_index)++;
     ir_block after = func->current_block ? func->current_block : func->last_block;
     IR_LL_INSERT_AFTER(func->first_block, func->last_block, after, block);
@@ -1003,48 +1022,95 @@ void _ir_func_new_block(ir_func func) {
     func->current_block = block;
 }
 
-/* Insert an insertion into the function. This, along with _ir_instr_remove, should be
-   the only code which mutates the instruction linked list.
- */
-static inline
-void _ir_instr_insert(ir_func func, ir_instr _instr) {
-    int terminates_block = ir_instr_opcode_is_flow_control(_instr->opcode);
-    int needs_to_start_block = ir_instr_opcode_needs_to_start_block(_instr->opcode);
-    ir_block b = func->current_block;
-    if (needs_to_start_block && b && b->current_instr != NULL) {
-        ir_label label = ir_label_new(func, "needs_to_start");
-        ir_branch(func, label);
-        ir_label_here(func, label);
-        b = func->current_block;
-    }
-    if (b == NULL) {
-        _ir_func_new_block(func);
-        b = func->current_block;
-    }
-    assert(!needs_to_start_block || b->first_instr == NULL);
-    IR_LL_INSERT_AFTER(b->first_instr, b->last_instr, b->current_instr, _instr);
+/* Open the cursor, and position it immediately after "_instr" in block "b" */
+static inline void ir_cursor_open(ir_func func, ir_block b, ir_instr _instr) {
+    assert(func->current_block == NULL); /* Cursor already open? */
+    assert(b && _instr);
+    func->current_block = b;
     b->current_instr = _instr;
-    if (terminates_block) {
-        if (b->current_instr == b->last_instr) {
-            func->current_block = b->next;
-            if (func->current_block) {
-                func->current_block->current_instr = NULL;
-            }
-        } else {
-            _ir_func_new_block(func);
-        }
-    } else if (_instr->next != NULL &&
-              ir_instr_opcode_needs_to_start_block(_instr->next->opcode)) {
-        /* We inserted _instr immediately before another instruction that wants
-           to be at the start of a block. Create a new block to keep it happy. */
-        ir_label label = ir_label_new(func, "needs_to_start_fixup");
-        ir_branch(func, label);
-        ir_label_here(func, label);
-    }
 }
 
+/* Insert an instruction into the function, immediately after the current
+   instruction. */
 static inline
-void _ir_instr_remove(ir_func func, ir_block block, ir_instr instr) {
-    assert(block->current_instr != instr);
-    IR_LL_REMOVE(block->first_instr, block->last_instr, instr);
+void ir_cursor_insert(ir_func func, ir_instr _instr) {
+    ir_block b = func->current_block;
+    assert(b != NULL); /* Cursor not open? */
+    if (_instr->opcode == ir_opcode_label_here) {
+        /* We're inserting a label, which must be at the start of a block. */
+        /* If we're in the middle of a block, and the last instruction does not
+           already terminate the block, branch to the next block. */
+        if (b->current_instr != NULL) {
+            if (!ir_instr_opcode_is_flow_control(b->current_instr->opcode)) {
+                IR_INSTR_AS(label_here)
+                ir_branch(func, instr->label);
+            }
+            _ir_func_new_block(func);
+            b = func->current_block;
+        }
+        assert(b->current_instr == NULL);
+    } else if (ir_instr_opcode_needs_to_be_at_front(_instr->opcode)) {
+        assert(b->first_instr != NULL); /* Block needs a label first */
+        if (b->current_instr != b->first_instr) {
+            ir_label needs_to_be_at_front = ir_label_new(func, "needs_to_be_at_front");
+            ir_branch(func, needs_to_be_at_front);
+            ir_label_here(func, needs_to_be_at_front);
+            b = func->current_block;
+        }
+        assert(b->current_instr == b->first_instr &&
+               b->current_instr->opcode == ir_opcode_label_here);
+    }
+
+    /* Do actual insert */
+    assert(b == func->current_block);
+    IR_LL_INSERT_AFTER(b->first_instr, b->last_instr, b->current_instr, _instr);
+    b->current_instr = _instr;
+
+    if (_instr->opcode == ir_opcode_label_here) {
+        IR_INSTR_AS(label_here)
+        instr->label->block = b;
+    }
+
+    /* This insertion might have broken a required invariant of the next
+       instruction, but that will be taken care of by ir_cursor_close(). */
+}
+
+/* Remove the current instruction, re-positioning the cursor at the previous one.
+   There must be an open cursor. Note that this cannot be used to delete labels.
+ */
+static inline
+void ir_cursor_remove(ir_func func) {
+    ir_block b = func->current_block;
+    assert(b);
+    ir_instr _instr = b->current_instr;
+    assert(_instr);
+    ir_instr prev = _instr->prev;
+    assert(_instr->opcode != ir_opcode_label_here && prev);
+    IR_LL_REMOVE(b->first_instr, b->last_instr, _instr);
+    b->current_instr = prev;
+    _instr->prev = _instr->next = NULL;
+}
+
+static inline void ir_cursor_close(ir_func func) {
+    assert(func->current_block != NULL);
+
+    /* Check the constraints immediately after the cursor position */
+    ir_block b = func->current_block;
+    ir_instr _instr = b->current_instr;
+    int terminates_block = ir_instr_opcode_is_flow_control(_instr->opcode);
+
+    if (terminates_block) {
+        /* If there is an instruction after a block terminator, it cannot be
+           a label, so the code is dead. TODO: Make this an assert. */
+        if (_instr->next != NULL) {
+            _instr->next = NULL;
+            b->last_instr = _instr;
+        }
+    } else if (_instr->next != NULL &&
+               ir_instr_opcode_needs_to_be_at_front(_instr->next->opcode)) {
+        ir_label needs_to_be_at_front = ir_label_new(func, "needs_to_be_at_front");
+        ir_branch(func, needs_to_be_at_front);
+        ir_label_here(func, needs_to_be_at_front);
+    }
+    func->current_block = NULL;
 }
