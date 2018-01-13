@@ -614,6 +614,9 @@ void _emit_fast_block_end(JITData *jd) {
         IF(LOGICAL_AND_NSC(
              CMP_EQ(b_type, CONSTANT_INT(SETUP_LOOP)),
              CMP_EQ(jd->why, CONSTANT_INT(WHY_CONTINUE))), IR_SEMILIKELY, {
+            /* Unwind stack without popping block. 'iter' remains on TOS */
+            JVALUE b_level = LOAD_FIELD(b, PyTryBlock, b_level, ir_type_int);
+            UNWIND_TO(ADD(b_level, CONSTANT_INT(1)));
             SET_WHY(WHY_NOT);
             JVALUE v = CALL_PyLong_AsLong(jd->retval);
             DECREF(jd->retval);
@@ -2753,29 +2756,8 @@ EMITTER_FOR(SETUP_WITH) {
     CHECK_EVAL_BREAKER();
 }
 
-void _with_cleanup_start_helper(PyFrameObject *f) {
-    PyTryBlock *block = &f->f_blockstack[f->f_iblock - 1];
-    assert(block->b_type == EXCEPT_HANDLER);
-    block->b_level--;
-}
-
 EMITTER_FOR(WITH_CLEANUP_START) {
     JVALUE exit_func = PEEK(7);
-
-    /* Shift everything down */
-    PUT(7, PEEK(6));
-    PUT(6, PEEK(5));
-    PUT(5, PEEK(4));
-    PUT(4, PEEK(3));
-    PUT(3, PEEK(2));
-    PUT(2, PEEK(1));
-    STACKADJ(-1);
-
-    /* We just shifted the stack down, so we have
-       to tell the except handler block that the
-       values are lower than it expects. */
-    JTYPE sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyframeobject_ptr);
-    CALL_NATIVE(sig, _with_cleanup_start_helper, jd->f);
 
     JVALUE exc = JVALUE_CREATE(ir_type_pyobject_ptr);
     JVALUE val = JVALUE_CREATE(ir_type_pyobject_ptr);
@@ -2800,7 +2782,6 @@ EMITTER_FOR(WITH_CLEANUP_START) {
     STORE_AT_INDEX(jd->tmpstack, CONSTANT_INT(2), tb);
     JTYPE sig2 = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr_ptr, ir_type_pyssizet, ir_type_pyobject_ptr);
     JVALUE res = CALL_NATIVE(sig2, _PyObject_FastCallDict, exit_func, jd->tmpstack, CONSTANT_PYSSIZET(3), CONSTANT_PYOBJ(NULL));
-    DECREF(exit_func);
     GOTO_ERROR_IF_NOT(res);
     /* Duplicating the exception on the stack */
     INCREF(exc);

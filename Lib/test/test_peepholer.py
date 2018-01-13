@@ -54,7 +54,7 @@ class TestTranforms(BytecodeTestCase):
             while 1:
                 pass
             return list
-        for elem in ('LOAD_CONST', 'POP_JUMP_IF_FALSE'):
+        for elem in ('POP_JUMP_IF_FALSE',):
             self.assertNotInBytecode(f, elem)
         for elem in ('JUMP_ABSOLUTE',):
             self.assertInBytecode(f, elem)

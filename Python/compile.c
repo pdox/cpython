@@ -2378,6 +2378,13 @@ compiler_while(struct compiler *c, stmt_ty s)
         orelse = NULL;
 
     ADDOP_JREL(c, SETUP_LOOP, end);
+
+    /* Push a dummy Py_None on the stack, to take up the slot that "iter"
+       resides in during for loops. LOOP blocks always assume that this
+       position should not be pop'd when doing partial unwind for 'continue'.
+     */
+    ADDOP_O(c, LOAD_CONST, Py_None, consts);
+
     compiler_use_next_block(c, loop);
     if (!compiler_push_fblock(c, LOOP, loop))
         return 0;
@@ -4249,6 +4256,9 @@ compiler_async_with(struct compiler *c, stmt_ty s, int pos)
     /* Finally block ends. */
     ADDOP(c, END_FINALLY);
     compiler_pop_fblock(c, FINALLY_END, finally);
+
+    /* Pop __exit__ left on stack by BEFORE_ASYNC_WITH */
+    ADDOP(c, POP_TOP);
     return 1;
 }
 
@@ -4332,6 +4342,9 @@ compiler_with(struct compiler *c, stmt_ty s, int pos)
     /* Finally block ends. */
     ADDOP(c, END_FINALLY);
     compiler_pop_fblock(c, FINALLY_END, finally);
+
+    /* Pop __exit__ left on stack by SETUP_WITH */
+    ADDOP(c, POP_TOP);
     return 1;
 }
 

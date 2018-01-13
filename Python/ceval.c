@@ -812,11 +812,16 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
                                      Py_XDECREF(tmp); } while (0)
 
 
-#define UNWIND_BLOCK(b) \
-    while (STACK_LEVEL() > (b)->b_level) { \
+#define UNWIND_TO(level) \
+    assert(STACK_LEVEL() >= (level)); \
+    while (STACK_LEVEL() > (level)) { \
         PyObject *v = POP(); \
         Py_XDECREF(v); \
     }
+
+#define UNWIND_BLOCK(b) \
+    UNWIND_TO((b)->b_level)
+
 
 /* Unwind just the "previous exception" part of the EXCEPT_HANDLER.
    This should only be called after it has been verified that the
@@ -3047,22 +3052,6 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
             PyObject *exit_func = PEEK(7);
             PyObject *exc, *val, *tb, *res;
 
-            /* Shift everything down */
-            SET_VALUE(7, PEEK(6));
-            SET_VALUE(6, PEEK(5));
-            SET_VALUE(5, PEEK(4));
-            SET_VALUE(4, PEEK(3));
-            SET_VALUE(3, PEEK(2));
-            SET_VALUE(2, PEEK(1));
-            STACKADJ(-1);
-
-            /* We just shifted the stack down, so we have
-               to tell the finally handler block that the
-               values are lower than it expects. */
-            PyTryBlock *block = &f->f_blockstack[f->f_iblock - 1];
-            assert(block->b_type == EXCEPT_HANDLER);
-            block->b_level--;
-
             val = tb = Py_None;
             exc = TOP();
             if (exc == Py_None || PyLong_Check(exc)) {
@@ -3075,7 +3064,6 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
             stack[1] = val;
             stack[2] = tb;
             res = _PyObject_FastCall(exit_func, stack, 3);
-            Py_DECREF(exit_func);
             if (res == NULL)
                 goto error;
 
@@ -3449,6 +3437,8 @@ fast_block_end:
 
             assert(why != WHY_YIELD);
             if (b->b_type == SETUP_LOOP && why == WHY_CONTINUE) {
+                /* Unwind stack without popping block. 'iter' remains on TOS */
+                UNWIND_TO(b->b_level + 1);
                 why = WHY_NOT;
                 JUMPTO(PyLong_AS_LONG(retval));
                 Py_DECREF(retval);
