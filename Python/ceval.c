@@ -818,7 +818,12 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
         Py_XDECREF(v); \
     }
 
-#define UNWIND_EXCEPT_HANDLER(b) \
+/* Unwind just the "previous exception" part of the EXCEPT_HANDLER.
+   This should only be called after it has been verified that the
+   six-element EXCEPT_HANDLER stack came from an exception (and
+   not a RETURN/BREAK/CONTINUE or None).
+ */
+#define UNWIND_EXCEPT_ONLY(b) \
     do { \
         PyObject *type, *value, *traceback; \
         _PyErr_StackItem *exc_info; \
@@ -838,6 +843,34 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
         Py_XDECREF(value); \
         Py_XDECREF(traceback); \
     } while(0)
+
+#define UNWIND_EXCEPT_HANDLER(b) \
+    do { \
+        PyObject *value; \
+        PyObject *status; \
+        assert(b->b_type == EXCEPT_HANDLER); \
+        assert(STACK_LEVEL() >= (b)->b_level + 6); \
+        while (STACK_LEVEL() > (b)->b_level + 6) { \
+            value = POP(); \
+            Py_XDECREF(value); \
+        } \
+        status = POP(); \
+        if (PyLong_Check(status)) { \
+            if ((enum why_code) PyLong_AS_LONG(status) == WHY_SILENCED) { \
+                UNWIND_EXCEPT_ONLY(b); \
+            } else { \
+                UNWIND_BLOCK(b); \
+            } \
+        } else if (PyExceptionClass_Check(status)) { \
+            UNWIND_EXCEPT_ONLY(b); \
+        } else if (status == Py_None) { \
+            UNWIND_BLOCK(b); \
+        } else { \
+            Py_FatalError("UNWIND_EXCEPT_HANDLER pops bad exception"); \
+        } \
+        Py_DECREF(status); \
+        assert(STACK_LEVEL() == (b)->b_level); \
+    } while (0)
 
 /* Start of code */
 
@@ -1903,8 +1936,21 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
             DISPATCH();
         }
 
+        TARGET(ENTER_FINALLY) {
+            PyFrame_BlockSetup(f, EXCEPT_HANDLER, -1, STACK_LEVEL());
+            for (int i = 0; i < 6; i++) {
+                Py_INCREF(Py_None);
+                PUSH(Py_None);
+            }
+            FAST_DISPATCH();
+        }
+
         PREDICTED(END_FINALLY);
         TARGET(END_FINALLY) {
+            PyTryBlock *b = PyFrame_BlockPop(f);
+            assert(b->b_type == EXCEPT_HANDLER);
+            assert(STACK_LEVEL() == b->b_level + 6);
+
             PyObject *status = POP();
             if (PyLong_Check(status)) {
                 why = (enum why_code) PyLong_AS_LONG(status);
@@ -1917,13 +1963,12 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
                     manually unwind the EXCEPT_HANDLER block which was
                     created when the exception was caught, otherwise
                     the stack will be in an inconsistent state. */
-                    PyTryBlock *b = PyFrame_BlockPop(f);
-                    assert(b->b_type == EXCEPT_HANDLER);
-                    UNWIND_EXCEPT_HANDLER(b);
+                    UNWIND_EXCEPT_ONLY(b);
                     why = WHY_NOT;
                     Py_DECREF(status);
                     DISPATCH();
                 }
+                UNWIND_BLOCK(b);
                 Py_DECREF(status);
                 goto fast_block_end;
             }
@@ -1932,14 +1977,17 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
                 PyObject *tb = POP();
                 PyErr_Restore(status, exc, tb);
                 why = WHY_EXCEPTION;
+                UNWIND_EXCEPT_ONLY(b);
                 goto fast_block_end;
             }
             else if (status != Py_None) {
                 PyErr_SetString(PyExc_SystemError,
                     "'finally' pops bad exception");
+                UNWIND_BLOCK(b);
                 Py_DECREF(status);
                 goto error;
             }
+            UNWIND_BLOCK(b);
             Py_DECREF(status);
             DISPATCH();
         }
@@ -2996,55 +3044,33 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
             */
 
             PyObject* stack[3];
-            PyObject *exit_func;
+            PyObject *exit_func = PEEK(7);
             PyObject *exc, *val, *tb, *res;
+
+            /* Shift everything down */
+            SET_VALUE(7, PEEK(6));
+            SET_VALUE(6, PEEK(5));
+            SET_VALUE(5, PEEK(4));
+            SET_VALUE(4, PEEK(3));
+            SET_VALUE(3, PEEK(2));
+            SET_VALUE(2, PEEK(1));
+            STACKADJ(-1);
+
+            /* We just shifted the stack down, so we have
+               to tell the finally handler block that the
+               values are lower than it expects. */
+            PyTryBlock *block = &f->f_blockstack[f->f_iblock - 1];
+            assert(block->b_type == EXCEPT_HANDLER);
+            block->b_level--;
 
             val = tb = Py_None;
             exc = TOP();
-            if (exc == Py_None) {
-                (void)POP();
-                exit_func = TOP();
-                SET_TOP(exc);
-            }
-            else if (PyLong_Check(exc)) {
-                STACKADJ(-1);
-                switch (PyLong_AsLong(exc)) {
-                case WHY_RETURN:
-                case WHY_CONTINUE:
-                    /* Retval in TOP. */
-                    exit_func = SECOND();
-                    SET_SECOND(TOP());
-                    SET_TOP(exc);
-                    break;
-                default:
-                    exit_func = TOP();
-                    SET_TOP(exc);
-                    break;
-                }
+            if (exc == Py_None || PyLong_Check(exc)) {
                 exc = Py_None;
-            }
-            else {
-                PyObject *tp2, *exc2, *tb2;
-                PyTryBlock *block;
+            } else {
                 val = SECOND();
                 tb = THIRD();
-                tp2 = FOURTH();
-                exc2 = PEEK(5);
-                tb2 = PEEK(6);
-                exit_func = PEEK(7);
-                SET_VALUE(7, tb2);
-                SET_VALUE(6, exc2);
-                SET_VALUE(5, tp2);
-                /* UNWIND_EXCEPT_HANDLER will pop this off. */
-                SET_FOURTH(NULL);
-                /* We just shifted the stack down, so we have
-                   to tell the except handler block that the
-                   values are lower than it expects. */
-                block = &f->f_blockstack[f->f_iblock - 1];
-                assert(block->b_type == EXCEPT_HANDLER);
-                block->b_level--;
             }
-
             stack[0] = exc;
             stack[1] = val;
             stack[2] = tb;
@@ -3078,6 +3104,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
                 goto error;
             else if (err > 0) {
                 /* There was an exception and a True return */
+                Py_DECREF(POP());
                 PUSH(PyLong_FromLong((long) WHY_SILENCED));
             }
             PREDICT(END_FINALLY);
@@ -3483,11 +3510,21 @@ fast_block_end:
                 break;
             }
             if (b->b_type == SETUP_FINALLY) {
-                if (why & (WHY_RETURN | WHY_CONTINUE))
+                int handler = b->b_handler;
+                PyFrame_BlockSetup(f, EXCEPT_HANDLER, -1, STACK_LEVEL());
+                for (int i = 0; i < 4; i++) {
+                   Py_INCREF(Py_None);
+                   PUSH(Py_None);
+                }
+                if (why & (WHY_RETURN | WHY_CONTINUE)) {
                     PUSH(retval);
+                } else {
+                   Py_INCREF(Py_None);
+                   PUSH(Py_None);
+                }
                 PUSH(PyLong_FromLong((long)why));
                 why = WHY_NOT;
-                JUMPTO(b->b_handler);
+                JUMPTO(handler);
                 break;
             }
         } /* unwind stack */

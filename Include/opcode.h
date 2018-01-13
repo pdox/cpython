@@ -12,6 +12,7 @@ extern "C" {
 #define ROT_THREE                 3
 #define DUP_TOP                   4
 #define DUP_TOP_TWO               5
+#define ENTER_FINALLY             6
 #define NOP                       9
 #define UNARY_POSITIVE           10
 #define UNARY_NEGATIVE           11

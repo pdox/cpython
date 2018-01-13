@@ -5,7 +5,7 @@ static const char *opcode_names[256] = {
     "ROT_THREE",
     "DUP_TOP",
     "DUP_TOP_TWO",
-    "unknown_opcode_6",
+    "ENTER_FINALLY",
     "unknown_opcode_7",
     "unknown_opcode_8",
     "NOP",

@@ -1075,6 +1075,8 @@ PyCompile_OpcodeStackEffect(int opcode, int oparg)
             return (oparg & FVS_MASK) == FVS_HAVE_SPEC ? -1 : 0;
         case LOAD_METHOD:
             return 1;
+        case ENTER_FINALLY:
+            return 0; /* Pushes 6, but already counted in SETUP_FINALLY */
         default:
             return PY_INVALID_STACK_EFFECT;
     }
@@ -2321,9 +2323,6 @@ compiler_async_for(struct compiler *c, stmt_ty s)
     ADDOP_I(c, COMPARE_OP, PyCmp_EXC_MATCH);
     ADDOP_JABS(c, POP_JUMP_IF_FALSE, try_cleanup);
 
-    ADDOP(c, POP_TOP);
-    ADDOP(c, POP_TOP);
-    ADDOP(c, POP_TOP);
     ADDOP(c, POP_EXCEPT); /* for SETUP_EXCEPT */
     ADDOP(c, POP_BLOCK); /* for SETUP_LOOP */
     ADDOP_JABS(c, JUMP_ABSOLUTE, after_loop_else);
@@ -2494,7 +2493,7 @@ compiler_try_finally(struct compiler *c, stmt_ty s)
     ADDOP(c, POP_BLOCK);
     compiler_pop_fblock(c, FINALLY_TRY, body);
 
-    ADDOP_O(c, LOAD_CONST, Py_None, consts);
+    ADDOP(c, ENTER_FINALLY);
     compiler_use_next_block(c, end);
     if (!compiler_push_fblock(c, FINALLY_END, end))
         return 0;
@@ -2575,7 +2574,6 @@ compiler_try_except(struct compiler *c, stmt_ty s)
             ADDOP_I(c, COMPARE_OP, PyCmp_EXC_MATCH);
             ADDOP_JABS(c, POP_JUMP_IF_FALSE, except);
         }
-        ADDOP(c, POP_TOP);
         if (handler->v.ExceptHandler.name) {
             basicblock *cleanup_end, *cleanup_body;
 
@@ -2584,8 +2582,12 @@ compiler_try_except(struct compiler *c, stmt_ty s)
             if (!(cleanup_end || cleanup_body))
                 return 0;
 
+            /* Store the exception value without modifying the stack.
+               This is equivalent to PEEK(2). */
+            ADDOP(c, ROT_TWO);
+            ADDOP(c, DUP_TOP);
             compiler_nameop(c, handler->v.ExceptHandler.name, Store);
-            ADDOP(c, POP_TOP);
+            ADDOP(c, ROT_TWO);
 
             /*
               try:
@@ -2607,11 +2609,10 @@ compiler_try_except(struct compiler *c, stmt_ty s)
             /* second # body */
             VISIT_SEQ(c, stmt, handler->v.ExceptHandler.body);
             ADDOP(c, POP_BLOCK);
-            ADDOP(c, POP_EXCEPT);
             compiler_pop_fblock(c, FINALLY_TRY, cleanup_body);
 
             /* finally: */
-            ADDOP_O(c, LOAD_CONST, Py_None, consts);
+            ADDOP(c, ENTER_FINALLY);
             compiler_use_next_block(c, cleanup_end);
             if (!compiler_push_fblock(c, FINALLY_END, cleanup_end))
                 return 0;
@@ -2625,6 +2626,8 @@ compiler_try_except(struct compiler *c, stmt_ty s)
 
             ADDOP(c, END_FINALLY);
             compiler_pop_fblock(c, FINALLY_END, cleanup_end);
+
+            ADDOP(c, POP_EXCEPT);
         }
         else {
             basicblock *cleanup_body;
@@ -2633,8 +2636,6 @@ compiler_try_except(struct compiler *c, stmt_ty s)
             if (!cleanup_body)
                 return 0;
 
-            ADDOP(c, POP_TOP);
-            ADDOP(c, POP_TOP);
             compiler_use_next_block(c, cleanup_body);
             if (!compiler_push_fblock(c, FINALLY_TRY, cleanup_body))
                 return 0;
@@ -3889,9 +3890,6 @@ compiler_async_comprehension_generator(struct compiler *c,
     ADDOP_I(c, COMPARE_OP, PyCmp_EXC_MATCH);
     ADDOP_JABS(c, POP_JUMP_IF_FALSE, try_cleanup);
 
-    ADDOP(c, POP_TOP);
-    ADDOP(c, POP_TOP);
-    ADDOP(c, POP_TOP);
     ADDOP(c, POP_EXCEPT); /* for SETUP_EXCEPT */
     ADDOP_JABS(c, JUMP_ABSOLUTE, anchor);
 
@@ -4232,7 +4230,7 @@ compiler_async_with(struct compiler *c, stmt_ty s, int pos)
     ADDOP(c, POP_BLOCK);
     compiler_pop_fblock(c, FINALLY_TRY, block);
 
-    ADDOP_O(c, LOAD_CONST, Py_None, consts);
+    ADDOP(c, ENTER_FINALLY);
     compiler_use_next_block(c, finally);
     if (!compiler_push_fblock(c, FINALLY_END, finally))
         return 0;
@@ -4320,7 +4318,7 @@ compiler_with(struct compiler *c, stmt_ty s, int pos)
     ADDOP(c, POP_BLOCK);
     compiler_pop_fblock(c, FINALLY_TRY, block);
 
-    ADDOP_O(c, LOAD_CONST, Py_None, consts);
+    ADDOP(c, ENTER_FINALLY);
     compiler_use_next_block(c, finally);
     if (!compiler_push_fblock(c, FINALLY_END, finally))
         return 0;

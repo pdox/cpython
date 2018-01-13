@@ -142,6 +142,10 @@ int _label_to_instr_index(JITData *jd, ir_label target) {
     ir_setup_block(jd->func, IR_PYBLOCK_ ## irkind, _target); \
 } while (0)
 
+#define SETUP_EXCEPT_HANDLER_BLOCK() do { \
+    ir_setup_block(jd->func, IR_PYBLOCK_EXCEPT_HANDLER, NULL); \
+} while (0)
+
 #define DO_POP_BLOCK(irkind) do { \
     ir_pop_block(jd->func, IR_PYBLOCK_ ## irkind); \
 } while (0)
@@ -398,6 +402,12 @@ extern void format_exc_unbound(PyCodeObject *co, int oparg);
     CALL_NATIVE(_sig, _PyObject_FastCallDict, (func), CONSTANT_PTR(ir_type_pyobject_ptr_ptr, NULL), CONSTANT_PYSSIZET(0), CONSTANT_PYOBJ(NULL)); \
 })
 
+#define CALL_PyLong_AsLong(objval) ({ \
+    JVALUE _val = (objval); \
+    JTYPE _sig = CREATE_SIGNATURE(ir_type_long, ir_type_pyobject_ptr); \
+    CALL_NATIVE(_sig, PyLong_AsLong, _val); \
+})
+
 /* Functions borrowed from ceval */
 int do_raise(PyObject *, PyObject *);
 
@@ -508,7 +518,7 @@ static void _unwind_except_helper(PyObject *s_type, PyObject *s_value, PyObject 
     Py_XDECREF(traceback);
 }
 
-#define UNWIND_EXCEPT_HANDLER(b) do { \
+#define UNWIND_EXCEPT_ONLY(b) do { \
     JVALUE level = LOAD_FIELD((b), PyTryBlock, b_level, ir_type_int); \
     UNWIND_TO(ADD(level, CONSTANT_INT(3))); \
     JVALUE s_type = POP(); \
@@ -516,6 +526,33 @@ static void _unwind_except_helper(PyObject *s_type, PyObject *s_value, PyObject 
     JVALUE s_traceback = POP(); \
     JTYPE _sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr); \
     CALL_NATIVE(_sig, _unwind_except_helper, s_type, s_value, s_traceback); \
+} while (0)
+
+#define UNWIND_EXCEPT_HANDLER(b) do { \
+    IR_ASSERT(CMP_EQ(LOAD_FIELD((b), PyTryBlock, b_type, ir_type_int), CONSTANT_INT(EXCEPT_HANDLER))); \
+    JVALUE level = LOAD_FIELD((b), PyTryBlock, b_level, ir_type_int); \
+    UNWIND_TO(ADD(level, CONSTANT_INT(6))); \
+    JVALUE status = POP(); \
+    IF_ELSE(IR_PyLong_Check(status), IR_SEMILIKELY, { \
+        JVALUE status_int = CAST(ir_type_int, CALL_PyLong_AsLong(status)); \
+        IF_ELSE(CMP_EQ(status_int, CONSTANT_INT(WHY_SILENCED)), IR_SEMILIKELY, { \
+            UNWIND_EXCEPT_ONLY(b); \
+        }, { \
+            UNWIND_BLOCK(b); \
+        }); \
+    }, { \
+        IF_ELSE(IR_PyExceptionClass_Check(status), IR_SEMILIKELY, { \
+            UNWIND_EXCEPT_ONLY(b); \
+        }, { \
+            IF_ELSE(CMP_EQ(status, CONSTANT_PYOBJ(Py_None)), IR_SEMILIKELY, { \
+                UNWIND_BLOCK(b); \
+            }, { \
+                CALL_Py_FatalError("UNWIND_EXCEPT_HANDLER pops bad exception"); \
+            }); \
+        }); \
+    }); \
+    DECREF(status); \
+    IR_ASSERT(CMP_EQ(STACK_LEVEL(), level)); \
 } while (0)
 
 /* --- BEGIN EMITTERS --- */
@@ -578,8 +615,7 @@ void _emit_fast_block_end(JITData *jd) {
              CMP_EQ(b_type, CONSTANT_INT(SETUP_LOOP)),
              CMP_EQ(jd->why, CONSTANT_INT(WHY_CONTINUE))), IR_SEMILIKELY, {
             SET_WHY(WHY_NOT);
-            JTYPE sig1 = CREATE_SIGNATURE(ir_type_long, ir_type_pyobject_ptr);
-            JVALUE v = CALL_NATIVE(sig1, PyLong_AsLong, jd->retval);
+            JVALUE v = CALL_PyLong_AsLong(jd->retval);
             DECREF(jd->retval);
             SET_VALUE(jd->retval, CONSTANT_PYOBJ(NULL));
             JUMPTO_VAL(v);
@@ -616,17 +652,26 @@ void _emit_fast_block_end(JITData *jd) {
             JUMPTO_VAL(b_handler);
         });
         IF(CMP_EQ(b_type, CONSTANT_INT(SETUP_FINALLY)), IR_SEMILIKELY, {
-            IF(BITWISE_AND(jd->why,
+            JVALUE handler = LOAD_FIELD(b, PyTryBlock, b_handler, ir_type_int);
+            /* Warning: This invalidates "b" */
+            SETUP_EXCEPT_HANDLER_BLOCK();
+            for (int i = 0; i < 4; i++) {
+                INCREF(CONSTANT_PYOBJ(Py_None));
+                PUSH(CONSTANT_PYOBJ(Py_None));
+            }
+            IF_ELSE(BITWISE_AND(jd->why,
                     CONSTANT_INT(WHY_RETURN | WHY_CONTINUE)), IR_SEMILIKELY,
             {
                 PUSH(jd->retval);
+            }, {
+                INCREF(CONSTANT_PYOBJ(Py_None));
+                PUSH(CONSTANT_PYOBJ(Py_None));
             });
             JTYPE sig3 = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_long);
             JVALUE r = CALL_NATIVE(sig3, PyLong_FromLong, CAST(ir_type_long, jd->why));
             PUSH(r);
             SET_WHY(WHY_NOT);
-            JVALUE b_handler = LOAD_FIELD(b, PyTryBlock, b_handler, ir_type_int);
-            JUMPTO_VAL(b_handler);
+            JUMPTO_VAL(handler);
         });
     }
     BRANCH(loop_start);
@@ -1216,29 +1261,45 @@ EMITTER_FOR(POP_BLOCK) {
     CHECK_EVAL_BREAKER();
 }
 
+EMITTER_FOR(ENTER_FINALLY) {
+    SETUP_EXCEPT_HANDLER_BLOCK();
+    JVALUE none = CONSTANT_PYOBJ(Py_None);
+    for (int i = 0; i < 6; i++) {
+        INCREF(none);
+        PUSH(none);
+    }
+}
+
 EMITTER_FOR(END_FINALLY) {
     IR_LABEL_INIT(try_case_2);
     IR_LABEL_INIT(try_case_3);
     IR_LABEL_INIT(normal_exit);
     IR_LABEL_INIT(dispatch);
 
+    JVALUE b = CALL_NATIVE(jd->blockpop_sig, PyFrame_BlockPop, jd->f);
+    IR_ASSERT(CMP_EQ(LOAD_FIELD(b, PyTryBlock, b_type, ir_type_int), CONSTANT_INT(EXCEPT_HANDLER)));
+    IR_ASSERT(CMP_EQ(STACK_LEVEL(),
+                     ADD(LOAD_FIELD(b, PyTryBlock, b_level, ir_type_int), CONSTANT_INT(6))));
+
     JVALUE status = POP();
 
     /* Case 1: status is PyLong (WHY code) */
     BRANCH_IF_NOT(IR_PyLong_Check(status), try_case_2, IR_SEMILIKELY);
-    JTYPE sig1 = CREATE_SIGNATURE(ir_type_long, ir_type_pyobject_ptr);
-    JVALUE why = CAST(ir_type_int, CALL_NATIVE(sig1, PyLong_AsLong, status));
+    JVALUE why = CAST(ir_type_int, CALL_PyLong_AsLong(status));
     DECREF(status);
 
     IF(CMP_EQ(why, CONSTANT_INT(WHY_RETURN)), IR_SEMILIKELY, {
         SET_VALUE(jd->retval, POP());
+        UNWIND_BLOCK(b);
         GOTO_FAST_BLOCK_END(RETURN);
     });
     IF(CMP_EQ(why, CONSTANT_INT(WHY_CONTINUE)), IR_SEMILIKELY, {
         SET_VALUE(jd->retval, POP());
+        UNWIND_BLOCK(b);
         GOTO_FAST_BLOCK_END(CONTINUE);
     });
     IF(CMP_EQ(why, CONSTANT_INT(WHY_BREAK)), IR_SEMILIKELY, {
+        UNWIND_BLOCK(b);
         GOTO_FAST_BLOCK_END(BREAK);
     });
     IF(CMP_EQ(why, CONSTANT_INT(WHY_SILENCED)), IR_SEMILIKELY, {
@@ -1246,7 +1307,7 @@ EMITTER_FOR(END_FINALLY) {
         manually unwind the EXCEPT_HANDLER block which was
         created when the exception was caught, otherwise
         the stack will be in an inconsistent state. */
-        DO_POP_BLOCK(EXCEPT_HANDLER);
+        UNWIND_EXCEPT_ONLY(b);
         BRANCH(dispatch);
     });
     CRASH(); /* Shouldn't get here. Invalid why value? */
@@ -1258,6 +1319,7 @@ EMITTER_FOR(END_FINALLY) {
         JVALUE tb = POP();
         JTYPE sig2 = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
         CALL_NATIVE(sig2, PyErr_Restore, status, exc, tb);
+        UNWIND_EXCEPT_ONLY(b);
         GOTO_FAST_BLOCK_END(EXCEPTION);
     }
 
@@ -1266,11 +1328,13 @@ EMITTER_FOR(END_FINALLY) {
     {
         CALL_PyErr_SetString(PyExc_SystemError,
                     "'finally' pops bad exception");
+        UNWIND_BLOCK(b);
         DECREF(status);
         GOTO_ERROR();
     }
 
     LABEL(normal_exit);
+    UNWIND_BLOCK(b);
     DECREF(status);
 
     LABEL(dispatch);
@@ -2696,51 +2760,40 @@ void _with_cleanup_start_helper(PyFrameObject *f) {
 }
 
 EMITTER_FOR(WITH_CLEANUP_START) {
-    JVALUE exc = TOP();
-    JVALUE exit_func = JVALUE_CREATE(ir_type_pyobject_ptr);
+    JVALUE exit_func = PEEK(7);
+
+    /* Shift everything down */
+    PUT(7, PEEK(6));
+    PUT(6, PEEK(5));
+    PUT(5, PEEK(4));
+    PUT(4, PEEK(3));
+    PUT(3, PEEK(2));
+    PUT(2, PEEK(1));
+    STACKADJ(-1);
+
+    /* We just shifted the stack down, so we have
+       to tell the except handler block that the
+       values are lower than it expects. */
+    JTYPE sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyframeobject_ptr);
+    CALL_NATIVE(sig, _with_cleanup_start_helper, jd->f);
+
+    JVALUE exc = JVALUE_CREATE(ir_type_pyobject_ptr);
     JVALUE val = JVALUE_CREATE(ir_type_pyobject_ptr);
     JVALUE tb = JVALUE_CREATE(ir_type_pyobject_ptr);
     SET_VALUE(val, CONSTANT_PYOBJ(Py_None));
     SET_VALUE(tb, CONSTANT_PYOBJ(Py_None));
-    IF_ELSE(CMP_EQ(exc, CONSTANT_PYOBJ(Py_None)), IR_SEMILIKELY, {
-        POP();
-        SET_VALUE(exit_func, TOP());
-        SET_TOP(exc);
-    }, {
-        IF_ELSE(IR_PyLong_Check(exc), IR_SEMILIKELY, {
-            STACKADJ(-1);
-            JTYPE sig1 = CREATE_SIGNATURE(ir_type_long, ir_type_pyobject_ptr);
-            JVALUE exc_code = CAST(ir_type_int, CALL_NATIVE(sig1, PyLong_AsLong, exc));
-            IF_ELSE(LOGICAL_OR(CMP_EQ(exc_code, CONSTANT_INT(WHY_RETURN)),
-                               CMP_EQ(exc_code, CONSTANT_INT(WHY_CONTINUE))), IR_SEMILIKELY, {
-                SET_VALUE(exit_func, SECOND());
-                SET_SECOND(TOP());
-                SET_TOP(exc);
-            }, {
-                SET_VALUE(exit_func, TOP());
-                SET_TOP(exc);
-            });
-            SET_VALUE(exc, CONSTANT_PYOBJ(Py_None));
-        }, {
-            SET_VALUE(val, SECOND());
-            SET_VALUE(tb, THIRD());
-            JVALUE tp2 = FOURTH();
-            JVALUE exc2 = PEEK(5);
-            JVALUE tb2 = PEEK(6);
-            SET_VALUE(exit_func, PEEK(7));
-            PUT(7, tb2);
-            PUT(6, exc2);
-            PUT(5, tp2);
+    SET_VALUE(exc, TOP());
 
-            /* UNWIND_EXCEPT_HANDLER will pop this off. */
-            SET_FOURTH(CONSTANT_PYOBJ(NULL));
-            /* We just shifted the stack down, so we have
-               to tell the except handler block that the
-               values are lower than it expects. */
-            JTYPE sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyframeobject_ptr);
-            CALL_NATIVE(sig, _with_cleanup_start_helper, jd->f);
-        });
+    IR_LABEL_INIT(proceed);
+    BRANCH_IF(CMP_EQ(exc, CONSTANT_PYOBJ(Py_None)), proceed, IR_SEMILIKELY);
+    IF_ELSE(IR_PyLong_Check(exc), IR_SEMILIKELY, {
+        SET_VALUE(exc, CONSTANT_PYOBJ(Py_None));
+    }, {
+        SET_VALUE(val, SECOND());
+        SET_VALUE(tb, THIRD());
     });
+
+    LABEL(proceed);
     assert(jd->tmpstack_size >= 3);
     STORE_AT_INDEX(jd->tmpstack, CONSTANT_INT(0), exc);
     STORE_AT_INDEX(jd->tmpstack, CONSTANT_INT(1), val);
@@ -2768,6 +2821,8 @@ EMITTER_FOR(WITH_CLEANUP_FINISH) {
     DECREF(exc);
     GOTO_ERROR_IF(CMP_LT(err, CONSTANT_INT(0)));
     IF(CMP_GT(err, CONSTANT_INT(0)), IR_SOMETIMES, {
+        /* There was an exception and a True return */
+        DECREF(POP());
         JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_long);
         JVALUE why_silenced = CALL_NATIVE(sig, PyLong_FromLong, CONSTANT_LONG(WHY_SILENCED));
         PUSH(why_silenced);
@@ -3448,18 +3503,21 @@ void _ir_lower_one_instr(JITData *jd, ir_func func, ir_instr _instr) {
     case ir_opcode_setup_block: {
         IR_INSTR_AS(setup_block)
         int b_type;
-        if (instr->b_type == IR_PYBLOCK_FINALLY_END) {
-            break;
-        }
         switch (instr->b_type) {
         case IR_PYBLOCK_LOOP: b_type = SETUP_LOOP; break;
         case IR_PYBLOCK_EXCEPT: b_type = SETUP_EXCEPT; break;
         case IR_PYBLOCK_FINALLY_TRY: b_type = SETUP_FINALLY; break;
+        case IR_PYBLOCK_EXCEPT_HANDLER: b_type = EXCEPT_HANDLER; break;
         default: abort(); /* Not expected case */
         }
-        int index = _label_to_instr_index(jd, instr->b_handler);
+        int index = -1;
+        if (b_type != EXCEPT_HANDLER) {
+            index = sizeof(_Py_CODEUNIT) * _label_to_instr_index(jd, instr->b_handler);
+        } else {
+            assert(instr->b_handler == NULL);
+        }
         CALL_NATIVE(jd->blocksetup_sig, PyFrame_BlockSetup,
-            FRAMEPTR(), CONSTANT_INT(b_type), CONSTANT_INT(index * sizeof(_Py_CODEUNIT)), STACK_LEVEL());
+            FRAMEPTR(), CONSTANT_INT(b_type), CONSTANT_INT(index), STACK_LEVEL());
         break;
     }
     case ir_opcode_pop_block: {
