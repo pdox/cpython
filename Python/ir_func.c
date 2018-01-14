@@ -142,6 +142,13 @@ void ir_func_verify(ir_func func) {
                     assert(instr->body_start->block != NULL);
                     break;
                 }
+                case ir_opcode_end_finally: {
+                    IR_INSTR_AS(end_finally)
+                    assert(instr->fallthrough != NULL);
+                    assert(instr->error != NULL);
+                    assert(instr->fast_block_end != NULL);
+                    break;
+                }
                 default:
                     Py_FatalError("Unhandled branch opcode");
                     break;

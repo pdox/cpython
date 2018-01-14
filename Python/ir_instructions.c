@@ -173,11 +173,68 @@ ir_value* ir_get_uses(ir_instr _instr, size_t *count) {
     }
     case ir_opcode_yield_dispatch:
         break;
+    case ir_opcode_end_finally:
+        break;
     } // switch
     *count = u - uses;
     assert(*count <= 5);
     return uses;
 }
+
+ir_label*
+ir_list_outgoing_labels(ir_block b, size_t *count) {
+    ir_instr _instr = b->last_instr;
+    switch (_instr->opcode) {
+    case ir_opcode_branch: {
+        IR_INSTR_AS(branch)
+        *count = 1;
+        return &(instr->target);
+    }
+    case ir_opcode_branch_cond: {
+        IR_INSTR_AS(branch_cond)
+        *count = 2;
+        return &(instr->if_true);
+    }
+    case ir_opcode_jumptable: {
+        IR_INSTR_AS(jumptable)
+        *count = instr->table_size;
+        return &instr->table[0];
+    }
+    case ir_opcode_ret: {
+        *count = 0;
+        return NULL;
+    }
+    case ir_opcode_goto_error: {
+        IR_INSTR_AS(goto_error)
+        *count = 2;
+        return &instr->fallthrough;
+    }
+    case ir_opcode_goto_fbe: {
+        IR_INSTR_AS(goto_fbe)
+        *count = 2;
+        return &instr->continue_target;
+    }
+    case ir_opcode_yield: {
+        IR_INSTR_AS(yield)
+        *count = 2;
+        return &instr->resume_inst_label;
+    }
+    case ir_opcode_yield_dispatch: {
+        IR_INSTR_AS(yield_dispatch)
+        *count = 1;
+        return &instr->body_start;
+    }
+    case ir_opcode_end_finally: {
+        IR_INSTR_AS(end_finally)
+        *count = 3;
+        return &instr->fallthrough;
+    }
+    default:
+        abort(); /* Block without ending branch */
+    }
+    return NULL;
+}
+
 
 static inline
 const char *
@@ -243,36 +300,12 @@ _ir_opcode_repr(ir_opcode opcode) {
     OPCODE_CASE(goto_fbe)
     OPCODE_CASE(yield)
     OPCODE_CASE(yield_dispatch)
+    OPCODE_CASE(end_finally)
 
 #undef OPCODE_CASE
 
     default: return "<invalid_opcode>";
     }
-}
-
-const char *
-_pyblock_id(ir_pyblock b_type) {
-    switch (b_type) {
-    case IR_PYBLOCK_ANY: return "any";
-    case IR_PYBLOCK_LOOP: return "loop";
-    case IR_PYBLOCK_EXCEPT: return "except";
-    case IR_PYBLOCK_FINALLY_TRY: return "finally_try";
-    case IR_PYBLOCK_FINALLY_END: return "finally_end";
-    case IR_PYBLOCK_EXCEPT_HANDLER: return "except_handler";
-    }
-    return "???";
-}
-
-const char *
-_why_id(ir_fbe_why why) {
-    switch (why) {
-    case IR_FBE_EXCEPTION: return "exception";
-    case IR_FBE_RETURN: return "return";
-    case IR_FBE_BREAK: return "break";
-    case IR_FBE_CONTINUE: return "continue";
-    case IR_FBE_SILENCED: return "silenced";
-    }
-    return "???";
 }
 
 char *
@@ -514,13 +547,15 @@ ir_instr_repr(char *p, ir_instr _instr) {
         }
         case ir_opcode_setup_block: {
             IR_INSTR_AS(setup_block)
-            p += sprintf(p, "%s ", _pyblock_id(instr->b_type));
-            p = ir_label_repr(p, instr->b_handler);
+            p += sprintf(p, "%s ", ir_pyblock_type_repr(instr->b_type));
+            if (instr->b_handler) {
+                p = ir_label_repr(p, instr->b_handler);
+            }
             break;
         }
         case ir_opcode_pop_block: {
             IR_INSTR_AS(pop_block)
-            p += sprintf(p, "%s", _pyblock_id(instr->b_type));
+            p += sprintf(p, "%s", ir_pyblock_type_repr(instr->b_type));
             break;
         }
         case ir_opcode_goto_error: {
@@ -538,7 +573,7 @@ ir_instr_repr(char *p, ir_instr _instr) {
         }
         case ir_opcode_goto_fbe: {
             IR_INSTR_AS(goto_fbe)
-            p += sprintf(p, "%s ", _why_id(instr->why));
+            p += sprintf(p, "%s ", ir_fbe_why_repr(instr->why));
             if (instr->continue_target != NULL) {
                 p = ir_label_repr(p, instr->continue_target);
                 p += sprintf(p, " ");
@@ -560,6 +595,15 @@ ir_instr_repr(char *p, ir_instr _instr) {
         case ir_opcode_yield_dispatch: {
             IR_INSTR_AS(yield_dispatch)
             p = ir_label_repr(p, instr->body_start);
+            break;
+        }
+        case ir_opcode_end_finally: {
+            IR_INSTR_AS(end_finally)
+            p = ir_label_repr(p, instr->fallthrough);
+            p += sprintf(p, " ");
+            p = ir_label_repr(p, instr->error);
+            p += sprintf(p, " ");
+            p = ir_label_repr(p, instr->fast_block_end);
             break;
         }
     }

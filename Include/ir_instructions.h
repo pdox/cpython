@@ -79,6 +79,7 @@ typedef enum {
     ir_opcode_goto_fbe,     // fast_block_end
     ir_opcode_yield,        // fast_yield
     ir_opcode_yield_dispatch, // yield dispatch table
+    ir_opcode_end_finally,  // END_FINALLY opcode
 } ir_opcode;
 
 #define IR_INSTR_AS(kind) \
@@ -89,7 +90,7 @@ int ir_instr_opcode_is_flow_control(ir_opcode opcode) {
     return (opcode >= ir_opcode_branch &&
             opcode <= ir_opcode_ret) ||
            (opcode >= ir_opcode_goto_error &&
-            opcode <= ir_opcode_yield_dispatch);
+            opcode <= ir_opcode_end_finally);
 }
 
 static inline
@@ -101,7 +102,7 @@ int ir_instr_opcode_needs_to_be_at_front(ir_opcode opcode) {
 static inline
 int ir_opcode_is_python_specific(ir_opcode opcode) {
     return opcode >= ir_opcode_getlocal &&
-           opcode <= ir_opcode_yield_dispatch;
+           opcode <= ir_opcode_end_finally;
 }
 
 IR_PROTOTYPE(ir_instr)
@@ -120,6 +121,15 @@ struct ir_instr_t {
    ir_get_uses() is called again, or the IR is modified.
  */
 ir_value* ir_get_uses(ir_instr _instr, size_t *count);
+
+/* Get all outgoing labels for a block.
+   This returns a borrowed reference which is only valid until
+   the IR is modified, or another call to this function.
+
+   NOTE: Some of the labels may be NULL. Always check!
+*/
+ir_label*
+ir_list_outgoing_labels(ir_block b, size_t *count);
 
 /* Forward declaration. Actual code is at the bottom of this file. */
 static inline
@@ -332,7 +342,7 @@ IR_PROTOTYPE(ir_instr_call)
 struct ir_instr_call_t {
     IR_INSTR_HEADER
     int arg_count;
-    /* Don't change the layout below without also fixing ir_get_uses */
+    /* Don't change the layout below without also updating ir_get_uses */
     ir_value target;
     ir_value arg[1];
 };
@@ -604,6 +614,7 @@ void ir_info_here(ir_func func, const char *info) {
 IR_PROTOTYPE(ir_instr_branch)
 struct ir_instr_branch_t {
     IR_INSTR_HEADER
+    /* Changes below require updating ir_list_outgoing_labels() */
     ir_label target;
 };
 
@@ -636,10 +647,11 @@ IR_PROTOTYPE(ir_instr_branch_cond)
 struct ir_instr_branch_cond_t {
     IR_INSTR_HEADER
     ir_value cond;
-    ir_label if_true;
-    ir_label if_false;
     int if_true_weight;
     int if_false_weight;
+    /* Changes below require updating ir_list_outgoing_labels() */
+    ir_label if_true;
+    ir_label if_false;
 };
 
 static inline
@@ -647,10 +659,10 @@ void ir_branch_cond(ir_func func, ir_value cond, ir_label if_true, ir_label if_f
                     int if_true_weight, int if_false_weight) {
     IR_INSTR_ALLOC(ir_instr_branch_cond, 0)
     instr->cond = cond;
-    instr->if_true = if_true;
-    instr->if_false = if_false;
     instr->if_true_weight = if_true_weight;
     instr->if_false_weight = if_false_weight;
+    instr->if_true = if_true;
+    instr->if_false = if_false;
     IR_INSTR_INSERT(ir_opcode_branch_cond, ir_type_void);
 }
 
@@ -691,6 +703,7 @@ IR_PROTOTYPE(ir_instr_jumptable)
 struct ir_instr_jumptable_t {
     IR_INSTR_HEADER
     ir_value index;
+    /* Changes below require updating ir_list_outgoing_labels() */
     size_t table_size;
     ir_label table[1];
 };
@@ -856,22 +869,30 @@ typedef enum {
     IR_PYBLOCK_LOOP,           /* inside loop (any kind) */
     IR_PYBLOCK_EXCEPT,         /* inside try: of try/except */
     IR_PYBLOCK_FINALLY_TRY,    /* inside try: of try/finally */
-    IR_PYBLOCK_FINALLY_END,    /* inside finally: */
-    IR_PYBLOCK_EXCEPT_HANDLER, /* inside except: */
-                               /* NOTE: in ceval, this also covers "finally:",
-                                  only when an exception has occurred. For static
-                                  analysis, we do not emit this for finally. */
-} ir_pyblock;
+    IR_PYBLOCK_EXCEPT_HANDLER, /* inside except: or finally: */
+} ir_pyblock_type;
+
+static inline const char *
+ir_pyblock_type_repr(ir_pyblock_type b_type) {
+    switch (b_type) {
+    case IR_PYBLOCK_ANY: return "any";
+    case IR_PYBLOCK_LOOP: return "loop";
+    case IR_PYBLOCK_EXCEPT: return "except_try";
+    case IR_PYBLOCK_FINALLY_TRY: return "finally_try";
+    case IR_PYBLOCK_EXCEPT_HANDLER: return "except_handler";
+    }
+    return "<invalid_pyblock_type>";
+}
 
 IR_PROTOTYPE(ir_instr_setup_block)
 struct ir_instr_setup_block_t {
     IR_INSTR_HEADER
-    ir_pyblock b_type;
+    ir_pyblock_type b_type;
     ir_label b_handler;
 };
 
 static inline
-void ir_setup_block(ir_func func, ir_pyblock b_type, ir_label b_handler) {
+void ir_setup_block(ir_func func, ir_pyblock_type b_type, ir_label b_handler) {
     IR_INSTR_ALLOC(ir_instr_setup_block, 0)
     instr->b_type = b_type;
     instr->b_handler = b_handler;
@@ -883,11 +904,11 @@ void ir_setup_block(ir_func func, ir_pyblock b_type, ir_label b_handler) {
 IR_PROTOTYPE(ir_instr_pop_block)
 struct ir_instr_pop_block_t {
     IR_INSTR_HEADER
-    ir_pyblock b_type;
+    ir_pyblock_type b_type;
 };
 
 static inline
-void ir_pop_block(ir_func func, ir_pyblock b_type) {
+void ir_pop_block(ir_func func, ir_pyblock_type b_type) {
     IR_INSTR_ALLOC(ir_instr_pop_block, 0)
     instr->b_type = b_type;
     IR_INSTR_INSERT(ir_opcode_pop_block, ir_type_void);
@@ -899,6 +920,7 @@ IR_PROTOTYPE(ir_instr_goto_error)
 struct ir_instr_goto_error_t {
     IR_INSTR_HEADER
     ir_value cond;
+    /* Changes below require updating ir_list_outgoing_labels() */
     ir_label fallthrough;
     ir_label error;
 };
@@ -922,10 +944,23 @@ typedef enum {
     IR_FBE_SILENCED,
 } ir_fbe_why;
 
+static inline const char *
+ir_fbe_why_repr(ir_fbe_why why) {
+    switch (why) {
+    case IR_FBE_EXCEPTION: return "exception";
+    case IR_FBE_RETURN: return "return";
+    case IR_FBE_BREAK: return "break";
+    case IR_FBE_CONTINUE: return "continue";
+    case IR_FBE_SILENCED: return "silenced";
+    }
+    return "<invalid_fbe_why>";
+}
+
 IR_PROTOTYPE(ir_instr_goto_fbe)
 struct ir_instr_goto_fbe_t {
     IR_INSTR_HEADER
     ir_fbe_why why;
+    /* Changes below require updating ir_list_outgoing_labels() */
     ir_label continue_target;
     ir_label fast_block_end;
 };
@@ -946,6 +981,7 @@ struct ir_instr_yield_t {
     IR_INSTR_HEADER
     ir_value value;
     int resume_instr_index;
+    /* Changes below require updating ir_list_outgoing_labels() */
     ir_label resume_inst_label;
     ir_label throw_inst_label; /* YIELD_FROM only */
 };
@@ -971,7 +1007,7 @@ void ir_yield(
 IR_PROTOTYPE(ir_instr_yield_dispatch)
 struct ir_instr_yield_dispatch_t {
     IR_INSTR_HEADER
-    /* Do not change below without fixing ir_list_outgoing_labels() */
+    /* Do not change below without updating ir_list_outgoing_labels() */
     ir_label body_start;
 };
 
@@ -981,6 +1017,25 @@ void ir_yield_dispatch(ir_func func, ir_label body_start) {
     assert(body_start);
     instr->body_start = body_start;
     IR_INSTR_INSERT(ir_opcode_yield_dispatch, ir_type_void);
+}
+
+/*****************************************************************************/
+IR_PROTOTYPE(ir_instr_end_finally)
+struct ir_instr_end_finally_t {
+    IR_INSTR_HEADER
+    /* Do not change below without updating ir_list_outgoing_labels() */
+    ir_label fallthrough;
+    ir_label error;
+    ir_label fast_block_end;
+};
+
+static inline
+void ir_end_finally(ir_func func, ir_label fallthrough, ir_label error, ir_label fast_block_end) {
+    IR_INSTR_ALLOC(ir_instr_end_finally, 0)
+    instr->fallthrough = fallthrough;
+    instr->error = error;
+    instr->fast_block_end = fast_block_end;
+    IR_INSTR_INSERT(ir_opcode_end_finally, ir_type_void);
 }
 
 /*****************************************************************************/

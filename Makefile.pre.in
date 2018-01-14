@@ -326,6 +326,7 @@ PYTHON_OBJS=	\
                 Python/ir_func.o \
                 Python/ir_type_system.o \
                 Python/ir_instructions.o \
+                Python/ir_analyze.o \
                 Python/ir_libjit.o \
                 Python/ir_llvm.o \
 		Python/jeval.o \

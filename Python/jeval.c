@@ -1274,73 +1274,9 @@ EMITTER_FOR(ENTER_FINALLY) {
 }
 
 EMITTER_FOR(END_FINALLY) {
-    IR_LABEL_INIT(try_case_2);
-    IR_LABEL_INIT(try_case_3);
-    IR_LABEL_INIT(normal_exit);
-    IR_LABEL_INIT(dispatch);
-
-    JVALUE b = CALL_NATIVE(jd->blockpop_sig, PyFrame_BlockPop, jd->f);
-    IR_ASSERT(CMP_EQ(LOAD_FIELD(b, PyTryBlock, b_type, ir_type_int), CONSTANT_INT(EXCEPT_HANDLER)));
-    IR_ASSERT(CMP_EQ(STACK_LEVEL(),
-                     ADD(LOAD_FIELD(b, PyTryBlock, b_level, ir_type_int), CONSTANT_INT(6))));
-
-    JVALUE status = POP();
-
-    /* Case 1: status is PyLong (WHY code) */
-    BRANCH_IF_NOT(IR_PyLong_Check(status), try_case_2, IR_SEMILIKELY);
-    JVALUE why = CAST(ir_type_int, CALL_PyLong_AsLong(status));
-    DECREF(status);
-
-    IF(CMP_EQ(why, CONSTANT_INT(WHY_RETURN)), IR_SEMILIKELY, {
-        SET_VALUE(jd->retval, POP());
-        UNWIND_BLOCK(b);
-        GOTO_FAST_BLOCK_END(RETURN);
-    });
-    IF(CMP_EQ(why, CONSTANT_INT(WHY_CONTINUE)), IR_SEMILIKELY, {
-        SET_VALUE(jd->retval, POP());
-        UNWIND_BLOCK(b);
-        GOTO_FAST_BLOCK_END(CONTINUE);
-    });
-    IF(CMP_EQ(why, CONSTANT_INT(WHY_BREAK)), IR_SEMILIKELY, {
-        UNWIND_BLOCK(b);
-        GOTO_FAST_BLOCK_END(BREAK);
-    });
-    IF(CMP_EQ(why, CONSTANT_INT(WHY_SILENCED)), IR_SEMILIKELY, {
-        /* An exception was silenced by 'with', we must
-        manually unwind the EXCEPT_HANDLER block which was
-        created when the exception was caught, otherwise
-        the stack will be in an inconsistent state. */
-        UNWIND_EXCEPT_ONLY(b);
-        BRANCH(dispatch);
-    });
-    CRASH(); /* Shouldn't get here. Invalid why value? */
-
-    LABEL(try_case_2);
-    BRANCH_IF_NOT(IR_PyExceptionClass_Check(status), try_case_3, IR_SEMILIKELY);
-    {
-        JVALUE exc = POP();
-        JVALUE tb = POP();
-        JTYPE sig2 = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
-        CALL_NATIVE(sig2, PyErr_Restore, status, exc, tb);
-        UNWIND_EXCEPT_ONLY(b);
-        GOTO_FAST_BLOCK_END(EXCEPTION);
-    }
-
-    LABEL(try_case_3);
-    BRANCH_IF(CMP_EQ(status, CONSTANT_PYOBJ(Py_None)), normal_exit, IR_LIKELY);
-    {
-        CALL_PyErr_SetString(PyExc_SystemError,
-                    "'finally' pops bad exception");
-        UNWIND_BLOCK(b);
-        DECREF(status);
-        GOTO_ERROR();
-    }
-
-    LABEL(normal_exit);
-    UNWIND_BLOCK(b);
-    DECREF(status);
-
-    LABEL(dispatch);
+    IR_LABEL_INIT(fallthrough);
+    ir_end_finally(jd->func, fallthrough, jd->error, jd->fast_block_end);
+    LABEL(fallthrough);
     CHECK_EVAL_BREAKER();
 }
 
@@ -3362,6 +3298,23 @@ _PyJIT_CodeGen(PyCodeObject *co) {
     ir_func_verify(jd->func);
 #endif
     //ir_verify_stack_effect(jd->func);
+
+    ir_remove_dead_blocks(jd->func);
+
+    if (Py_JITDebugFlag > 1) {
+        ir_func_dump_file(jd->func, "/tmp/after_dead_blocks.ir", "After dead locks removal");
+    }
+
+    /* For lowering, we need to get the pyblock map */
+    ir_label ignored[] = {
+        jd->jump, jd->jump_int, jd->error, jd->error_int, jd->fast_block_end,
+        jd->fast_block_end_int, jd->exit, NULL};
+    ir_pyblock_map map = ir_compute_pyblock_map(jd->func, ignored);
+    if (Py_JITDebugFlag > 1) {
+        ir_dump_pyblock_map(map, "/tmp/pyblock_map.ir");
+    }
+    ir_free_pyblock_map(map);
+
     ir_lower(jd);
     if (Py_JITDebugFlag > 1) {
         ir_func_dump_file(jd->func, "/tmp/after.ir", "After lowering");
@@ -3382,6 +3335,75 @@ _PyJIT_CodeGen(PyCodeObject *co) {
     PyMem_RawFree(jd);
     co->co_jit_handle = handle;
     return 0;
+}
+
+static
+void _emit_end_finally(JITData *jd, ir_instr_end_finally instr) {
+    IR_LABEL_INIT(try_case_2);
+    IR_LABEL_INIT(try_case_3);
+    IR_LABEL_INIT(normal_exit);
+
+    JVALUE b = CALL_NATIVE(jd->blockpop_sig, PyFrame_BlockPop, jd->f);
+    IR_ASSERT(CMP_EQ(LOAD_FIELD(b, PyTryBlock, b_type, ir_type_int), CONSTANT_INT(EXCEPT_HANDLER)));
+    IR_ASSERT(CMP_EQ(STACK_LEVEL(),
+                     ADD(LOAD_FIELD(b, PyTryBlock, b_level, ir_type_int), CONSTANT_INT(6))));
+
+    JVALUE status = POP();
+
+    /* Case 1: status is PyLong (WHY code) */
+    BRANCH_IF_NOT(IR_PyLong_Check(status), try_case_2, IR_SEMILIKELY);
+    JVALUE why = CAST(ir_type_int, CALL_PyLong_AsLong(status));
+    DECREF(status);
+
+    IF(CMP_EQ(why, CONSTANT_INT(WHY_RETURN)), IR_SEMILIKELY, {
+        SET_VALUE(jd->retval, POP());
+        UNWIND_BLOCK(b);
+        GOTO_FAST_BLOCK_END(RETURN);
+    });
+    IF(CMP_EQ(why, CONSTANT_INT(WHY_CONTINUE)), IR_SEMILIKELY, {
+        SET_VALUE(jd->retval, POP());
+        UNWIND_BLOCK(b);
+        GOTO_FAST_BLOCK_END(CONTINUE);
+    });
+    IF(CMP_EQ(why, CONSTANT_INT(WHY_BREAK)), IR_SEMILIKELY, {
+        UNWIND_BLOCK(b);
+        GOTO_FAST_BLOCK_END(BREAK);
+    });
+    IF(CMP_EQ(why, CONSTANT_INT(WHY_SILENCED)), IR_SEMILIKELY, {
+        /* An exception was silenced by 'with', we must
+        manually unwind the EXCEPT_HANDLER block which was
+        created when the exception was caught, otherwise
+        the stack will be in an inconsistent state. */
+        UNWIND_EXCEPT_ONLY(b);
+        BRANCH(instr->fallthrough);
+    });
+    CRASH(); /* Shouldn't get here. Invalid why value? */
+
+    LABEL(try_case_2);
+    BRANCH_IF_NOT(IR_PyExceptionClass_Check(status), try_case_3, IR_SEMILIKELY);
+    {
+        JVALUE exc = POP();
+        JVALUE tb = POP();
+        JTYPE sig2 = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
+        CALL_NATIVE(sig2, PyErr_Restore, status, exc, tb);
+        UNWIND_EXCEPT_ONLY(b);
+        GOTO_FAST_BLOCK_END(EXCEPTION);
+    }
+
+    LABEL(try_case_3);
+    BRANCH_IF(CMP_EQ(status, CONSTANT_PYOBJ(Py_None)), normal_exit, IR_LIKELY);
+    {
+        CALL_PyErr_SetString(PyExc_SystemError,
+                    "'finally' pops bad exception");
+        UNWIND_BLOCK(b);
+        DECREF(status);
+        GOTO_ERROR();
+    }
+
+    LABEL(normal_exit);
+    UNWIND_BLOCK(b);
+    DECREF(status);
+    BRANCH(instr->fallthrough);
 }
 
 static inline
@@ -3578,6 +3600,11 @@ void _ir_lower_one_instr(JITData *jd, ir_func func, ir_instr _instr) {
             CHECK_EVAL_BREAKER_EX(resume_instr_index + 1);
             BRANCH(instr->throw_inst_label);
         }
+        break;
+    }
+    case ir_opcode_end_finally: {
+        IR_INSTR_AS(end_finally)
+        _emit_end_finally(jd, instr);
         break;
     }
     default:
