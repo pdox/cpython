@@ -3305,16 +3305,6 @@ _PyJIT_CodeGen(PyCodeObject *co) {
         ir_func_dump_file(jd->func, "/tmp/after_dead_blocks.ir", "After dead locks removal");
     }
 
-    /* For lowering, we need to get the pyblock map */
-    ir_label ignored[] = {
-        jd->jump, jd->jump_int, jd->error, jd->error_int, jd->fast_block_end,
-        jd->fast_block_end_int, jd->exit, NULL};
-    ir_pyblock_map map = ir_compute_pyblock_map(jd->func, ignored);
-    if (Py_JITDebugFlag > 1) {
-        ir_dump_pyblock_map(map, "/tmp/pyblock_map.ir");
-    }
-    ir_free_pyblock_map(map);
-
     ir_lower(jd);
     if (Py_JITDebugFlag > 1) {
         ir_func_dump_file(jd->func, "/tmp/after.ir", "After lowering");
@@ -3407,102 +3397,8 @@ void _emit_end_finally(JITData *jd, ir_instr_end_finally instr) {
 }
 
 static inline
-void _ir_lower_one_instr(JITData *jd, ir_func func, ir_instr _instr) {
+int _ir_lower_control_flow(JITData *jd, ir_instr _instr, void *Py_UNUSED(arg)) {
     switch (_instr->opcode) {
-    case ir_opcode_getlocal: {
-        IR_INSTR_AS(getlocal)
-        ir_value addr = ir_get_index_ptr(func, jd->fastlocals, ir_constant_int(func, instr->index, NULL));
-        ir_value tmp = ir_load(func, addr);
-        _ir_instr_replace_dest(func, tmp, _instr->dest);
-        break;
-    }
-    case ir_opcode_setlocal: {
-        IR_INSTR_AS(setlocal)
-        ir_value addr = ir_get_index_ptr(func, jd->fastlocals, ir_constant_int(func, instr->index, NULL));
-        ir_store(func, addr, instr->value);
-        break;
-    }
-    case ir_opcode_incref: {
-        IR_INSTR_AS(incref)
-        ir_value obj = instr->obj;
-        ir_label skip_incref = NULL;
-        if (instr->is_xincref) {
-            skip_incref = ir_label_new(func, "x_skip_incref");
-            ir_branch_if_not(func, obj, skip_incref, IR_UNLIKELY);
-        }
-#ifdef Py_REF_DEBUG
-        ir_value total_addr = ir_constant_pyssizet_ptr(func, &_Py_RefTotal, "&_Py_RefTotal");
-        ir_value old_total = ir_load(func, total_addr);
-        ir_value new_total = ir_add(func, old_total, ir_constant_pyssizet(func, 1, NULL));
-        ir_store(func, total_addr, new_total);
-#endif
-        ir_value addr = ir_get_element_ptr(func, obj, offsetof(PyObject, ob_refcnt), ir_type_pyssizet, "ob_refcnt");
-        ir_value old_value = ir_load(func, addr);
-        ir_value new_value = ir_add(func, old_value, ir_constant_pyssizet(func, 1, NULL));
-        ir_store(func, addr, new_value);
-        if (skip_incref) {
-            ir_label_here(func, skip_incref);
-        }
-        break;
-    }
-    case ir_opcode_decref: {
-        IR_INSTR_AS(decref)
-        ir_label skip_dealloc = ir_label_new(func, "decref_skip_dealloc");
-        ir_value obj = instr->obj;
-        if (instr->is_xdecref) {
-            ir_branch_if_not(func, obj, skip_dealloc, IR_UNLIKELY);
-        }
-#ifdef Py_REF_DEBUG
-        ir_value total_addr = ir_constant_pyssizet_ptr(func, &_Py_RefTotal, "&_Py_RefTotal");
-        ir_value old_total = ir_load(func, total_addr);
-        ir_value new_total = ir_sub(func, old_total, ir_constant_pyssizet(func, 1, NULL));
-        ir_store(func, total_addr, new_total);
-#endif
-        ir_value old_value = IR_LOAD_FIELD(func, obj, PyObject, ob_refcnt, ir_type_pyssizet);
-        ir_value new_value = ir_sub(func, old_value, ir_constant_pyssizet(func, 1, NULL));
-        IR_STORE_FIELD(func, obj, PyObject, ob_refcnt, ir_type_pyssizet, new_value);
-        ir_branch_if(func, new_value, skip_dealloc, IR_SEMILIKELY);
-        ir_value dealloc_func;
-#if defined(Py_DEBUG) || defined(Py_TRACE_REFS)
-        dealloc_func = ir_constant_from_ptr(func, jd->dealloc_sig, _Py_Dealloc, "_Py_Dealloc");
-#else
-        ir_value typeobj = IR_LOAD_FIELD(func, obj, PyObject, ob_type, ir_type_pytypeobject_ptr);
-        dealloc_func = IR_LOAD_FIELD(func, typeobj, PyTypeObject, tp_dealloc, jd->dealloc_sig);
-#endif
-        ir_value args[] = {obj};
-        ir_call(func, dealloc_func, 1, args);
-        ir_label_here(func, skip_dealloc);
-        break;
-    }
-    case ir_opcode_stackadj: {
-        IR_INSTR_AS(stackadj)
-        ir_value new_value =
-            ir_get_index_ptr(func, jd->stack_pointer, ir_constant_int(func, instr->amount, NULL));
-        ir_set_value(func, jd->stack_pointer, new_value);
-        break;
-    }
-    case ir_opcode_stack_peek: {
-        IR_INSTR_AS(stack_peek)
-        ir_value addr =
-            ir_get_index_ptr(func, jd->stack_pointer, ir_constant_int(func, -instr->offset, NULL));
-        ir_value tmp = ir_load(func, addr);
-        _ir_instr_replace_dest(func, tmp, _instr->dest);
-        break;
-    }
-    case ir_opcode_stack_put: {
-        IR_INSTR_AS(stack_put)
-        ir_value addr =
-            ir_get_index_ptr(func, jd->stack_pointer, ir_constant_int(func, -instr->offset, NULL));
-        ir_store(func, addr, instr->value);
-        break;
-    }
-    case ir_opcode_check_eval_breaker: {
-        //IR_INSTR_AS(check_eval_breaker)
-        //ir_value eval_breaker_addr = ir_constant_from_ptr(func, ir_type_int_ptr, &_PyRuntime.ceval.eval_breaker._value, "&_PyRuntime.ceval.eval_breaker._value");
-        //ir_value eval_breaker_value = ir_load(func, eval_breaker_addr);
-        //ir_branch_if(func, eval_breaker_value, eval_breaker_label, IR_UNLIKELY);
-        break;
-    }
     case ir_opcode_setup_block: {
         IR_INSTR_AS(setup_block)
         int b_type;
@@ -3521,7 +3417,7 @@ void _ir_lower_one_instr(JITData *jd, ir_func func, ir_instr _instr) {
         }
         CALL_NATIVE(jd->blocksetup_sig, PyFrame_BlockSetup,
             FRAMEPTR(), CONSTANT_INT(b_type), CONSTANT_INT(index), STACK_LEVEL());
-        break;
+        return 1;
     }
     case ir_opcode_pop_block: {
         IR_INSTR_AS(pop_block)
@@ -3533,7 +3429,7 @@ void _ir_lower_one_instr(JITData *jd, ir_func func, ir_instr _instr) {
             assert(instr->b_type == IR_PYBLOCK_ANY);
             UNWIND_BLOCK(b);
         }
-        break;
+        return 1;
     }
     case ir_opcode_goto_error: {
         IR_INSTR_AS(goto_error)
@@ -3543,7 +3439,7 @@ void _ir_lower_one_instr(JITData *jd, ir_func func, ir_instr _instr) {
         } else {
             BRANCH(instr->error);
         }
-        break;
+        return 1;
     }
     case ir_opcode_goto_fbe: {
         IR_INSTR_AS(goto_fbe)
@@ -3564,7 +3460,7 @@ void _ir_lower_one_instr(JITData *jd, ir_func func, ir_instr _instr) {
         }
         SET_WHY(why);
         BRANCH(instr->fast_block_end);
-        break;
+        return 1;
     }
     case ir_opcode_yield: {
         IR_INSTR_AS(yield)
@@ -3600,23 +3496,144 @@ void _ir_lower_one_instr(JITData *jd, ir_func func, ir_instr _instr) {
             CHECK_EVAL_BREAKER_EX(resume_instr_index + 1);
             BRANCH(instr->throw_inst_label);
         }
-        break;
+        return 1;
     }
     case ir_opcode_end_finally: {
         IR_INSTR_AS(end_finally)
         _emit_end_finally(jd, instr);
-        break;
+        return 1;
     }
-    default:
-        Py_FatalError("Unhandled python-specific opcode");
-        break;
+    default: break;
     } // switch
+    return 0;
 }
 
- static inline
-void _ir_lower_yield_dispatch(JITData *jd, ir_instr _instr) {
+static inline
+int _ir_lower_refcounting(JITData *jd, ir_instr _instr, void *Py_UNUSED(arg)) {
+    ir_func func = jd->func;
+    switch (_instr->opcode) {
+    case ir_opcode_incref: {
+        IR_INSTR_AS(incref)
+        ir_value obj = instr->obj;
+        ir_label skip_incref = NULL;
+        if (instr->is_xincref) {
+            skip_incref = ir_label_new(func, "x_skip_incref");
+            ir_branch_if_not(func, obj, skip_incref, IR_UNLIKELY);
+        }
+#ifdef Py_REF_DEBUG
+        ir_value total_addr = ir_constant_pyssizet_ptr(func, &_Py_RefTotal, "&_Py_RefTotal");
+        ir_value old_total = ir_load(func, total_addr);
+        ir_value new_total = ir_add(func, old_total, ir_constant_pyssizet(func, 1, NULL));
+        ir_store(func, total_addr, new_total);
+#endif
+        ir_value addr = ir_get_element_ptr(func, obj, offsetof(PyObject, ob_refcnt), ir_type_pyssizet, "ob_refcnt");
+        ir_value old_value = ir_load(func, addr);
+        ir_value new_value = ir_add(func, old_value, ir_constant_pyssizet(func, 1, NULL));
+        ir_store(func, addr, new_value);
+        if (skip_incref) {
+            ir_label_here(func, skip_incref);
+        }
+        return 1;
+    }
+    case ir_opcode_decref: {
+        IR_INSTR_AS(decref)
+        ir_label skip_dealloc = ir_label_new(func, "decref_skip_dealloc");
+        ir_value obj = instr->obj;
+        if (instr->is_xdecref) {
+            ir_branch_if_not(func, obj, skip_dealloc, IR_UNLIKELY);
+        }
+#ifdef Py_REF_DEBUG
+        ir_value total_addr = ir_constant_pyssizet_ptr(func, &_Py_RefTotal, "&_Py_RefTotal");
+        ir_value old_total = ir_load(func, total_addr);
+        ir_value new_total = ir_sub(func, old_total, ir_constant_pyssizet(func, 1, NULL));
+        ir_store(func, total_addr, new_total);
+#endif
+        ir_value old_value = IR_LOAD_FIELD(func, obj, PyObject, ob_refcnt, ir_type_pyssizet);
+        ir_value new_value = ir_sub(func, old_value, ir_constant_pyssizet(func, 1, NULL));
+        IR_STORE_FIELD(func, obj, PyObject, ob_refcnt, ir_type_pyssizet, new_value);
+        ir_branch_if(func, new_value, skip_dealloc, IR_SEMILIKELY);
+        ir_value dealloc_func;
+#if defined(Py_DEBUG) || defined(Py_TRACE_REFS)
+        dealloc_func = ir_constant_from_ptr(func, jd->dealloc_sig, _Py_Dealloc, "_Py_Dealloc");
+#else
+        ir_value typeobj = IR_LOAD_FIELD(func, obj, PyObject, ob_type, ir_type_pytypeobject_ptr);
+        dealloc_func = IR_LOAD_FIELD(func, typeobj, PyTypeObject, tp_dealloc, jd->dealloc_sig);
+#endif
+        ir_value args[] = {obj};
+        ir_call(func, dealloc_func, 1, args);
+        ir_label_here(func, skip_dealloc);
+        return 1;
+    }
+    default: break;
+    } // switch
+    return 0;
+}
+
+static inline
+int _ir_lower_stack_ops(JITData *jd, ir_instr _instr, void *Py_UNUSED(arg)) {
+    ir_func func = jd->func;
+    switch (_instr->opcode) {
+    case ir_opcode_stackadj: {
+        IR_INSTR_AS(stackadj)
+        ir_value new_value =
+            ir_get_index_ptr(func, jd->stack_pointer, ir_constant_int(func, instr->amount, NULL));
+        ir_set_value(func, jd->stack_pointer, new_value);
+        return 1;
+    }
+    case ir_opcode_stack_peek: {
+        IR_INSTR_AS(stack_peek)
+        ir_value addr =
+            ir_get_index_ptr(func, jd->stack_pointer, ir_constant_int(func, -instr->offset, NULL));
+        ir_value tmp = ir_load(func, addr);
+        _ir_instr_replace_dest(func, tmp, _instr->dest);
+        return 1;
+    }
+    case ir_opcode_stack_put: {
+        IR_INSTR_AS(stack_put)
+        ir_value addr =
+            ir_get_index_ptr(func, jd->stack_pointer, ir_constant_int(func, -instr->offset, NULL));
+        ir_store(func, addr, instr->value);
+        return 1;
+    }
+    default: break;
+    } // switch
+    return 0;
+}
+
+static inline
+int _ir_lower_remaining(JITData *jd, ir_instr _instr, void *Py_UNUSED(arg)) {
+    ir_func func = jd->func;
+    switch (_instr->opcode) {
+    case ir_opcode_getlocal: {
+        IR_INSTR_AS(getlocal)
+        ir_value addr = ir_get_index_ptr(func, jd->fastlocals, ir_constant_int(func, instr->index, NULL));
+        ir_value tmp = ir_load(func, addr);
+        _ir_instr_replace_dest(func, tmp, _instr->dest);
+        return 1;
+    }
+    case ir_opcode_setlocal: {
+        IR_INSTR_AS(setlocal)
+        ir_value addr = ir_get_index_ptr(func, jd->fastlocals, ir_constant_int(func, instr->index, NULL));
+        ir_store(func, addr, instr->value);
+        return 1;
+    }
+    case ir_opcode_check_eval_breaker: {
+        //IR_INSTR_AS(check_eval_breaker)
+        //ir_value eval_breaker_addr = ir_constant_from_ptr(func, ir_type_int_ptr, &_PyRuntime.ceval.eval_breaker._value, "&_PyRuntime.ceval.eval_breaker._value");
+        //ir_value eval_breaker_value = ir_load(func, eval_breaker_addr);
+        //ir_branch_if(func, eval_breaker_value, eval_breaker_label, IR_UNLIKELY);
+        return 1;
+    }
+    default: break;
+    } // switch
+    return 0;
+}
+
+int _ir_lower_yield_dispatch(JITData *jd, ir_instr _instr, void *Py_UNUSED(arg)) {
+    if (_instr->opcode != ir_opcode_yield_dispatch) {
+        return 0;
+    }
     IR_INSTR_AS(yield_dispatch)
-    assert(_instr->opcode == ir_opcode_yield_dispatch);
 
     /* TODO: Find a less quadratic way to do this dispatch */
     JVALUE f_lasti = LOAD_FIELD(jd->f, PyFrameObject, f_lasti, ir_type_int);
@@ -3637,65 +3654,76 @@ void _ir_lower_yield_dispatch(JITData *jd, ir_instr _instr) {
 
     /* Should be unreachable */
     CRASH();
+    return 1;
 }
 
-void ir_lower(JITData *jd) {
+typedef int (*lowerfunc_type)(JITData*, ir_instr, void*);
+
+static inline
+void _lower_pass(JITData *jd, lowerfunc_type lowerfunc, void *arg) {
     ir_func func = jd->func;
     ir_block b;
     ir_instr _instr;
     ir_instr _instr_next;
+    ir_instr _instr_prev;
 
     for (b = func->first_block; b != NULL; b = b->next) {
         for (_instr = b->first_instr; _instr != NULL; _instr = _instr_next) {
             _instr_next = _instr->next;
+            _instr_prev = _instr->prev;
+
             if (!ir_opcode_is_python_specific(_instr->opcode))
                 continue;
 
-            /* yield_dispatch is handled in the second pass */
-            if (_instr->opcode == ir_opcode_yield_dispatch)
-                continue;
-
-            /* Resume scan at prev instruction */
-            _instr_next = _instr->prev;
-
-            /* Set our position to the instruction we're replacing */
-            ir_cursor_open(func, b, _instr);
-
-            /* Unlink the instruction we're about to lower */
-            ir_cursor_remove(func);
+            /* Set our position to just before instruction we may replace */
+            ir_cursor_open(func, b, _instr->prev);
 
             /* Insert lowered version */
-            _ir_lower_one_instr(jd, func, _instr);
+            int did_lower = lowerfunc(jd, _instr, arg);
+
+            if (did_lower) {
+                /* Unlink the instruction we lowered */
+                assert(func->current_block->current_instr->next == _instr);
+                ir_cursor_remove_next(func);
+
+                /* Resume scan at beginning of lowered instructions */
+                _instr_next = _instr_prev->next;
+                assert(_instr_next != NULL);
+            }
 
             /* Close cursor */
             ir_cursor_close(func);
         }
     }
+}
 
-    /* Fill in the yield_dispatch section */
-    if (jd->is_gen) {
-        for (b = func->first_block; b != NULL; b = b->next) {
-            for (_instr = b->first_instr; _instr != NULL; _instr = _instr_next) {
-                _instr_next = _instr->next;
-                if (_instr->opcode == ir_opcode_yield_dispatch) {
-                    /* Resume scan at prev instruction */
-                    _instr_next = _instr->prev;
-
-                    /* Set our position to the instruction we're replacing */
-                    ir_cursor_open(func, b, _instr);
-
-                    /* Unlink the instruction we're about to lower */
-                    ir_cursor_remove(func);
-
-                    /* Insert lowered version */
-                    _ir_lower_yield_dispatch(jd, _instr);
-
-                    /* Close cursor */
-                    ir_cursor_close(func);
-                }
-            }
-        }
+void ir_lower(JITData *jd) {
+    /* For lowering, we need to get the pyblock map */
+    ir_label ignored[] = {
+        jd->jump, jd->jump_int, jd->error, jd->error_int, jd->fast_block_end,
+        jd->fast_block_end_int, jd->exit, NULL};
+    ir_pyblock_map map = ir_compute_pyblock_map(jd->func, ignored);
+    if (Py_JITDebugFlag > 1) {
+        ir_dump_pyblock_map(map, "/tmp/pyblock_map.ir");
     }
+
+    /* First-pass: Lower pyblock control flow */
+    _lower_pass(jd, _ir_lower_control_flow, map);
+    ir_free_pyblock_map(map);
+
+    /* Second-pass: Lower yield dispatch */
+    if (jd->is_gen) {
+        _lower_pass(jd, _ir_lower_yield_dispatch, NULL);
+    }
+
+    /* Third-pass: Lower incref/decref */
+    _lower_pass(jd, _ir_lower_refcounting, NULL);
+
+    /* Fourth-pass: Lower stack operations */
+    _lower_pass(jd, _ir_lower_stack_ops, NULL);
+
+    /* Fifth-pass: Lower everything else */
+    _lower_pass(jd, _ir_lower_remaining, NULL);
 }
 
 void ir_verify_stack_effect(ir_func func) {

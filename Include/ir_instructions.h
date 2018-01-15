@@ -1154,19 +1154,16 @@ void ir_cursor_insert(ir_func func, ir_instr _instr) {
        instruction, but that will be taken care of by ir_cursor_close(). */
 }
 
-/* Remove the current instruction, re-positioning the cursor at the previous one.
-   There must be an open cursor. Note that this cannot be used to delete labels.
+/* Remove the instruction immediately after the current instruction.
+   There must be an open cursor. This does not affect the cursor position.
+   Note that this cannot be used to delete labels.
  */
 static inline
-void ir_cursor_remove(ir_func func) {
+void ir_cursor_remove_next(ir_func func) {
     ir_block b = func->current_block;
-    assert(b);
-    ir_instr _instr = b->current_instr;
+    ir_instr _instr = b->current_instr->next;
     assert(_instr);
-    ir_instr prev = _instr->prev;
-    assert(_instr->opcode != ir_opcode_label_here && prev);
     IR_LL_REMOVE(b->first_instr, b->last_instr, _instr);
-    b->current_instr = prev;
     _instr->prev = _instr->next = NULL;
 }
 
