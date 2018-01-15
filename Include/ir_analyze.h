@@ -14,7 +14,11 @@ IR_PROTOTYPE(ir_pyblock_map)
 struct ir_pyblock_map_t {
     int num_blocks;
     ir_pyblock_t *_mem; /* used only for freeing memory */
-    ir_pyblock *at; /* at[i] is the pyblock for block index i */
+    ir_pyblock *at; /* at[i] is the pyblock during execution of the block with index i.
+                       If the block starts with a setup_block or pop_block, this
+                       includes the effect of that instruction.
+                     */
+    int *stack_level; /* stack_level[i] is the entry stack level for block with index i */
 };
 
 /* Statically determine the PyTryBlock stack at eack block of 'func' */
