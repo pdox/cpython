@@ -20,6 +20,8 @@ ir_func ir_func_new(ir_context context, const char *name, ir_type sig) {
         func->param[i] = ir_value_new(func, sig->param[i]);
     }
     func->entry_label = ir_label_new(func, "entry");
+    func->current_pyblock = INVALID_PYBLOCK;
+    func->current_stack_level = -1;
 
     /* Open a cursor at the entry block */
     _ir_func_new_block(func);
@@ -112,7 +114,6 @@ void ir_func_verify(ir_func func) {
                     break;
                 case ir_opcode_goto_error: {
                     IR_INSTR_AS(goto_error)
-                    assert(instr->error->block != NULL);
                     if (instr->cond) {
                         assert(instr->fallthrough);
                         assert(instr->fallthrough->block != NULL);
@@ -126,7 +127,6 @@ void ir_func_verify(ir_func func) {
                     if (instr->continue_target) {
                         assert(instr->continue_target->block != NULL);
                     }
-                    assert(instr->fast_block_end->block != NULL);
                     break;
                 }
                 case ir_opcode_yield: {
@@ -144,9 +144,7 @@ void ir_func_verify(ir_func func) {
                 }
                 case ir_opcode_end_finally: {
                     IR_INSTR_AS(end_finally)
-                    assert(instr->fallthrough != NULL);
-                    assert(instr->error != NULL);
-                    assert(instr->fast_block_end != NULL);
+                    assert(instr->fallthrough->block != NULL);
                     break;
                 }
                 default:

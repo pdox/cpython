@@ -8,6 +8,8 @@
 #include "llvm/IR/MDBuilder.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
+#include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
 #include "SimpleOrcJit.h"
@@ -319,6 +321,21 @@ void _emit_instr(_TranslationContext &ctx, ir_block b, ir_instr _instr) {
         if (_instr->dest != NULL) {
             SET_DEST(ret);
         }
+        break;
+    }
+    case ir_opcode_stackmap: {
+        IR_INSTR_AS(stackmap)
+        size_t niargs = 2 + instr->arg_count;
+        llvm::Value** iargs = (llvm::Value**)malloc(niargs * sizeof(llvm::Value));
+        iargs[0] = BUILDER().getInt64(instr->stackmap_id); /* stackmap id */
+        iargs[1] = BUILDER().getInt32(0); /* numBytes in shadow region */
+        size_t i;
+        for (i = 0; i < instr->arg_count; i++) {
+            iargs[2 + i] = LLVM_VALUE(instr->arg[i]);
+        }
+        assert(i == niargs);
+        llvm::Function *f = llvm::Intrinsic::getDeclaration(ctx.module, llvm::Intrinsic::experimental_stackmap);
+        BUILDER().CreateCall(f, llvm::ArrayRef<llvm::Value*>(iargs, niargs));
         break;
     }
     case ir_opcode_get_element_ptr: {

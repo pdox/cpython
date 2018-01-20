@@ -6,21 +6,17 @@
 /***********************************************************/
 
 
-/* Compute exit stack level of a block. pyblock_stack_level should be
-   the b_level of the top pyblock (or 0 if none). A pop_block inside the
-   block restores the stack level to pyblock_stack_level.
+/* Compute stack level of a block just before the last instruction.
+   pyblock_stack_level should be the b_level of the top pyblock
+   (or 0 if none). A pop_block at the start of a block restores
+   the stack level to pyblock_stack_level.
 
-   There are three other special cases:
-     1) If a block ends with yield_dispatch or goto_fbe, UNMODELED_STACK_EFFECT is returned.
-     2) If a block ends with yield, the value returned assumes we are branching
-        to resume_inst_label. This assumes an additional element has been pushed onto
-        the stack from outside the evaluator.
-     3) If a block ends with end_finally, the value returned assumes we are taking the
-        fallthrough label.
+   NOTE: The last instruction of the block may affect the stack level,
+         but since thisaffect may depend on the branch target,
+         it is not computed by this function.
  */
-#define UNMODELED_STACK_EFFECT  (~((int)0))
 static int
-_exit_stack_level(ir_block b, int entry_stack_level, int pyblock_stack_level) {
+_end_stack_level(ir_block b, int entry_stack_level, int pyblock_stack_level) {
     ir_instr _instr;
     int level = entry_stack_level;
     for (_instr = b->first_instr; _instr != NULL; _instr = _instr->next) {
@@ -31,14 +27,6 @@ _exit_stack_level(ir_block b, int entry_stack_level, int pyblock_stack_level) {
         } else if (_instr->opcode == ir_opcode_pop_block) {
             assert(level >= pyblock_stack_level);
             level = pyblock_stack_level;
-        } else if (_instr->opcode == ir_opcode_yield) {
-            level += 1;
-        } else if (_instr->opcode == ir_opcode_end_finally) {
-            level -= 6;
-            assert(level == pyblock_stack_level);
-        } else if (_instr->opcode == ir_opcode_yield_dispatch ||
-                   _instr->opcode == ir_opcode_goto_fbe) {
-            return UNMODELED_STACK_EFFECT;
         }
     }
     return level;
@@ -105,9 +93,6 @@ void ir_remove_dead_blocks(ir_func func) {
 
 //#define ANALYZE_PYBLOCKS_DEBUG
 
-/* Marks an uninitialized pyblock value */
-#define INVALID_PYBLOCK   ((ir_pyblock)(~0))
-
 /* Marks a block that is being ignored in pyblock analysis */
 #define IGNORE_PYBLOCK    ((ir_pyblock)(~1))
 
@@ -147,6 +132,8 @@ ir_pyblock _new_pyblock(
     assert(state->memi <= state->num_blocks);
     ret->b_type = b_type;
     ret->b_handler = b_handler;
+    ret->b_handler_precursor = NULL;
+    ret->b_continue = NULL; /* NULL unless we see a goto_fbe with a continue_target */
     ret->b_level = b_level;
     ret->prev = prev;
     return ret;
@@ -156,7 +143,6 @@ static inline
 void _transfer_stack_level(compute_pyblock_state *state, ir_label label, int level) {
     size_t index = label->block->index;
     int existing = state->incoming_stack_level[index];
-    assert(level != UNMODELED_STACK_EFFECT);
     if (existing == -1) {
         state->incoming_stack_level[index] = level;
         state->rerun = 1;
@@ -264,6 +250,8 @@ ir_compute_pyblock_map(ir_func func, ir_label *ignored) {
             if (_instr->opcode == ir_opcode_setup_block) {
                 IR_INSTR_AS(setup_block)
                 at = _new_pyblock(&state, instr->b_type, instr->b_handler, in_stack, in);
+                instr->pb = at;
+                instr->entry_stack_level = in_stack;
 
                 /* There is an implicit branch to 'b_handler' after this block
                    has been popped (i.e. at the 'in' level). For EXCEPT or FINALLY_TRY,
@@ -284,6 +272,8 @@ ir_compute_pyblock_map(ir_func func, ir_label *ignored) {
                 } else {
                     assert(instr->b_type == IR_PYBLOCK_ANY);
                 }
+                instr->pb = in;
+                instr->entry_stack_level = in_stack;
                 at = in->prev;
             } else {
                 at = in;
@@ -292,33 +282,52 @@ ir_compute_pyblock_map(ir_func func, ir_label *ignored) {
 
             /* Compute exit stack level */
             assert(in_stack >= 0);
-            int out_stack_level = _exit_stack_level(b, in_stack, in ? in->b_level : 0);
-            ir_pyblock out = at;
+            int out_stack_level = _end_stack_level(b, in_stack, in ? in->b_level : 0);
 
             /* Decide what to do based on the control flow opcode */
             _instr = b->last_instr; /* Need to set this for IR_INSTR_AS */
             switch (_instr->opcode) {
             case ir_opcode_goto_error: {
                 IR_INSTR_AS(goto_error)
+                instr->pb = at;
+                instr->entry_stack_level = out_stack_level;
                 /* Only map fall through */
                 if (instr->fallthrough) {
-                    _transfer_pyblock(&state, instr->fallthrough, out, 0);
+                    _transfer_pyblock(&state, instr->fallthrough, at, 0);
                     _transfer_stack_level(&state, instr->fallthrough, out_stack_level);
                 }
                 break;
             }
             case ir_opcode_goto_fbe: {
-                /* Fast block end pops all non-loop blocks before it branches to the continue target 
-                   Rather than try to make this work, just ignore the labels on goto_fbe. */
+                IR_INSTR_AS(goto_fbe)
+                instr->pb = at;
+                instr->entry_stack_level = out_stack_level;
+                if (instr->why == IR_WHY_CONTINUE) {
+                    assert(instr->continue_target != NULL);
+                    /* This continue binds to the nearest loop in the blockstack */
+                    ir_pyblock cur = at;
+                    while (cur && cur->b_type != IR_PYBLOCK_LOOP) {
+                        cur = cur->prev;
+                    }
+                    assert(cur->b_type == IR_PYBLOCK_LOOP);
+                    if (cur->b_continue == NULL) {
+                        cur->b_continue = instr->continue_target;
+                    } else if (cur->b_continue->block != instr->continue_target->block) {
+                        Py_FatalError("'continue' target mismatch inside loop");
+                    }
+                }
                 break;
             }
             case ir_opcode_yield: {
                 IR_INSTR_AS(yield)
-                _transfer_pyblock(&state, instr->resume_inst_label, out, 0);
-                _transfer_stack_level(&state, instr->resume_inst_label, out_stack_level);
+                instr->pb = at;
+                instr->entry_stack_level = out_stack_level;
+
+                _transfer_pyblock(&state, instr->resume_inst_label, at, 0);
+                _transfer_stack_level(&state, instr->resume_inst_label, out_stack_level + 1);
                 if (instr->throw_inst_label) {
-                    _transfer_pyblock(&state, instr->throw_inst_label, out, 0);
-                    _transfer_stack_level(&state, instr->throw_inst_label, out_stack_level - 1);
+                    _transfer_pyblock(&state, instr->throw_inst_label, at, 0);
+                    _transfer_stack_level(&state, instr->throw_inst_label, out_stack_level);
                 }
                 break;
             }
@@ -330,10 +339,13 @@ ir_compute_pyblock_map(ir_func func, ir_label *ignored) {
             }
             case ir_opcode_end_finally: {
                 IR_INSTR_AS(end_finally)
+                instr->pb = at;
+                instr->entry_stack_level = out_stack_level;
                 /* end_finally pops an EXCEPT_HANDLER block before branching */
-                assert(out->b_type == IR_PYBLOCK_EXCEPT_HANDLER);
-                _transfer_pyblock(&state, instr->fallthrough, out->prev, 0);
-                _transfer_stack_level(&state, instr->fallthrough, out_stack_level);
+                assert(at->b_type == IR_PYBLOCK_EXCEPT_HANDLER);
+                assert(out_stack_level >= 6);
+                _transfer_pyblock(&state, instr->fallthrough, at->prev, 0);
+                _transfer_stack_level(&state, instr->fallthrough, out_stack_level - 6);
                 break;
             }
             default: {
@@ -341,7 +353,7 @@ ir_compute_pyblock_map(ir_func func, ir_label *ignored) {
                 ir_label *labels = ir_list_outgoing_labels(b, &labels_count);
                 for (size_t i = 0; i < labels_count; i++) {
                     if (!labels[i]) continue;
-                    _transfer_pyblock(&state, labels[i], out, 0);
+                    _transfer_pyblock(&state, labels[i], at, 0);
                     _transfer_stack_level(&state, labels[i], out_stack_level);
                 }
                 break;
@@ -392,4 +404,85 @@ void ir_free_pyblock_map(ir_pyblock_map map) {
     free(map->at);
     free(map->stack_level);
     free(map);
+}
+
+/***********************************************************/
+/*                    Stack Positions                      */
+/***********************************************************/
+
+int
+ir_compute_stack_positions(ir_func func) {
+    int num_blocks = ir_func_largest_block_index(func);
+    int *incoming_stack_level = (int*)malloc(sizeof(int) * num_blocks);
+    char *block_done = (char*)malloc(sizeof(char) * num_blocks);
+    for (int i = 0; i < num_blocks; i++) {
+        incoming_stack_level[i] = -1;
+        block_done[i] = 0;
+    }
+    incoming_stack_level[func->entry_label->block->index] = 0;
+
+    ir_block b;
+    ir_instr _instr;
+    int max_index = -1; /* maximum index accessed */
+    int rerun;
+    do {
+        rerun = 0;
+        for (b = func->first_block; b != NULL; b = b->next) {
+            int stack_level = incoming_stack_level[b->index];
+            if (stack_level == -1 || block_done[b->index]) continue;
+            assert(stack_level >= 0);
+            block_done[b->index] = 1;
+
+            for (_instr = b->first_instr; _instr != NULL; _instr = _instr->next) {
+                if (_instr->opcode == ir_opcode_stackadj) {
+                    IR_INSTR_AS(stackadj)
+                    stack_level += instr->amount;
+                    assert(stack_level >= 0);
+                } else if (_instr->opcode == ir_opcode_stack_peek) {
+                    IR_INSTR_AS(stack_peek)
+                    instr->abs_offset = stack_level - instr->offset;
+                    assert(instr->abs_offset >= 0);
+                    max_index = Py_MAX(max_index, instr->abs_offset);
+                } else if (_instr->opcode == ir_opcode_stack_put) {
+                    IR_INSTR_AS(stack_put)
+                    instr->abs_offset = stack_level - instr->offset;
+                    assert(instr->abs_offset >= 0);
+                    max_index = Py_MAX(max_index, instr->abs_offset);
+                } else {
+                    /* Python-specific flow control should have been lowered */
+                    assert(!(ir_opcode_is_python_specific(_instr->opcode) &&
+                             ir_instr_opcode_is_flow_control(_instr->opcode)));
+                }
+            }
+            /* Transfer the final stack level to target blocks */
+            size_t count;
+            ir_label *labels = ir_list_outgoing_labels(b, &count);
+            for (size_t i = 0; i < count; i++) {
+                if (!labels[i]) continue;
+                int existing = incoming_stack_level[labels[i]->block->index];
+                if (existing == -1) {
+                    incoming_stack_level[labels[i]->block->index] = stack_level;
+                    rerun = 1;
+                } else if (existing != stack_level) {
+                    Py_FatalError("Stack level mismatch when computing stack positions!");
+                }
+            }
+        }
+    } while (rerun);
+
+    /* We should have assigned a stack slot to every peek/put */
+    for (b = func->first_block; b != NULL; b = b->next) {
+        for (_instr = b->first_instr; _instr != NULL; _instr = _instr->next) {
+            if (_instr->opcode == ir_opcode_stack_put) {
+                IR_INSTR_AS(stack_put)
+                assert(instr->abs_offset >= 0);
+            } else if (_instr->opcode == ir_opcode_stack_peek) {
+                IR_INSTR_AS(stack_peek)
+                assert(instr->abs_offset >= 0);
+            }
+        }
+    }
+    free(block_done);
+    free(incoming_stack_level);
+    return max_index + 1;
 }

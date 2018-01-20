@@ -32,6 +32,7 @@ typedef enum {
 
     /* call */
     ir_opcode_call,     // new_value = foo(arg1,arg2,...)
+    ir_opcode_stackmap,
 
     /* memory ops */
     ir_opcode_get_element_ptr, // &(ptr->member)
@@ -368,6 +369,35 @@ ir_value ir_call(ir_func func, ir_value target, size_t arg_count, ir_value *args
 
 /*****************************************************************************/
 
+IR_PROTOTYPE(ir_instr_stackmap)
+struct ir_instr_stackmap_t {
+    IR_INSTR_HEADER
+    int stackmap_id;
+    int arg_count; /* Number of values to include in stack map */
+    /* Don't change the layout below without also updating ir_get_uses */
+    ir_value arg[1];
+};
+
+/* Generates a stackmap at this point in the code. */
+static inline
+ir_value ir_stackmap(ir_func func, int *stackmap_id, ir_value target,
+                       size_t arg_count, ir_value *args) {
+    size_t i;
+    IR_INSTR_ALLOC(ir_instr_stackmap, arg_count * sizeof(ir_value));
+    ir_type sig = ir_typeof(target);
+    assert(sig->kind == ir_type_kind_function);
+    assert(sig->param_count == 1); /* no arguments, no return */
+    assert(sig->param[0] == ir_type_void);
+    instr->stackmap_id = *stackmap_id = func->next_stackmap_id++;
+    instr->arg_count = arg_count;
+    for (i = 0; i < arg_count; i++) {
+        instr->arg[i] = args[i];
+    }
+    return IR_INSTR_INSERT(ir_opcode_stackmap, ir_type_void);
+}
+
+/*****************************************************************************/
+
 IR_PROTOTYPE(ir_instr_get_element_ptr)
 struct ir_instr_get_element_ptr_t {
     IR_INSTR_HEADER
@@ -614,13 +644,14 @@ void ir_info_here(ir_func func, const char *info) {
 IR_PROTOTYPE(ir_instr_branch)
 struct ir_instr_branch_t {
     IR_INSTR_HEADER
-    /* Changes below require updating ir_list_outgoing_labels() */
+    /* Changes to the labels require updating ir_list_outgoing_labels() */
     ir_label target;
 };
 
 static inline
 void ir_branch(ir_func func, ir_label target) {
     IR_INSTR_ALLOC(ir_instr_branch, 0)
+    assert(target != NULL);
     instr->target = target;
     IR_INSTR_INSERT(ir_opcode_branch, ir_type_void);
 }
@@ -649,7 +680,8 @@ struct ir_instr_branch_cond_t {
     ir_value cond;
     int if_true_weight;
     int if_false_weight;
-    /* Changes below require updating ir_list_outgoing_labels() */
+
+    /* Changes to the labels require updating ir_list_outgoing_labels() */
     ir_label if_true;
     ir_label if_false;
 };
@@ -703,7 +735,8 @@ IR_PROTOTYPE(ir_instr_jumptable)
 struct ir_instr_jumptable_t {
     IR_INSTR_HEADER
     ir_value index;
-    /* Changes below require updating ir_list_outgoing_labels() */
+
+    /* Changes to the labels require updating ir_list_outgoing_labels() */
     size_t table_size;
     ir_label table[1];
 };
@@ -820,12 +853,14 @@ IR_PROTOTYPE(ir_instr_stack_peek)
 struct ir_instr_stack_peek_t {
     IR_INSTR_HEADER
     int offset;
+    int abs_offset; /* computed */
 };
 
 static inline
 ir_value ir_stack_peek(ir_func func, int offset) {
     IR_INSTR_ALLOC(ir_instr_stack_peek, 0)
     instr->offset = offset;
+    instr->abs_offset = -1;
     return IR_INSTR_INSERT(ir_opcode_stack_peek, ir_type_pyobject_ptr);
 }
 
@@ -836,6 +871,7 @@ struct ir_instr_stack_put_t {
     IR_INSTR_HEADER
     int offset;
     ir_value value;
+    int abs_offset; /* computed */
 };
 
 static inline
@@ -843,6 +879,7 @@ ir_value ir_stack_put(ir_func func, int offset, ir_value value) {
     IR_INSTR_ALLOC(ir_instr_stack_put, 0)
     instr->offset = offset;
     instr->value = value;
+    instr->abs_offset = -1;
     assert(ir_pointer_base(ir_typeof(value)) == ir_type_pyobject);
     return IR_INSTR_INSERT(ir_opcode_stack_put, ir_type_void);
 }
@@ -884,11 +921,23 @@ ir_pyblock_type_repr(ir_pyblock_type b_type) {
     return "<invalid_pyblock_type>";
 }
 
+IR_PROTOTYPE(ir_pyblock)
+struct ir_pyblock_t {
+    ir_pyblock_type b_type;
+    ir_label b_handler;
+    ir_label b_handler_precursor; /* For IR_PYBLOCK_EXCEPT / IR_PYBLOCK_FINALLY_TRY */
+    ir_label b_continue; /* For IR_PYBLOCK_LOOP only */
+    int b_level;
+    ir_pyblock prev;
+};
+
 IR_PROTOTYPE(ir_instr_setup_block)
 struct ir_instr_setup_block_t {
     IR_INSTR_HEADER
     ir_pyblock_type b_type;
     ir_label b_handler;
+    ir_pyblock pb; /* pyblock that is setup by this instruction */
+    int entry_stack_level; /* stack level when this instruction is entered */
 };
 
 static inline
@@ -896,6 +945,8 @@ void ir_setup_block(ir_func func, ir_pyblock_type b_type, ir_label b_handler) {
     IR_INSTR_ALLOC(ir_instr_setup_block, 0)
     instr->b_type = b_type;
     instr->b_handler = b_handler;
+    instr->pb = func->current_pyblock;
+    instr->entry_stack_level = func->current_stack_level;
     IR_INSTR_INSERT(ir_opcode_setup_block, ir_type_void);
 }
 
@@ -905,12 +956,17 @@ IR_PROTOTYPE(ir_instr_pop_block)
 struct ir_instr_pop_block_t {
     IR_INSTR_HEADER
     ir_pyblock_type b_type;
+    /* These are set by the pyblock analysis pass */
+    ir_pyblock pb; /* pyblock that is pop'd by this instruction */
+    int entry_stack_level; /* stack level when this instruction is entered */
 };
 
 static inline
 void ir_pop_block(ir_func func, ir_pyblock_type b_type) {
     IR_INSTR_ALLOC(ir_instr_pop_block, 0)
     instr->b_type = b_type;
+    instr->pb = func->current_pyblock;
+    instr->entry_stack_level = func->current_stack_level;
     IR_INSTR_INSERT(ir_opcode_pop_block, ir_type_void);
 }
 
@@ -920,57 +976,71 @@ IR_PROTOTYPE(ir_instr_goto_error)
 struct ir_instr_goto_error_t {
     IR_INSTR_HEADER
     ir_value cond;
-    /* Changes below require updating ir_list_outgoing_labels() */
+
+    /* Changes to the labels require updating ir_list_outgoing_labels() */
     ir_label fallthrough;
-    ir_label error;
+    ir_label error_exit;
+
+    ir_pyblock pb; /* topmost pyblock at execution time */
+    int entry_stack_level; /* stack level when this instruction is entered */
 };
 
 static inline
-void ir_goto_error(ir_func func, ir_value cond, ir_label fallthrough, ir_label error) {
+void ir_goto_error(ir_func func, ir_value cond, ir_label fallthrough, ir_label error_exit) {
     IR_INSTR_ALLOC(ir_instr_goto_error, 0)
     instr->cond = cond;
     instr->fallthrough = fallthrough;
-    instr->error = error;
+    instr->error_exit = error_exit;
+    instr->pb = func->current_pyblock;
+    instr->entry_stack_level = func->current_stack_level;
     IR_INSTR_INSERT(ir_opcode_goto_error, ir_type_void);
 }
 
 /*****************************************************************************/
 
 typedef enum {
-    IR_FBE_EXCEPTION,
-    IR_FBE_RETURN,
-    IR_FBE_BREAK,
-    IR_FBE_CONTINUE,
-    IR_FBE_SILENCED,
-} ir_fbe_why;
+    IR_WHY_NOT,
+    IR_WHY_EXCEPTION,
+    IR_WHY_RETURN,
+    IR_WHY_BREAK,
+    IR_WHY_CONTINUE,
+    IR_WHY_SILENCED,
+} ir_why;
 
 static inline const char *
-ir_fbe_why_repr(ir_fbe_why why) {
+ir_why_repr(ir_why why) {
     switch (why) {
-    case IR_FBE_EXCEPTION: return "exception";
-    case IR_FBE_RETURN: return "return";
-    case IR_FBE_BREAK: return "break";
-    case IR_FBE_CONTINUE: return "continue";
-    case IR_FBE_SILENCED: return "silenced";
+    case IR_WHY_NOT: return "not";
+    case IR_WHY_EXCEPTION: return "exception";
+    case IR_WHY_RETURN: return "return";
+    case IR_WHY_BREAK: return "break";
+    case IR_WHY_CONTINUE: return "continue";
+    case IR_WHY_SILENCED: return "silenced";
     }
-    return "<invalid_fbe_why>";
+    return "<invalid_ir_why>";
 }
 
 IR_PROTOTYPE(ir_instr_goto_fbe)
 struct ir_instr_goto_fbe_t {
     IR_INSTR_HEADER
-    ir_fbe_why why;
-    /* Changes below require updating ir_list_outgoing_labels() */
+    ir_why why;
+
+    /* Changes to the labels require updating ir_list_outgoing_labels() */
     ir_label continue_target;
-    ir_label fast_block_end;
+    ir_label exit;
+
+    ir_pyblock pb; /* topmost pyblock at execution time */
+    int entry_stack_level; /* stack level when this instruction is entered */
 };
 
 static inline
-void ir_goto_fbe(ir_func func, ir_fbe_why why, ir_label continue_target, ir_label fast_block_end) {
+void ir_goto_fbe(ir_func func, ir_why why, ir_label continue_target, ir_label exit) {
     IR_INSTR_ALLOC(ir_instr_goto_fbe, 0)
     instr->why = why;
     instr->continue_target = continue_target;
-    instr->fast_block_end = fast_block_end;
+    instr->exit = exit;
+    instr->pb = func->current_pyblock;
+    instr->entry_stack_level = func->current_stack_level;
     IR_INSTR_INSERT(ir_opcode_goto_fbe, ir_type_void);
 }
 
@@ -981,9 +1051,15 @@ struct ir_instr_yield_t {
     IR_INSTR_HEADER
     ir_value value;
     int resume_instr_index;
-    /* Changes below require updating ir_list_outgoing_labels() */
+
+    /* Changes to the labels require updating ir_list_outgoing_labels() */
     ir_label resume_inst_label;
     ir_label throw_inst_label; /* YIELD_FROM only */
+    ir_label exit; /* exit label */
+
+    ir_pyblock pb; /* topmost pyblock at execution time */
+    int entry_stack_level; /* stack level when this instruction is entered */
+
 };
 
 static inline
@@ -992,13 +1068,17 @@ void ir_yield(
         ir_value value,
         int resume_instr_index,
         ir_label resume_inst_label,
-        ir_label throw_inst_label) {
+        ir_label throw_inst_label,
+        ir_label exit) {
     IR_INSTR_ALLOC(ir_instr_yield, 0)
     assert(ir_type_equal(ir_typeof(value), ir_type_pyobject_ptr));
     instr->value = value;
     instr->resume_instr_index = resume_instr_index;
     instr->resume_inst_label = resume_inst_label;
     instr->throw_inst_label = throw_inst_label;
+    instr->exit = exit;
+    instr->pb = func->current_pyblock;
+    instr->entry_stack_level = func->current_stack_level;
     IR_INSTR_INSERT(ir_opcode_yield, ir_type_void);
 }
 
@@ -1025,16 +1105,16 @@ struct ir_instr_end_finally_t {
     IR_INSTR_HEADER
     /* Do not change below without updating ir_list_outgoing_labels() */
     ir_label fallthrough;
-    ir_label error;
-    ir_label fast_block_end;
+    ir_pyblock pb; /* topmost pyblock at execution time */
+    int entry_stack_level; /* stack level when this instruction is entered */
 };
 
 static inline
-void ir_end_finally(ir_func func, ir_label fallthrough, ir_label error, ir_label fast_block_end) {
+void ir_end_finally(ir_func func, ir_label fallthrough) {
     IR_INSTR_ALLOC(ir_instr_end_finally, 0)
     instr->fallthrough = fallthrough;
-    instr->error = error;
-    instr->fast_block_end = fast_block_end;
+    instr->pb = func->current_pyblock;
+    instr->entry_stack_level = func->current_stack_level;
     IR_INSTR_INSERT(ir_opcode_end_finally, ir_type_void);
 }
 
@@ -1102,6 +1182,20 @@ static inline void ir_cursor_open(ir_func func, ir_block b, ir_instr _instr) {
     b->current_instr = _instr;
 }
 
+static inline void ir_cursor_set_pyblock(ir_func func, int current_stack_level, ir_pyblock pb) {
+    assert(func->current_pyblock == INVALID_PYBLOCK);
+    assert(pb != INVALID_PYBLOCK);
+    assert(current_stack_level >= 0);
+    func->current_stack_level = current_stack_level;
+    func->current_pyblock = pb;
+}
+
+static inline void ir_cursor_clear_pyblock(ir_func func) {
+    assert(func->current_pyblock != INVALID_PYBLOCK);
+    func->current_pyblock = INVALID_PYBLOCK;
+    func->current_stack_level = -1;
+}
+
 /* Insert an instruction into the function, immediately after the current
    instruction. */
 static inline
@@ -1122,10 +1216,14 @@ void ir_cursor_insert(ir_func func, ir_instr _instr) {
         }
         assert(b->current_instr == NULL);
     } else {
-        /* If we're not inserting a label, make sure we're not
-           at the start of a block, or immediately after control flow. */
+        /* If we're immediately after a control flow instruction, but we're not
+           inserting a label, then this code is unreachable. Create a dummy label. */
         assert(b->current_instr != NULL);
-        assert(!ir_instr_opcode_is_flow_control(b->current_instr->opcode));
+        if (ir_instr_opcode_is_flow_control(b->current_instr->opcode)) {
+            ir_label unreachable_dummy = ir_label_new(func, "unreachable_dummy");
+            ir_label_here(func, unreachable_dummy);
+            b = func->current_block;
+        }
     }
 
     if (ir_instr_opcode_needs_to_be_at_front(_instr->opcode)) {

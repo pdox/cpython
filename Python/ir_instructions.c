@@ -58,6 +58,11 @@ ir_value* ir_get_uses(ir_instr _instr, size_t *count) {
         *count = 1 + instr->arg_count;
         return &(instr->target);
     }
+    case ir_opcode_stackmap: {
+        IR_INSTR_AS(stackmap)
+        *count = instr->arg_count;
+        return &instr->arg[0];
+    }
     case ir_opcode_get_element_ptr: {
         IR_INSTR_AS(get_element_ptr)
         *u++ = instr->ptr;
@@ -216,7 +221,7 @@ ir_list_outgoing_labels(ir_block b, size_t *count) {
     }
     case ir_opcode_yield: {
         IR_INSTR_AS(yield)
-        *count = 2;
+        *count = 3;
         return &instr->resume_inst_label;
     }
     case ir_opcode_yield_dispatch: {
@@ -226,7 +231,7 @@ ir_list_outgoing_labels(ir_block b, size_t *count) {
     }
     case ir_opcode_end_finally: {
         IR_INSTR_AS(end_finally)
-        *count = 3;
+        *count = 1;
         return &instr->fallthrough;
     }
     default:
@@ -270,6 +275,7 @@ _ir_opcode_repr(ir_opcode opcode) {
 
     OPCODE_CASE(ternary)
     OPCODE_CASE(call)
+    OPCODE_CASE(stackmap)
     OPCODE_CASE(get_element_ptr)
     OPCODE_CASE(get_index_ptr)
     OPCODE_CASE(load)
@@ -383,6 +389,16 @@ ir_instr_repr(char *p, ir_instr _instr) {
                 p = ir_value_repr(p, instr->arg[i]);
             }
             p += sprintf(p, ")");
+            break;
+        }
+        case ir_opcode_stackmap: {
+            IR_INSTR_AS(stackmap)
+            p += sprintf(p, "id=%d  ", instr->stackmap_id);
+            for (int i = 0; i < instr->arg_count; i++) {
+                if (i != 0)
+                    p += sprintf(p, ", ");
+                p = ir_value_repr(p, instr->arg[i]);
+            }
             break;
         }
         case ir_opcode_get_element_ptr: {
@@ -566,19 +582,15 @@ ir_instr_repr(char *p, ir_instr _instr) {
             }
             if (instr->fallthrough) {
                 p = ir_label_repr(p, instr->fallthrough);
-                p += sprintf(p, " ");
             }
-            p = ir_label_repr(p, instr->error);
             break;
         }
         case ir_opcode_goto_fbe: {
             IR_INSTR_AS(goto_fbe)
-            p += sprintf(p, "%s ", ir_fbe_why_repr(instr->why));
+            p += sprintf(p, "%s ", ir_why_repr(instr->why));
             if (instr->continue_target != NULL) {
                 p = ir_label_repr(p, instr->continue_target);
-                p += sprintf(p, " ");
             }
-            p = ir_label_repr(p, instr->fast_block_end);
             break;
         }
         case ir_opcode_yield: {
@@ -600,10 +612,6 @@ ir_instr_repr(char *p, ir_instr _instr) {
         case ir_opcode_end_finally: {
             IR_INSTR_AS(end_finally)
             p = ir_label_repr(p, instr->fallthrough);
-            p += sprintf(p, " ");
-            p = ir_label_repr(p, instr->error);
-            p += sprintf(p, " ");
-            p = ir_label_repr(p, instr->fast_block_end);
             break;
         }
     }

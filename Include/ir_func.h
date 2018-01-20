@@ -3,6 +3,10 @@ IR_PROTOTYPE(ir_value)
 IR_PROTOTYPE(ir_block)
 IR_PROTOTYPE(ir_label)
 IR_PROTOTYPE(ir_func)
+IR_PROTOTYPE(ir_pyblock)
+
+/* Marks an uninitialized pyblock value */
+#define INVALID_PYBLOCK   ((ir_pyblock)(~((uintptr_t)0)))
 
 struct ir_value_t {
     ir_type type;
@@ -39,6 +43,11 @@ struct ir_func_t {
     ir_block last_block;
     size_t next_block_index;
 
+    // Information used during lowering
+    // TODO: Try to factor these out.
+    ir_pyblock current_pyblock;
+    int current_stack_level;
+
     /* Used for user-visible label naming */
     const char *label_prefix_stack[LABEL_PREFIX_STACK_SIZE];
     int num_cond_if_true_labels;
@@ -46,6 +55,7 @@ struct ir_func_t {
 
     /* Value numbering */
     size_t next_value_index;
+    size_t next_stackmap_id;
 
     /* These match the signature. param[0] is not used. */
     size_t param_count;
