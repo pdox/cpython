@@ -1,0 +1,8 @@
+{
+  "project_id": "pyjit",
+  "phabricator.uri": "https://phabricator.intern.facebook.com/api/",
+  "git.default-relative-commit" : "HEAD^",
+  "arc.feature.start.default" : "origin/master",
+  "events.listeners" : [
+  ]
+}
