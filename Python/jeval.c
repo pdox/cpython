@@ -59,12 +59,18 @@ typedef struct _JITData {
     ir_type sig_ifi; /* for _do_eval_breaker() helper */
     ir_type sig_ol;  /* for PyLong_FromLong */
     ir_type dealloc_sig;
+    ir_type blocksetup_sig;
+    ir_type blockpop_sig;
     ir_type exc_triple_sig;
 
     /* Blocks that will be moved to the end */
     move_entry *move_entry_list;
 
     int is_gen;
+    int update_blockstack; /* Keep f_blockstack in the state ceval expects.
+                              Needed for generators, where execution can switch between
+                              the JIT and the interpreter (e.g. if tracing is enabled
+                              while yielding) */
     ir_label body_start;
 
     ir_label jump;
@@ -2941,6 +2947,7 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     Py_ssize_t inst_count = PyBytes_GET_SIZE(co->co_code)/sizeof(_Py_CODEUNIT);
 
     jd->is_gen = (co->co_flags & (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR));
+    jd->update_blockstack = jd->is_gen;
     jd->error_exit = ir_label_new(jd->func, "error_exit");
     jd->exit = ir_label_new(jd->func, "exit");
     jd->body_start = ir_label_new(jd->func, "body_start");
@@ -2986,7 +2993,9 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     jd->sig_iooo = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
     jd->sig_ol = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_long);
     jd->dealloc_sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr);
-    jd->exc_triple_sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr_ptr, ir_type_pyobject_ptr_ptr, ir_type_pyobject_ptr_ptr); \
+    jd->blocksetup_sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyframeobject_ptr, ir_type_int, ir_type_int, ir_type_int);
+    jd->blockpop_sig = CREATE_SIGNATURE(ir_type_pytryblock_ptr, ir_type_pyframeobject_ptr);
+    jd->exc_triple_sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr_ptr, ir_type_pyobject_ptr_ptr, ir_type_pyobject_ptr_ptr);
 
     /* Arguments: f, throwflag */
     jd->f = ir_func_get_argument(jd->func, 0);
@@ -3168,6 +3177,85 @@ _PyJIT_CodeGen(PyCodeObject *co) {
     return 0;
 }
 
+static inline
+int _pyblock_type_to_b_type(ir_pyblock_type type) {
+    switch (type) {
+    case IR_PYBLOCK_LOOP: return SETUP_LOOP;
+    case IR_PYBLOCK_EXCEPT: return SETUP_EXCEPT;
+    case IR_PYBLOCK_FINALLY_TRY: return SETUP_FINALLY;
+    case IR_PYBLOCK_EXCEPT_HANDLER: return EXCEPT_HANDLER;
+    default: break;
+    }
+    abort(); /* Unexpected case */
+}
+
+static int _compute_pyblock_depth(ir_pyblock pb) {
+    int count = 0;
+    ir_pyblock cur = pb;
+    while (cur != NULL) {
+        count++;
+        cur = cur->prev;
+    }
+    return count;
+}
+
+static void _push_except_handler_to_blockstack(JITData *jd, int b_level) {
+    if (!jd->update_blockstack) return;
+
+    CALL_NATIVE(jd->blocksetup_sig, PyFrame_BlockSetup,
+         FRAMEPTR(), CONSTANT_INT(EXCEPT_HANDLER), CONSTANT_INT(-1), CONSTANT_INT(b_level));
+}
+
+static void _push_pyblock_to_blockstack(JITData *jd, ir_pyblock pb) {
+    if (!jd->update_blockstack) return;
+
+    int b_type = _pyblock_type_to_b_type(pb->b_type);
+    int b_handler;
+    if (b_type == EXCEPT_HANDLER) {
+        assert(pb->b_handler == NULL);
+        b_handler = -1;
+    } else {
+        assert(pb->b_handler != NULL);
+        b_handler = sizeof(_Py_CODEUNIT) * _label_to_instr_index(jd, pb->b_handler);
+    }
+
+    /* Verify the depth */
+    IR_ASSERT(CMP_EQ(LOAD_FIELD(jd->f, PyFrameObject, f_iblock, ir_type_int),
+                     CONSTANT_INT(_compute_pyblock_depth(pb->prev))));
+
+    CALL_NATIVE(jd->blocksetup_sig, PyFrame_BlockSetup,
+                jd->f,
+                CONSTANT_INT(b_type),
+                CONSTANT_INT(b_handler),
+                CONSTANT_INT(pb->b_level));
+}
+
+static void _pop_pyblock_from_blockstack(JITData *jd, ir_pyblock pb) {
+    if (!jd->update_blockstack) return;
+
+    /* Verify the depth */
+    IR_ASSERT(CMP_EQ(LOAD_FIELD(jd->f, PyFrameObject, f_iblock, ir_type_int),
+                     CONSTANT_INT(_compute_pyblock_depth(pb))));
+    JVALUE b = CALL_NATIVE(jd->blockpop_sig, PyFrame_BlockPop, jd->f);
+#ifdef Py_DEBUG
+    /* Verify the fields */
+    int b_type = _pyblock_type_to_b_type(pb->b_type);
+    int b_handler;
+    if (b_type == EXCEPT_HANDLER) {
+        assert(pb->b_handler == NULL);
+        b_handler = -1;
+    } else {
+        assert(pb->b_handler != NULL);
+        b_handler = sizeof(_Py_CODEUNIT) * _label_to_instr_index(jd, pb->b_handler);
+    }
+    IR_ASSERT(CMP_EQ(LOAD_FIELD(b, PyTryBlock, b_type, ir_type_int), CONSTANT_INT(b_type)));
+    IR_ASSERT(CMP_EQ(LOAD_FIELD(b, PyTryBlock, b_handler, ir_type_int), CONSTANT_INT(b_handler)));
+    IR_ASSERT(CMP_EQ(LOAD_FIELD(b, PyTryBlock, b_level, ir_type_int), CONSTANT_INT(pb->b_level)));
+#else
+    (void)b;
+#endif
+}
+
 static
 void _emit_end_finally(JITData *jd, ir_instr_end_finally instr) {
     IR_LABEL_INIT(try_case_2);
@@ -3175,6 +3263,8 @@ void _emit_end_finally(JITData *jd, ir_instr_end_finally instr) {
     IR_LABEL_INIT(normal_exit);
     ir_pyblock pb = instr->pb;
     int estack = instr->entry_stack_level;
+
+    _pop_pyblock_from_blockstack(jd, pb);
 
     JVALUE status = POP();
 
@@ -3243,18 +3333,6 @@ void _emit_end_finally(JITData *jd, ir_instr_end_finally instr) {
 }
 
 static inline
-int _pyblock_type_to_b_type(ir_pyblock_type type) {
-    switch (type) {
-    case IR_PYBLOCK_LOOP: return SETUP_LOOP;
-    case IR_PYBLOCK_EXCEPT: return SETUP_EXCEPT;
-    case IR_PYBLOCK_FINALLY_TRY: return SETUP_FINALLY;
-    case IR_PYBLOCK_EXCEPT_HANDLER: return EXCEPT_HANDLER;
-    default: break;
-    }
-    abort(); /* Unexpected case */
-}
-
-static inline
 int _ir_why_to_why(ir_why why) {
     switch (why) {
     case IR_WHY_NOT: return WHY_NOT;
@@ -3305,6 +3383,10 @@ void _emit_precursor(JITData *jd, ir_pyblock pb) {
     /* Insert the current frame into the traceback */
     JTYPE sig = CREATE_SIGNATURE(ir_type_int, ir_type_pyframeobject_ptr);
     CALL_NATIVE(sig, PyTraceBack_Here, jd->f);
+
+    /* The except handler has the same stack level as the EXCEPT
+       or TRY_FINALLY block which caused it. */
+    _push_except_handler_to_blockstack(jd, pb->b_level);
 
     /* Push the old exc_info onto the stack */
     JVALUE exc_info = LOAD_FIELD(jd->tstate, PyThreadState, exc_info, ir_type_pyerr_stackitem_ptr);
@@ -3374,11 +3456,13 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr, void *Py_UNUSED(arg)) {
             _emit_precursor(jd, instr->pb);
             LABEL(skip_over);
         }
+        _push_pyblock_to_blockstack(jd, instr->pb);
         return 1;
     }
     case ir_opcode_pop_block: {
         IR_INSTR_AS(pop_block)
         assert(instr->pb != NULL && instr->pb != INVALID_PYBLOCK);
+        _pop_pyblock_from_blockstack(jd, instr->pb);
         if (instr->b_type == IR_PYBLOCK_EXCEPT_HANDLER) {
             UNWIND_EXCEPT_HANDLER_NEW(instr->entry_stack_level, instr->pb);
         } else {
@@ -3399,11 +3483,7 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr, void *Py_UNUSED(arg)) {
         ir_pyblock cur = instr->pb;
         int curlevel = instr->entry_stack_level;
         while (cur) {
-           /* f->f_iblock--; */
-           //JVALUE f_iblock = LOAD_FIELD(FRAMEPTR(), PyFrameObject, f_iblock, ir_type_int);
-           //IR_ASSERT(CMP_GT(f_iblock, CONSTANT_INT(0)));
-           //STORE_FIELD(FRAMEPTR(), PyFrameObject, f_iblock, ir_type_int, SUBTRACT(f_iblock, CONSTANT_INT(1)));
-
+            _pop_pyblock_from_blockstack(jd, cur);
             if (cur->b_type == IR_PYBLOCK_EXCEPT_HANDLER) {
                 UNWIND_EXCEPT_HANDLER_NEW(curlevel, cur);
                 curlevel = cur->b_level;
@@ -3447,10 +3527,7 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr, void *Py_UNUSED(arg)) {
                 break;
             }
 
-           /* f->f_iblock--; */
-           //JVALUE f_iblock = LOAD_FIELD(FRAMEPTR(), PyFrameObject, f_iblock, ir_type_int);
-           //IR_ASSERT(CMP_GT(f_iblock, CONSTANT_INT(0)));
-           //STORE_FIELD(FRAMEPTR(), PyFrameObject, f_iblock, ir_type_int, SUBTRACT(f_iblock, CONSTANT_INT(1)));
+            _pop_pyblock_from_blockstack(jd, cur);
 
             if (cur->b_type == IR_PYBLOCK_EXCEPT_HANDLER) {
                 UNWIND_EXCEPT_HANDLER_NEW(curlevel, cur);
@@ -3480,6 +3557,7 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr, void *Py_UNUSED(arg)) {
             }
             if (cur->b_type == IR_PYBLOCK_FINALLY_TRY) {
                 /* Entering finally: due to return/continue/break */
+                _push_except_handler_to_blockstack(jd, cur->b_level);
                 JVALUE none = CONSTANT_PYOBJ(Py_None);
                 for (int i = 0; i < 4; i++) {
                     INCREF(none);

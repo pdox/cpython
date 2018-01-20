@@ -554,7 +554,6 @@ PyEval_EvalFrameEx(PyFrameObject *f, int throwflag)
             }
         }
     }
-    assert(f->f_code->co_jit_handle == NULL); /* Currently not safe to switch between JIT and interpreter */
     return tstate->interp->eval_frame(f, throwflag);
 }
 
