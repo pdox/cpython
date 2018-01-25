@@ -164,6 +164,11 @@ void _emit_instr(jit_function_t jit_func,
         }
         break;
     }
+    case ir_opcode_patchpoint: {
+        /* Patchpoints not yet supported by libjit */
+        abort();
+        break;
+    }
     case ir_opcode_get_element_ptr: {
         IR_INSTR_AS(get_element_ptr)
         SET_DEST(jit_insn_add_relative(jit_func, JIT_VALUE(instr->ptr), instr->offset));
@@ -298,8 +303,7 @@ void _emit_instr(jit_function_t jit_func,
     } // end switch
 }
 
-void *
-ir_libjit_compile(ir_func func) {
+ir_object ir_libjit_compile(ir_func func) {
     unsigned int i;
     if (gcontext == NULL) {
         gcontext = jit_context_create();
@@ -349,8 +353,16 @@ ir_libjit_compile(ir_func func) {
     if (!ok) {
         Py_FatalError("libjit compile failed");
     }
-    void *ret = jit_function_to_closure(jit_func);
-    assert(ret);
+    void *entrypoint = jit_function_to_closure(jit_func);
+    assert(entrypoint);
     jit_context_build_end(gcontext);
+
+    ir_object ret = ir_object_new();
+    // TODO: Keep track of compiler data, so that when an ir_object is free'd,
+    //       the associated compiler module is also freed.
+    ret->compiler_data = NULL;
+    ret->compiler_free_callback = NULL;
+    ret->entrypoint = entrypoint;
+    ret->stackmap_index = NULL;
     return ret;
 }

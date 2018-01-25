@@ -58,10 +58,10 @@ ir_value* ir_get_uses(ir_instr _instr, size_t *count) {
         *count = 1 + instr->arg_count;
         return &(instr->target);
     }
-    case ir_opcode_stackmap: {
-        IR_INSTR_AS(stackmap)
-        *count = instr->arg_count;
-        return &instr->arg[0];
+    case ir_opcode_patchpoint: {
+        IR_INSTR_AS(patchpoint)
+        *count = 1 + instr->arg_count;
+        return &instr->target;
     }
     case ir_opcode_get_element_ptr: {
         IR_INSTR_AS(get_element_ptr)
@@ -275,7 +275,7 @@ _ir_opcode_repr(ir_opcode opcode) {
 
     OPCODE_CASE(ternary)
     OPCODE_CASE(call)
-    OPCODE_CASE(stackmap)
+    OPCODE_CASE(patchpoint)
     OPCODE_CASE(get_element_ptr)
     OPCODE_CASE(get_index_ptr)
     OPCODE_CASE(load)
@@ -378,12 +378,11 @@ ir_instr_repr(char *p, ir_instr _instr) {
         }
         case ir_opcode_call: {
             IR_INSTR_AS(call)
-            int i;
             p = ir_type_repr(p, ir_typeof(instr->target));
             p += sprintf(p, " ");
             p = ir_value_repr(p, instr->target);
             p += sprintf(p, " (");
-            for (i = 0; i < instr->arg_count; i++) {
+            for (int i = 0; i < instr->arg_count; i++) {
                 if (i != 0)
                     p += sprintf(p, ", ");
                 p = ir_value_repr(p, instr->arg[i]);
@@ -391,14 +390,22 @@ ir_instr_repr(char *p, ir_instr _instr) {
             p += sprintf(p, ")");
             break;
         }
-        case ir_opcode_stackmap: {
-            IR_INSTR_AS(stackmap)
-            p += sprintf(p, "id=%d  ", instr->stackmap_id);
-            for (int i = 0; i < instr->arg_count; i++) {
-                if (i != 0)
+        case ir_opcode_patchpoint: {
+            IR_INSTR_AS(patchpoint)
+            p += sprintf(p, "[user_data=%p] ", instr->user_data);
+            p = ir_type_repr(p, ir_typeof(instr->target));
+            p += sprintf(p, " ");
+            p = ir_value_repr(p, instr->target);
+            p += sprintf(p, " (");
+            for (size_t i = 0; i < instr->arg_count; i++) {
+                if (i == instr->real_arg_count) {
+                    p += sprintf(p, " | ");
+                } else if (i != 0) {
                     p += sprintf(p, ", ");
+                }
                 p = ir_value_repr(p, instr->arg[i]);
             }
+            p += sprintf(p, ")");
             break;
         }
         case ir_opcode_get_element_ptr: {

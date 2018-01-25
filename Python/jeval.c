@@ -52,6 +52,7 @@ typedef struct _JITData {
     ir_type sig_oo;
     ir_type sig_ooo;
     ir_type sig_oooo;
+    ir_type sig_vp;
     ir_type sig_i;
     ir_type sig_io;
     ir_type sig_ioo;
@@ -71,6 +72,8 @@ typedef struct _JITData {
                               Needed for generators, where execution can switch between
                               the JIT and the interpreter (e.g. if tracing is enabled
                               while yielding) */
+    int use_patchpoint_error_handler;
+
     ir_label body_start;
 
     ir_label jump;
@@ -2948,6 +2951,8 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
 
     jd->is_gen = (co->co_flags & (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR));
     jd->update_blockstack = jd->is_gen;
+    jd->use_patchpoint_error_handler = 0;
+
     jd->error_exit = ir_label_new(jd->func, "error_exit");
     jd->exit = ir_label_new(jd->func, "exit");
     jd->body_start = ir_label_new(jd->func, "body_start");
@@ -2986,6 +2991,7 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     jd->sig_oo = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr);
     jd->sig_ooo = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
     jd->sig_oooo = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
+    jd->sig_vp = CREATE_SIGNATURE(ir_type_void, ir_type_void_ptr);
     jd->sig_i = CREATE_SIGNATURE(ir_type_int);
     jd->sig_ifi = CREATE_SIGNATURE(ir_type_int, ir_type_pyframeobject_ptr, ir_type_int);
     jd->sig_io = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr);
@@ -3163,14 +3169,17 @@ _PyJIT_CodeGen(PyCodeObject *co) {
     ir_func_verify(jd->func);
 #endif
     PyJIT_Handle *handle = PyMem_RawMalloc(sizeof(PyJIT_Handle));
-    handle->context = NULL; /* TODO: need to keep track of this */
+    ir_object object;
     if (Py_JITFlag == 1) {
-        handle->entry = (PyJIT_EntryPoint)ir_libjit_compile(jd->func);
+        object = ir_libjit_compile(jd->func);
     } else if (Py_JITFlag == 2) {
-        handle->entry = (PyJIT_EntryPoint)ir_llvm_compile(jd->func);
+        object = ir_llvm_compile(jd->func);
     } else {
         Py_FatalError("invalid PYJIT value");
+        Py_UNREACHABLE();
     }
+    handle->object = object;
+    handle->entry = (PyJIT_EntryPoint)object->entrypoint;
     ir_context_destroy(jd->context);
     PyMem_RawFree(jd);
     co->co_jit_handle = handle;
@@ -3369,13 +3378,14 @@ void _emit_resume_stub(JITData *jd, ir_label resume_label, int stack_level, ir_p
     BRANCH(target_inst_label);
 }
 
+static
+void _emit_patchpoint_error_handler(JITData *jd, ir_pyblock pb, int entry_stack_level);
 
 /* A precursor is the code that executes when an exception occurs,
    after the stack has unwound, and when the exception is going to be
    handled by a pyblock. There is one precursor per pyblock of type
    EXCEPT or FINALLY_TRY. (since the stack level at each precursor may be different).
  */
-
 void _emit_precursor(JITData *jd, ir_pyblock pb) {
     LABEL(pb->b_handler_precursor);
     IR_ASSERT(IR_PyErr_Occurred());
@@ -3477,6 +3487,13 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr, void *Py_UNUSED(arg)) {
 
         if (instr->cond != NULL) {
             BRANCH_IF_NOT(instr->cond, instr->fallthrough, IR_LIKELY);
+        }
+
+        if (jd->use_patchpoint_error_handler) {
+            /* This will unwind the stack and branch to the precursor
+               (same as the code below) */
+            _emit_patchpoint_error_handler(jd, instr->pb, instr->entry_stack_level);
+            return 1;
         }
 
         /* Unwind until we hit the pyblock which handles this error */
@@ -3946,47 +3963,156 @@ void ir_verify_stack_effect(ir_func func) {
     assert(!errors);
 }
 
-#if 0
+/* Stack Record flags */
+#define SR_FLAG_TERMINATOR          0x0  /* Ends the list */
+#define SR_FLAG_VALID               0x1  /* Alway set for valid entries */
+#define SR_FLAG_DECREF              0x2  /* Slot should be XDECREF'd */
+#define SR_FLAG_EXCEPTION_START     0x4  /* Slot begins EXCEPT_HANDLER tuple (length 6) */
 
-#define DWARF_RAX   0
-#define DWARF_RDX   1
-#define DWARF_RCX   2
-#define DWARF_RBX   3
-#define DWARF_RSI   4
-#define DWARF_RDI   5
-#define DWARF_RBP   6
-#define DWARF_RSP   7
-#define DWARF_R8    8
-#define DWARF_R9    9
-#define DWARF_R10  10
-#define DWARF_R11  11
-#define DWARF_R12  12
-#define DWARF_R13  13
-#define DWARF_R14  14
-#define DWARF_R15  15
-#define DWARF_RA   16
+typedef struct {
+    uint8_t flags;
+} _stack_record;
 
-void jeval_error_handler(void **save_area) {
-    /* Use the return address to find the stackmap */
-    ir_stackmap *sm = ir_stackmap_find(save_area[DWARF_RA]);
-    assert(sm);
+/* _error_info records information at the error site required for
+   jeval_error_handler to unwind the Python stack. */
+typedef struct {
+    ir_stackmap_info stackmap; /* This pointer gets filled in by the IR compiler */
+    _stack_record sr[1];
+} _error_info;
 
-    /* Use the stack map to retrieve the frame pointer */
-    PyFrameObject *f = ir_stackmap_load(sm, save_area, 0);
+extern void jeval_error_handler_trampoline(void);
 
-    /* Retrieve the JIT info */
-    PyJIT_Handle *handle = f->f_code->co_jit_handle;
+void jeval_error_handler(_error_info *info, void **save_area) {
+    ir_stackmap_info stackmap = info->stackmap;
 
-    /* The error info index corresponds to the stackmap id */
-    PyJIT_ErrorInfo *info = handle->error_info[sm->stackmap_id]l
-
-    assert(PyErr_Occurred());
-    PyTraceBack_Here(f);
+    /* Retrieve the PyFrameObject */
+    PyFrameObject *f = (PyFrameObject*)ir_stackmap_read_value(stackmap, 0, save_area);
+    assert(Py_TYPE(f) == &PyFrame_Type);
 
     /* Unwind the stack */
-    for (size_t i = 0; i < info->unwind_stack_items; i++) {
-        PyObject *obj = ir_stackmap_load(sm, save_area, 1 + i);
-        Py_XDECREF(obj);
+    size_t next_except_handler = 0;
+    PyObject *typ = NULL;
+    PyObject *val = NULL;
+    PyObject *tb = NULL;
+    size_t i;
+    for (i = 1; i < stackmap->num_values; i++) {
+        uint8_t flags = info->sr[i-1].flags;
+        assert(flags & SR_FLAG_VALID);
+        PyObject *obj = (PyObject*)ir_stackmap_read_value(stackmap, i, save_area);
+        if (next_except_handler && i >= next_except_handler) {
+            assert(flags == (SR_FLAG_VALID | SR_FLAG_DECREF));
+            if (i == next_except_handler) {
+                typ = obj;
+            } else if (i == next_except_handler + 1) {
+                val = obj;
+            } else if (i == next_except_handler + 2) {
+                tb = obj;
+                _unwind_except_helper(typ, val, tb);
+                typ = val = tb = NULL;
+                next_except_handler = 0;
+            }
+        } else if (flags & SR_FLAG_EXCEPTION_START) {
+            if ((PyLong_Check(obj) && PyLong_AsLong(obj) == WHY_SILENCED) ||
+                PyExceptionClass_Check(obj)) {
+                /* The following 6 entries form an EXCEPT_HANDLER block. Mark the
+                   except part for unwind. */
+                assert(next_except_handler == 0);
+                next_except_handler = i + 3;
+                assert(next_except_handler + 2 < stackmap->num_values);
+            }
+        } else if (flags & SR_FLAG_DECREF) {
+            Py_XDECREF(obj);
+        }
+    }
+    assert(next_except_handler == 0);
+    assert(i == stackmap->num_values);
+    assert(info->sr[i-1].flags == SR_FLAG_TERMINATOR);
+}
+
+static
+void _emit_patchpoint_error_handler(JITData *jd, ir_pyblock pb, int entry_stack_level) {
+    /* First, compute the total unwind depth, so we know how large to
+       make the _error_info structure. */
+    ir_pyblock cur = pb;
+    int level = entry_stack_level;
+    while (cur) {
+        assert(level >= cur->b_level);
+        if (cur->b_type == IR_PYBLOCK_EXCEPT_HANDLER) {
+            level = cur->b_level;
+            cur = cur->prev;
+            continue;
+        }
+        level = cur->b_level;
+        if (cur->b_type == IR_PYBLOCK_EXCEPT ||
+            cur->b_type == IR_PYBLOCK_FINALLY_TRY) {
+            break;
+        }
+        cur = cur->prev;
+    }
+    if (cur == NULL)
+        level = 0;
+    int total_unwind = entry_stack_level - level;
+
+    /* Attach error information to handle */
+    _error_info *info = (_error_info*)malloc(sizeof(_error_info) + sizeof(_stack_record) * (total_unwind + 1));
+    info->stackmap = NULL; /* This will be filled in by the IR compiler */
+
+    /* Prepare argument list for patchpoint. The first argument is a real argument containing
+       the pointer to the _error_info for this error. The remaining arguments are map-only.
+       The second argument is jd->f, and later arguments are the stack positions to pop, in
+       reverse order. */
+    ir_value *args = (ir_value*)malloc((total_unwind + 2) * sizeof(ir_value));
+    args[0] = CONSTANT_PTR(ir_type_void_ptr, info);
+    args[1] = jd->f;
+
+    /* Loop again, this time filling in the stack records and arg. */
+    cur = pb;
+    level = entry_stack_level;
+    int i = 0;
+#define ADD_RECORD(extra_flags) do { \
+    assert(level > 0); \
+    assert(i < total_unwind); \
+    args[i+2] = PEEK(1+i); \
+    info->sr[i].flags = SR_FLAG_VALID | SR_FLAG_DECREF | (extra_flags); \
+    i++; \
+    level--; \
+} while (0)
+    while (cur) {
+        assert(level >= cur->b_level);
+        if (cur->b_type == IR_PYBLOCK_EXCEPT_HANDLER) {
+            assert(level >= cur->b_level + 6);
+            while (level > cur->b_level + 6) { ADD_RECORD(0); }
+            ADD_RECORD(SR_FLAG_EXCEPTION_START);
+        }
+        while (level > cur->b_level) {
+            ADD_RECORD(0);
+        }
+        if (cur->b_type == IR_PYBLOCK_EXCEPT ||
+            cur->b_type == IR_PYBLOCK_FINALLY_TRY) {
+            break;
+        }
+        cur = cur->prev;
+    }
+    if (cur == NULL) {
+        while (level > 0) {
+            ADD_RECORD(0);
+        }
+    }
+    assert(i == total_unwind);
+    assert(level == entry_stack_level - total_unwind);
+    info->sr[i].flags = SR_FLAG_TERMINATOR;
+    ir_value trampoline = CONSTANT_PTR(jd->sig_vp, jeval_error_handler_trampoline);
+    ir_patchpoint(jd->func, info, trampoline, 1, total_unwind + 2, args);
+    free(args);
+
+    STACKADJ(-total_unwind);
+
+    /* Branch or exit */
+    if (cur) {
+        if (cur->b_handler_precursor == NULL)
+            cur->b_handler_precursor = ir_label_new(jd->func, "precursor");
+        BRANCH(cur->b_handler_precursor);
+    } else {
+        BRANCH(jd->error_exit);
     }
 }
-#endif

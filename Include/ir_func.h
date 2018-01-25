@@ -55,7 +55,6 @@ struct ir_func_t {
 
     /* Value numbering */
     size_t next_value_index;
-    size_t next_stackmap_id;
 
     /* These match the signature. param[0] is not used. */
     size_t param_count;
@@ -158,6 +157,7 @@ char* ir_label_repr(char *p, ir_label label) {
 
 /* Returns an upper bound on value indexes. (from ir_value_index).
    This may change if more values/instructions are added.
+   TODO: Change _largest_ to _next_, and type to size_t.
  */
 static inline
 ssize_t ir_func_largest_value_index(ir_func func) {

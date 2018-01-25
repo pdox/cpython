@@ -1,4 +1,3 @@
 #include "ir.h"
 
-void *
-ir_libjit_compile(ir_func func);
+ir_object ir_libjit_compile(ir_func func);

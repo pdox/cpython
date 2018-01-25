@@ -323,18 +323,28 @@ void _emit_instr(_TranslationContext &ctx, ir_block b, ir_instr _instr) {
         }
         break;
     }
-    case ir_opcode_stackmap: {
-        IR_INSTR_AS(stackmap)
-        size_t niargs = 2 + instr->arg_count;
+    case ir_opcode_patchpoint: {
+        IR_INSTR_AS(patchpoint)
+        /* Signature:
+           void|i64 @llvm.experimental.patchpoint.void|i64(i64 <id>,
+                                                           i32 <numBytes>,
+                                                           i8* <target>,
+                                                           i32 <numArgs>,
+                                                           [Args...],
+                                                           [live variables...])
+         */
+        size_t niargs = 4 + instr->arg_count;
         llvm::Value** iargs = (llvm::Value**)malloc(niargs * sizeof(llvm::Value));
-        iargs[0] = BUILDER().getInt64(instr->stackmap_id); /* stackmap id */
-        iargs[1] = BUILDER().getInt32(0); /* numBytes in shadow region */
+        iargs[0] = BUILDER().getInt64((uintptr_t)instr->user_data); /* stuff the user_data into the id */
+        iargs[1] = BUILDER().getInt32(16); /* numBytes in shadow region */
+        iargs[2] = BUILDER().CreateBitCast(LLVM_VALUE(instr->target), BUILDER().getInt8PtrTy());
+        iargs[3] = BUILDER().getInt32(instr->real_arg_count);
         size_t i;
         for (i = 0; i < instr->arg_count; i++) {
-            iargs[2 + i] = LLVM_VALUE(instr->arg[i]);
+            iargs[4 + i] = LLVM_VALUE(instr->arg[i]);
         }
-        assert(i == niargs);
-        llvm::Function *f = llvm::Intrinsic::getDeclaration(ctx.module, llvm::Intrinsic::experimental_stackmap);
+        assert(4 + i == niargs);
+        llvm::Function *f = llvm::Intrinsic::getDeclaration(ctx.module, llvm::Intrinsic::experimental_patchpoint_void);
         BUILDER().CreateCall(f, llvm::ArrayRef<llvm::Value*>(iargs, niargs));
         break;
     }
@@ -531,6 +541,8 @@ void dump_llvm_error(llvm::Error E) {
     });
 }
 
+ir_stackmap_index parse_stackmap_section(void *stackmap_addr);
+
 class LLVMState {
   public:
     llvm::LLVMContext context;
@@ -545,7 +557,7 @@ class LLVMState {
           func_counter(0) { }
 };
 
-void *
+ir_object
 ir_llvm_compile(ir_func func) {
     static LLVMState *state = NULL;
     if (state == NULL) {
@@ -662,5 +674,162 @@ ir_llvm_compile(ir_func func) {
         dump_llvm_error(addr.takeError());
         return nullptr;
     }
-    return reinterpret_cast<void*>(*addr);
+    /* Load stackmaps */
+    void *stackmap_addr = state->jit->getStackmapSectionAddress();
+    ir_stackmap_index stackmap_index = NULL;
+    if (stackmap_addr) {
+        stackmap_index = parse_stackmap_section(stackmap_addr);
+    }
+    ir_object ret = ir_object_new();
+    ret->compiler_data = nullptr;
+    ret->compiler_free_callback = nullptr;
+    ret->entrypoint = reinterpret_cast<void*>(*addr);
+    ret->stackmap_index = stackmap_index;
+    return ret;
+}
+
+/* These structures mirror the format described by:
+       https://llvm.org/docs/StackMaps.html#stack-map-format
+ */
+
+struct StackMapHeader {
+    uint8_t version;
+    uint8_t reserved1;
+    uint16_t reserved2;
+
+    uint32_t num_functions;
+    uint32_t num_constants;
+    uint32_t num_records;
+};
+
+struct StkSizeRecord {
+    uint64_t function_address;
+    uint64_t stack_size;
+    uint64_t record_count;
+};
+
+enum LocationKind : uint8_t {
+    LocationKindRegister      = 0x1, /* value in register */
+    LocationKindDirect        = 0x2, /* value is register + offset */
+    LocationKindIndirect      = 0x3, /* value is spilled (on stack) */
+    LocationKindConstant      = 0x4, /* value is small constant (stored in offset) */
+    LocationKindConstantIndex = 0x5, /* value is large constants (offset is index) */
+};
+
+struct Location {
+    LocationKind kind;
+    uint8_t reserved1;
+    uint16_t location_size;
+    uint16_t dwarf_regnum;
+    uint16_t reserved2;
+    int32_t offset_or_small_constant;
+};
+
+struct StkMapRecordHeader {
+    uint64_t patchpoint_id;
+    uint32_t instruction_offset;
+    uint16_t reserved;
+    uint16_t num_locations;
+};
+
+struct StkMapRecordFooter {
+    uint16_t padding;
+    uint16_t num_live_outs;
+};
+
+struct LiveOuts {
+    uint16_t dwarf_regnum;
+    uint8_t reserved;
+    uint8_t size_in_bytes;
+};
+
+static inline
+void _location_to_stackmap_value(ir_stackmap_value dest, Location *loc, size_t num_constants, uint64_t *constants) {
+    switch (loc->kind) {
+    case LocationKindRegister:
+        dest->location = IR_LOCATION_REGISTER;
+        dest->dwarf_index = loc->dwarf_regnum;
+        dest->offset = 0;
+        break;
+    case LocationKindDirect:
+        dest->location = IR_LOCATION_REGISTER_PLUS_OFFSET;
+        dest->dwarf_index = loc->dwarf_regnum;
+        dest->offset = loc->offset_or_small_constant;
+        break;
+    case LocationKindIndirect:
+        dest->location = IR_LOCATION_MEMORY;
+        dest->dwarf_index = loc->dwarf_regnum;
+        dest->offset = loc->offset_or_small_constant;
+        break;
+    case LocationKindConstant:
+        dest->location = IR_LOCATION_CONSTANT;
+        dest->dwarf_index = loc->dwarf_regnum;
+        dest->offset = loc->offset_or_small_constant;
+        break;
+    case LocationKindConstantIndex:
+        dest->location = IR_LOCATION_CONSTANT;
+        dest->dwarf_index = loc->dwarf_regnum;
+        assert(loc->offset_or_small_constant >= 0 &&
+               loc->offset_or_small_constant < num_constants);
+        dest->offset = constants[loc->offset_or_small_constant];
+        break;
+    default:
+        Py_FatalError("Unhandled location value in LLVM stackmap section");
+        break;
+    }
+}
+
+ir_stackmap_index parse_stackmap_section(void *stackmap_addr) {
+    char *cursor = (char*)stackmap_addr;
+    StackMapHeader *header = reinterpret_cast<StackMapHeader*>(cursor);
+    cursor += sizeof(StackMapHeader);
+    if (header->version != 3) {
+        Py_FatalError("Incorrect LLVM stackmap version");
+    }
+    auto num_functions = header->num_functions;
+    auto num_constants = header->num_constants;
+    auto num_records = header->num_records;
+    StkSizeRecord *functions = reinterpret_cast<StkSizeRecord*>(cursor);
+    cursor += num_functions * sizeof(StkSizeRecord);
+    uint64_t *constants = reinterpret_cast<uint64_t*>(cursor);
+    cursor += num_constants * sizeof(uint64_t);
+
+    size_t total_records = 0;
+    ir_stackmap_index index = ir_stackmap_index_new(num_records);
+    for (size_t i = 0; i < num_functions; i++) {
+        StkSizeRecord *func = &functions[i];
+        for (size_t j = 0; j < func->record_count; j++) {
+            StkMapRecordHeader *record = reinterpret_cast<StkMapRecordHeader*>(cursor);
+            cursor += sizeof(StkMapRecordHeader);
+            total_records++;
+            size_t num_locations = record->num_locations;
+            ir_stackmap_info info = ir_stackmap_info_new(num_locations);
+            info->code_address = reinterpret_cast<void*>(func->function_address + record->instruction_offset);
+            info->user_data = reinterpret_cast<void*>(record->patchpoint_id);
+            /* Hacky: Set the first word of the user data to point to the stackmap info */
+            *(reinterpret_cast<ir_stackmap_info*>(info->user_data)) = info;
+            info->num_values = num_locations;
+            for (size_t k = 0; k < num_locations; k++) {
+                Location *loc = reinterpret_cast<Location*>(cursor);
+                cursor += sizeof(Location);
+                _location_to_stackmap_value(&info->values[k], loc, num_constants, constants);
+            }
+
+            /* Align up to 8 bytes */
+            cursor = (char*)_Py_ALIGN_UP(cursor, 8);
+
+            StkMapRecordFooter *footer = reinterpret_cast<StkMapRecordFooter*>(cursor);
+            cursor += sizeof(StkMapRecordFooter);
+
+            /* Skip over live outs */
+            cursor += sizeof(LiveOuts) * footer->num_live_outs;
+
+            /* Align up to 8 bytes */
+            cursor = (char*)_Py_ALIGN_UP(cursor, 8);
+
+            ir_stackmap_index_add(index, info);
+        }
+    }
+    assert(total_records == num_records);
+    return index;
 }

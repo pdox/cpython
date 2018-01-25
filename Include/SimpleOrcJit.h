@@ -32,6 +32,32 @@ void llvm_module_to_file(const llvm::Module& module, const char* filename) {
   of << os.str();
 }
 
+typedef std::function<void(void*)> SetStackmapSectionAddressFunction;
+
+class CustomMemoryManager : public llvm::SectionMemoryManager {
+public:
+    SetStackmapSectionAddressFunction set_stackmap_section_address_;
+    CustomMemoryManager(SetStackmapSectionAddressFunction set_stackmaps_address) :
+        llvm::SectionMemoryManager(),
+        set_stackmap_section_address_(set_stackmaps_address) {
+    }
+    CustomMemoryManager(const CustomMemoryManager &) = delete;
+    void operator=(const CustomMemoryManager &) = delete;
+    ~CustomMemoryManager() override { }
+
+    uint8_t *allocateDataSection(uintptr_t Size,
+                                 unsigned Alignment,
+                                 unsigned SectionID,
+                                 llvm::StringRef SectionName,
+                                 bool IsReadOnly) {
+        uint8_t *ret = llvm::SectionMemoryManager::allocateDataSection(Size, Alignment, SectionID, SectionName, IsReadOnly);
+        if (SectionName == ".llvm_stackmaps") {
+            set_stackmap_section_address_(ret);
+        }
+        return ret;
+    }
+};
+
 class SimpleOrcJit {
   using ModulePtr_t = std::unique_ptr<llvm::Module>;
   using IRCompiler_t = llvm::orc::SimpleCompiler;
@@ -46,8 +72,10 @@ class SimpleOrcJit {
 
 public:
   SimpleOrcJit(llvm::TargetMachine &targetMachine)
-      : DL(targetMachine.createDataLayout()),
-        MemoryManagerPtr(std::make_shared<llvm::SectionMemoryManager>()),
+      : stackmap_section_address_(nullptr),
+        DL(targetMachine.createDataLayout()),
+        MemoryManagerPtr(std::make_shared<CustomMemoryManager>(
+            [&](void *addr) { stackmap_section_address_ = addr; })),
         SymbolResolverPtr(llvm::orc::createLambdaResolver(
             [&](std::string name) { return findSymbolInJITedCode(name); },
             [&](std::string name) { return findSymbolInHostProcess(name); })),
@@ -74,6 +102,12 @@ public:
         OptimizeLayer.addModule(std::move(module), SymbolResolverPtr));
   }
 
+  void *getStackmapSectionAddress() {
+      void *ret = stackmap_section_address_;
+      stackmap_section_address_ = nullptr;
+      return ret;
+  }
+
   template <class Signature_t>
   llvm::Expected<std::function<Signature_t>> getFunction(std::string name) {
     using namespace llvm;
@@ -95,6 +129,7 @@ public:
   }
 
 private:
+  void *stackmap_section_address_;
   llvm::DataLayout DL;
   std::shared_ptr<llvm::RTDyldMemoryManager> MemoryManagerPtr;
   std::shared_ptr<llvm::JITSymbolResolver> SymbolResolverPtr;

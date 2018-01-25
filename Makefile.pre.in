@@ -214,7 +214,7 @@ LDLIBRARYDIR=   @LDLIBRARYDIR@
 INSTSONAME=	@INSTSONAME@
 
 
-LIBS=		$(srcdir)/../libjit-install/lib64/libjit.a @LIBS@ -lLLVMLTO -lLLVMPasses -lLLVMObjCARCOpts -lLLVMMIRParser -lLLVMSymbolize -lLLVMDebugInfoPDB -lLLVMDebugInfoDWARF -lLLVMCoverage -lLLVMTableGen -lLLVMDlltoolDriver -lLLVMOrcJIT -lLLVMObjectYAML -lLLVMLibDriver -lLLVMOption -lLLVMWindowsManifest -lLLVMFuzzMutate -lLLVMX86Disassembler -lLLVMX86AsmParser -lLLVMX86CodeGen -lLLVMGlobalISel -lLLVMSelectionDAG -lLLVMAsmPrinter -lLLVMDebugInfoCodeView -lLLVMDebugInfoMSF -lLLVMX86Desc -lLLVMMCDisassembler -lLLVMX86Info -lLLVMX86AsmPrinter -lLLVMX86Utils -lLLVMMCJIT -lLLVMLineEditor -lLLVMInterpreter -lLLVMExecutionEngine -lLLVMRuntimeDyld -lLLVMCodeGen -lLLVMTarget -lLLVMCoroutines -lLLVMipo -lLLVMInstrumentation -lLLVMVectorize -lLLVMScalarOpts -lLLVMLinker -lLLVMIRReader -lLLVMAsmParser -lLLVMInstCombine -lLLVMTransformUtils -lLLVMBitWriter -lLLVMAnalysis -lLLVMProfileData -lLLVMObject -lLLVMMCParser -lLLVMMC -lLLVMBitReader -lLLVMCore -lLLVMBinaryFormat -lLLVMSupport -lLLVMDemangle -lz -lm
+LIBS=		$(srcdir)/../libjit-install/lib64/libjit.a @LIBS@ -lLLVMLTO -lLLVMPasses -lLLVMObjCARCOpts -lLLVMMIRParser -lLLVMSymbolize -lLLVMDebugInfoPDB -lLLVMDebugInfoDWARF -lLLVMCoverage -lLLVMTableGen -lLLVMDlltoolDriver -lLLVMOrcJIT -lLLVMObjectYAML -lLLVMLibDriver -lLLVMOption -lLLVMWindowsManifest -lLLVMFuzzMutate -lLLVMX86Disassembler -lLLVMX86AsmParser -lLLVMX86CodeGen -lLLVMGlobalISel -lLLVMSelectionDAG -lLLVMAsmPrinter -lLLVMDebugInfoCodeView -lLLVMDebugInfoMSF -lLLVMX86Desc -lLLVMMCDisassembler -lLLVMX86Info -lLLVMX86AsmPrinter -lLLVMX86Utils -lLLVMMCJIT -lLLVMLineEditor -lLLVMInterpreter -lLLVMExecutionEngine -lLLVMRuntimeDyld -lLLVMCodeGen -lLLVMTarget -lLLVMCoroutines -lLLVMipo -lLLVMInstrumentation -lLLVMVectorize -lLLVMScalarOpts -lLLVMLinker -lLLVMIRReader -lLLVMAsmParser -lLLVMInstCombine -lLLVMTransformUtils -lLLVMBitWriter -lLLVMAnalysis -lLLVMProfileData -lLLVMObject -lLLVMMCParser -lLLVMMC -lLLVMBitReader -lLLVMCore -lLLVMBinaryFormat -lLLVMSupport -lLLVMDemangle -lz -ltinfo -lm
 LIBM=		@LIBM@
 LIBC=		@LIBC@
 SYSLIBS=	$(LIBM) $(LIBC)
@@ -330,7 +330,9 @@ PYTHON_OBJS=	\
                 Python/ir_libjit.o \
                 Python/ir_llvm.o \
 		Python/jeval.o \
-		Python/jit_trampoline.o \
+		Python/jeval_error_handler_trampoline.o \
+		Python/ir_stackmaps.o \
+		Python/ir_object.o \
 		Python/compile.o \
 		Python/codecs.o \
 		Python/dynamic_annotations.o \
@@ -1025,12 +1027,22 @@ PYTHON_HEADERS= \
 		$(srcdir)/Include/unicodeobject.h \
 		$(srcdir)/Include/warnings.h \
 		$(srcdir)/Include/weakrefobject.h \
-                $(srcdir)/Include/ir.h \
-                $(srcdir)/Include/ir_macros.h \
+                $(srcdir)/Include/ir_all_types.def \
+                $(srcdir)/Include/ir_analyze.h \
                 $(srcdir)/Include/ir_context.h \
-                $(srcdir)/Include/ir_type_system.h \
                 $(srcdir)/Include/ir_func.h \
+                $(srcdir)/Include/ir.h \
                 $(srcdir)/Include/ir_instructions.h \
+                $(srcdir)/Include/ir_integral_types.def \
+                $(srcdir)/Include/ir_libjit.h \
+                $(srcdir)/Include/ir_llvm.h \
+                $(srcdir)/Include/ir_macros.h \
+                $(srcdir)/Include/ir_object.h \
+                $(srcdir)/Include/ir_stackmaps.h \
+                $(srcdir)/Include/ir_struct_types.def \
+                $(srcdir)/Include/ir_type_system.h \
+                $(srcdir)/Include/jit.h \
+                $(srcdir)/Include/jit_macros.h \
                 $(srcdir)/Include/SimpleOrcJit.h \
 		pyconfig.h \
 		$(PARSER_HEADERS) \

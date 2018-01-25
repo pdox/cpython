@@ -32,7 +32,7 @@ typedef enum {
 
     /* call */
     ir_opcode_call,     // new_value = foo(arg1,arg2,...)
-    ir_opcode_stackmap,
+    ir_opcode_patchpoint,
 
     /* memory ops */
     ir_opcode_get_element_ptr, // &(ptr->member)
@@ -369,31 +369,41 @@ ir_value ir_call(ir_func func, ir_value target, size_t arg_count, ir_value *args
 
 /*****************************************************************************/
 
-IR_PROTOTYPE(ir_instr_stackmap)
-struct ir_instr_stackmap_t {
+IR_PROTOTYPE(ir_instr_patchpoint)
+struct ir_instr_patchpoint_t {
     IR_INSTR_HEADER
-    int stackmap_id;
-    int arg_count; /* Number of values to include in stack map */
+    void *user_data; /* User-data associated with this patchpoint. The first
+                        sizeof(void*) bytes of this structure must be reserved
+                        for receiving the ir_stackmap_info associated to this
+                        patchpoint. This will be written during compilation. */
+    size_t real_arg_count; /* Number of actual arguments to pass to 'target'.
+                              The remaining arg_count - real_arg_count values
+                              will be in the stackmap information. */
+    size_t arg_count; /* Total length of arg array */
+
     /* Don't change the layout below without also updating ir_get_uses */
+    ir_value target;  /* Function to call */
     ir_value arg[1];
 };
 
-/* Generates a stackmap at this point in the code. */
+/* Generate a patchpoint at this point in the code. */
 static inline
-ir_value ir_stackmap(ir_func func, int *stackmap_id, ir_value target,
-                       size_t arg_count, ir_value *args) {
-    size_t i;
-    IR_INSTR_ALLOC(ir_instr_stackmap, arg_count * sizeof(ir_value));
+ir_value ir_patchpoint(ir_func func, void *user_data, ir_value target,
+                       size_t real_arg_count, size_t arg_count, ir_value *args) {
+    IR_INSTR_ALLOC(ir_instr_patchpoint, arg_count * sizeof(ir_value));
     ir_type sig = ir_typeof(target);
+    ir_type ret_type = sig->param[0];
     assert(sig->kind == ir_type_kind_function);
-    assert(sig->param_count == 1); /* no arguments, no return */
-    assert(sig->param[0] == ir_type_void);
-    instr->stackmap_id = *stackmap_id = func->next_stackmap_id++;
+    assert(sig->param_count == 1 + real_arg_count);
+    instr->user_data = user_data;
+    instr->target = target;
+    instr->real_arg_count = real_arg_count;
     instr->arg_count = arg_count;
-    for (i = 0; i < arg_count; i++) {
+    assert(real_arg_count <= arg_count);
+    for (size_t i = 0; i < arg_count; i++) {
         instr->arg[i] = args[i];
     }
-    return IR_INSTR_INSERT(ir_opcode_stackmap, ir_type_void);
+    return IR_INSTR_INSERT(ir_opcode_patchpoint, ret_type);
 }
 
 /*****************************************************************************/

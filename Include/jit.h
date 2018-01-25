@@ -12,23 +12,9 @@ extern char *Py_JITDebugFile;
 
 typedef PyObject* (*PyJIT_EntryPoint)(PyFrameObject *f, int throwflag);
 
-/* The stackmap for an error site always has:
-    1) The first value is the frame pointer for the funtion.
-    2) If has_exc_restore is true, the next three values are
-       the final exception triple to restore to tstate->exc_info.
-    3) The remaining 'decref_count' values are to be XDECREF'd.
- */
 typedef struct {
-    int has_exc_restore; /* Has tuple to restore to tstate->exc_info.
-                            If true, these will be the first 3 values in the stackmap. */
-    int decref_count; /* Number of values to xdecref.
-                         These are the remaining values in the stackmap. */
-} PyJIT_ErrorInfo;
-
-typedef struct {
-    void *context;
+    void *object; /* ir_object */
     PyJIT_EntryPoint entry;
-    PyJIT_ErrorInfo *error_info[1];
 } PyJIT_Handle;
 
 extern int _PyJIT_CodeGen(PyCodeObject *co);

@@ -38,6 +38,8 @@ IR_PROTOTYPE(ir_func)
 #include "ir_func.h"
 #include "ir_instructions.h"
 #include "ir_analyze.h"
+#include "ir_stackmaps.h"
+#include "ir_object.h"
 #include "ir_libjit.h"
 #include "ir_llvm.h"
 
