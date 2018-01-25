@@ -497,6 +497,7 @@ ir_instr_repr(char *p, ir_instr _instr) {
             p = ir_label_repr(p, instr->if_true);
             p += sprintf(p, " : ");
             p = ir_label_repr(p, instr->if_false);
+            p += sprintf(p, " [%d:%d]", instr->if_true_weight, instr->if_false_weight);
             break;
         }
         case ir_opcode_jumptable: {

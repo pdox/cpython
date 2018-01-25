@@ -67,6 +67,7 @@ typedef struct _JITData {
     /* Blocks that will be moved to the end */
     move_entry *move_entry_list;
 
+    Py_ssize_t inst_count;
     int is_gen;
     int update_blockstack; /* Keep f_blockstack in the state ceval expects.
                               Needed for generators, where execution can switch between
@@ -151,21 +152,19 @@ typedef struct _JITData {
     ir_goto_fbe(jd->func, IR_WHY_CONTINUE, continue_target, jd->exit)
 
 ir_label _instr_index_to_label(JITData *jd, int instr_index) {
-    Py_ssize_t inst_count = PyBytes_GET_SIZE(jd->co->co_code)/sizeof(_Py_CODEUNIT);
     assert(instr_index >= 0);
-    assert(instr_index < inst_count);
+    assert(instr_index < jd->inst_count);
     return jd->jmptab[instr_index];
 }
 
 int _label_to_instr_index(JITData *jd, ir_label target) {
-    Py_ssize_t inst_count = PyBytes_GET_SIZE(jd->co->co_code)/sizeof(_Py_CODEUNIT);
     Py_ssize_t i;
-    for (i = 0; i < inst_count; i++) {
+    for (i = 0; i < jd->inst_count; i++) {
         if (jd->jmptab[i] == target) {
             break;
         }
     }
-    assert(i < inst_count);
+    assert(i < jd->inst_count);
     return i;
 }
 
@@ -2949,6 +2948,7 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     Py_ssize_t i;
     Py_ssize_t inst_count = PyBytes_GET_SIZE(co->co_code)/sizeof(_Py_CODEUNIT);
 
+    jd->inst_count = inst_count;
     jd->is_gen = (co->co_flags & (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR));
     jd->update_blockstack = jd->is_gen;
     jd->use_patchpoint_error_handler = 0;
@@ -3040,9 +3040,11 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     LABEL(jd->body_start);
 
     /* Make sure the stack is setup correctly for function start */
+#ifndef NDEBUG
     JVALUE f_valuestack = LOAD_FIELD(jd->f, PyFrameObject, f_valuestack, ir_type_pyobject_ptr_ptr);
     JVALUE f_stacktop = LOAD_FIELD(jd->f, PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr);
     IR_ASSERT(CMP_EQ(f_stacktop, f_valuestack));
+#endif
 
     /* We must clear f_stacktop */
     STORE_FIELD(jd->f, PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr, CONSTANT_PTR(ir_type_pyobject_ptr_ptr, NULL));
@@ -3155,7 +3157,6 @@ _PyJIT_CodeGen(PyCodeObject *co) {
 #ifdef IR_DEBUG
     ir_func_verify(jd->func);
 #endif
-    //ir_verify_stack_effect(jd->func);
 
     if (Py_JITDebugFlag > 1) {
         ir_func_dump_file(jd->func, "/tmp/after_dead_blocks.ir", "After dead locks removal");
@@ -3198,6 +3199,8 @@ int _pyblock_type_to_b_type(ir_pyblock_type type) {
     abort(); /* Unexpected case */
 }
 
+
+#ifndef NDEBUG
 static int _compute_pyblock_depth(ir_pyblock pb) {
     int count = 0;
     ir_pyblock cur = pb;
@@ -3207,6 +3210,7 @@ static int _compute_pyblock_depth(ir_pyblock pb) {
     }
     return count;
 }
+#endif
 
 static void _push_except_handler_to_blockstack(JITData *jd, int b_level) {
     if (!jd->update_blockstack) return;
@@ -3358,9 +3362,11 @@ static inline
 void _emit_resume_stub(JITData *jd, ir_label resume_label, int stack_level, ir_pyblock pb, int target_inst_index, ir_label target_inst_label) {
     LABEL(resume_label);
     JVALUE f_valuestack = LOAD_FIELD(jd->f, PyFrameObject, f_valuestack, ir_type_pyobject_ptr_ptr);
+#ifndef NDEBUG
     JVALUE expected_stack_pointer = ir_get_index_ptr(jd->func, f_valuestack, CONSTANT_INT(stack_level));
     JVALUE f_stacktop = LOAD_FIELD(jd->f, PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr);
     IR_ASSERT(CMP_EQ(f_stacktop, expected_stack_pointer));
+#endif
     STORE_FIELD(jd->f, PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr, CONSTANT_PTR(ir_type_pyobject_ptr_ptr, NULL));
 
     /* Restore stack */
@@ -3891,78 +3897,6 @@ void ir_lower(JITData *jd) {
     _lower_pass(jd, _ir_lower_remaining, NULL);
 }
 
-void ir_verify_stack_effect(ir_func func) {
-    ir_block b;
-    ir_instr _instr;
-    ssize_t num_blocks = ir_func_largest_block_index(func);
-    int *stack_at_entry = (int*)malloc(num_blocks * sizeof(int));
-    for (int i = 0; i < num_blocks; i++) {
-        stack_at_entry[i] = -1;
-    }
-    stack_at_entry[func->first_block->index] = 0;
-
-    int errors = 0;
-    int rerun = 1;
-    while (rerun) {
-        rerun = 0;
-        for (b = func->first_block; b != NULL; b = b->next) {
-            int entry_stack_level = stack_at_entry[b->index];
-            if (entry_stack_level == -1) {
-                rerun = 1;
-                continue;
-            }
-            int block_stack_effect = 0;
-            for (_instr = b->first_instr; _instr != NULL; _instr = _instr->next) {
-                if (_instr->opcode == ir_opcode_stackadj) {
-                    IR_INSTR_AS(stackadj)
-                    block_stack_effect += instr->amount;
-                } else if (ir_instr_opcode_is_flow_control(_instr->opcode)) {
-                    break;
-                }
-            }
-            assert(_instr != NULL && _instr->next == NULL);
-            int exit_stack_level = entry_stack_level + block_stack_effect;
-#define SET_AND_CHECK(_label) do { \
-    ir_label label = (_label); \
-    size_t index = label->block->index; \
-    if (stack_at_entry[index] == -1) { \
-        stack_at_entry[index] = exit_stack_level; \
-    } \
-    if (stack_at_entry[index] != exit_stack_level) { \
-        fprintf(stderr, "Stack level mismatch at branch from %p to %s (%p)\n", b, label->name ? label->name : "<NULL>", label->block); \
-        errors = 1; \
-    } \
-} while (0)
-            switch (_instr->opcode) {
-            case ir_opcode_branch: {
-                IR_INSTR_AS(branch)
-                SET_AND_CHECK(instr->target);
-                break;
-            }
-            case ir_opcode_branch_cond: {
-                IR_INSTR_AS(branch_cond)
-                SET_AND_CHECK(instr->if_true);
-                SET_AND_CHECK(instr->if_false);
-                break;
-            }
-            case ir_opcode_jumptable: {
-                IR_INSTR_AS(jumptable)
-                for (size_t i = 0; i < instr->table_size; i++) {
-                    SET_AND_CHECK(instr->table[i]);
-                }
-                break;
-            }
-            case ir_opcode_ret: {
-                assert(exit_stack_level == 0);
-            }
-            default: abort(); /* Unhandled flow control */
-            } // switch
-#undef SET_AND_CHECK
-        }
-    }
-    assert(!errors);
-}
-
 /* Stack Record flags */
 #define SR_FLAG_TERMINATOR          0x0  /* Ends the list */
 #define SR_FLAG_VALID               0x1  /* Alway set for valid entries */
@@ -3986,8 +3920,10 @@ void jeval_error_handler(_error_info *info, void **save_area) {
     ir_stackmap_info stackmap = info->stackmap;
 
     /* Retrieve the PyFrameObject */
+#ifndef NDEBUG
     PyFrameObject *f = (PyFrameObject*)ir_stackmap_read_value(stackmap, 0, save_area);
     assert(Py_TYPE(f) == &PyFrame_Type);
+#endif
 
     /* Unwind the stack */
     size_t next_except_handler = 0;

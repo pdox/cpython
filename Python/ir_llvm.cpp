@@ -487,15 +487,15 @@ void _emit_instr(_TranslationContext &ctx, ir_block b, ir_instr _instr) {
     case ir_opcode_branch_cond: {
         IR_INSTR_AS(branch_cond)
         llvm::Value *cond =
-            BUILDER().CreateICmpEQ(
+            BUILDER().CreateICmpNE(
                 LLVM_VALUE(instr->cond),
                 llvm::Constant::getNullValue(LLVM_TYPE(ir_typeof(instr->cond))));
         llvm::MDNode* branchWeights =
             llvm::MDBuilder(context).createBranchWeights(instr->if_true_weight, instr->if_false_weight);
         BUILDER().CreateCondBr(
             cond,
-            LLVM_BLOCK(instr->if_false),
             LLVM_BLOCK(instr->if_true),
+            LLVM_BLOCK(instr->if_false),
             branchWeights);
         break;
     }
@@ -565,6 +565,7 @@ ir_llvm_compile(ir_func func) {
         llvm::InitializeNativeTargetAsmPrinter();
         llvm::InitializeNativeTargetAsmParser();
         state = new LLVMState();
+        state->targetMachine->setOptLevel(llvm::CodeGenOpt::Aggressive);
     }
     _TranslationContext ctx;
 

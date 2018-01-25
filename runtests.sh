@@ -13,7 +13,8 @@
     -x test_fstring \
     -x test_import \
     -x test_json \
-    -x test_unpack_ex
+    -x test_unpack_ex \
+    -x test_lib2to3
 
 # test_multiprocessing_*
 # test_concurrent_futures (known to pass, but takes a long time)
@@ -31,3 +32,6 @@
 
 # test_unpack_ex
 #   Runs out of memory for compilation
+
+# test_lib2to3
+#   Test is flakey for unknown reason, especially when running in parallel with other tests.

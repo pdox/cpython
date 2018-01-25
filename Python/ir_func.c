@@ -61,90 +61,120 @@ char* ir_block_repr(char *p, ir_block b) {
     return p;
 }
 
+/* This assert should still work even when NDEBUG is defined. */
+#define ASSERT(cond, msg) do { \
+    if (!(cond)) { \
+        fprintf(stderr, "ir_func_verify assertion failed: " #cond "\n"); \
+        fflush(stderr); \
+        Py_FatalError(msg); \
+    } \
+} while (0)
+
 void ir_func_verify(ir_func func) {
     ir_block b_prev = NULL;
     ir_block b;
     for (b = func->first_block; b != NULL; b = b->next) {
         /* Make sure the block linked list is correct */
-        assert(b_prev == b->prev);
+        ASSERT(b_prev == b->prev, "Corrupted block list");
         b_prev = b;
 
-        /* First instruction must always be a label */
-        assert(b->first_instr != NULL);
-        assert(b->first_instr->opcode == ir_opcode_label_here);
+        ASSERT(b->first_instr != NULL,
+               "Empty block, without label");
+        ASSERT(b->first_instr->opcode == ir_opcode_label_here,
+               "First instruction must be label");
 
         /* Scan instructions */
         ir_instr _instr;
         ir_instr _instr_prev = NULL;
         int found_branch = 0;
         for (_instr = b->first_instr; _instr != NULL; _instr = _instr->next) {
-            assert(_instr_prev == _instr->prev);
+            ASSERT(_instr_prev == _instr->prev, "Corrupted instruction list");
             _instr_prev = _instr;
 
             if (ir_instr_opcode_needs_to_be_at_front(_instr->opcode)) {
-                assert(_instr == b->first_instr->next &&
+                ASSERT(_instr == b->first_instr->next,
                        "Instruction not at front of block");
             }
             if (ir_instr_opcode_is_flow_control(_instr->opcode)) {
-                assert(_instr == b->last_instr &&
-                       "Flow control inside block");
-                assert(_instr->next == NULL);
+                ASSERT(_instr == b->last_instr,
+                       "Control flow in block interior");
+                ASSERT(_instr->next == NULL,
+                       "Unexpected instruction after control flow");
                 found_branch = 1;
                 switch (_instr->opcode) {
                 case ir_opcode_branch: {
                     IR_INSTR_AS(branch)
-                    assert(instr->target->block != NULL);
+                    ASSERT(instr->target->block != NULL,
+                           "Branch to unresolved label");
                     break;
                 }
                 case ir_opcode_branch_cond: {
                     IR_INSTR_AS(branch_cond)
-                    assert(instr->if_true->block != NULL);
-                    assert(instr->if_false->block != NULL);
+                    ASSERT(instr->if_true->block != NULL,
+                           "First label of conditional branch is unresolved");
+                    ASSERT(instr->if_false->block != NULL,
+                           "Second label of conditional branch is unresolved");
                     break;
                 }
                 case ir_opcode_jumptable: {
                     IR_INSTR_AS(jumptable)
-                    size_t i;
-                    for (i = 0; i < instr->table_size; i++) {
-                        assert(instr->table[i]->block != NULL);
+                    for (size_t i = 0; i < instr->table_size; i++) {
+                        ASSERT(instr->table[i]->block != NULL,
+                               "Unresolved label in jumptable");
                     }
                     break;
                 }
-                case ir_opcode_ret:
+                case ir_opcode_ret: {
+                    IR_INSTR_AS(ret)
+                    if (instr->value == NULL) {
+                        ASSERT(ir_type_equal(func->sig->param[0], ir_type_void),
+                               "void return in non-void function");
+                    } else {
+                        ASSERT(ir_type_equal(func->sig->param[0], ir_typeof(instr->value)),
+                               "Return value type does not match function return type");
+                    }
                     break;
+                }
                 case ir_opcode_goto_error: {
                     IR_INSTR_AS(goto_error)
                     if (instr->cond) {
-                        assert(instr->fallthrough);
-                        assert(instr->fallthrough->block != NULL);
+                        ASSERT(instr->fallthrough, "goto_error missing fallthrough");
+                        ASSERT(instr->fallthrough->block != NULL,
+                               "Unresolved label in goto_error");
                     } else {
-                        assert(instr->fallthrough == NULL);
+                        ASSERT(instr->fallthrough == NULL,
+                               "Unconditional error shouldn't have fallthrough");
                     }
                     break;
                 }
                 case ir_opcode_goto_fbe: {
                     IR_INSTR_AS(goto_fbe)
                     if (instr->continue_target) {
-                        assert(instr->continue_target->block != NULL);
+                        ASSERT(instr->continue_target->block != NULL,
+                               "Unresolved continue_target label");
                     }
                     break;
                 }
                 case ir_opcode_yield: {
                     IR_INSTR_AS(yield)
-                    assert(instr->resume_inst_label->block != NULL);
+                    ASSERT(instr->resume_inst_label->block != NULL,
+                           "Unresolved label (resume_inst_label)");
                     if (instr->throw_inst_label) {
-                        assert(instr->throw_inst_label->block != NULL);
+                        ASSERT(instr->throw_inst_label->block != NULL,
+                               "Unresolved label (throw_inst_label)");
                     }
                     break;
                 }
                 case ir_opcode_yield_dispatch: {
                     IR_INSTR_AS(yield_dispatch)
-                    assert(instr->body_start->block != NULL);
+                    ASSERT(instr->body_start->block != NULL,
+                           "Unresolved label (body_start)");
                     break;
                 }
                 case ir_opcode_end_finally: {
                     IR_INSTR_AS(end_finally)
-                    assert(instr->fallthrough->block != NULL);
+                    ASSERT(instr->fallthrough->block != NULL,
+                           "Unresolved label (fallthrough)");
                     break;
                 }
                 default:
@@ -152,14 +182,16 @@ void ir_func_verify(ir_func func) {
                     break;
                 }
             } else {
-                assert(_instr != b->last_instr);
-                assert(_instr->next != NULL);
+                ASSERT(_instr != b->last_instr && _instr->next != NULL,
+                       "Block ends in instruction that isn't control flow");
             }
         }
         /* Every block must end with a control flow op */
-        assert(found_branch);
+        ASSERT(found_branch, "No control flow instruction");
     }
 }
+
+#undef ASSERT
 
 char* ir_func_dump(ir_func func) {
     ssize_t num_values = ir_func_largest_value_index(func);

@@ -470,6 +470,7 @@ ir_compute_stack_positions(ir_func func) {
         }
     } while (rerun);
 
+#ifndef NDEBUG
     /* We should have assigned a stack slot to every peek/put */
     for (b = func->first_block; b != NULL; b = b->next) {
         for (_instr = b->first_instr; _instr != NULL; _instr = _instr->next) {
@@ -482,6 +483,8 @@ ir_compute_stack_positions(ir_func func) {
             }
         }
     }
+#endif
+
     free(block_done);
     free(incoming_stack_level);
     return max_index + 1;

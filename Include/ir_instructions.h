@@ -263,8 +263,8 @@ struct ir_instr_boolean_t {
 static inline
 ir_value ir_notbool(ir_func func, ir_value value) {
     IR_INSTR_ALLOC(ir_instr_boolean, 0)
-    ir_type type = ir_typeof(value);
-    assert(ir_type_is_integral(type) || ir_type_is_pointer(type));
+    assert(ir_type_is_integral(ir_typeof(value)) ||
+           ir_type_is_pointer(ir_typeof(value)));
     instr->value = value;
     return IR_INSTR_INSERT(ir_opcode_notbool, ir_type_int);
 }
@@ -272,8 +272,8 @@ ir_value ir_notbool(ir_func func, ir_value value) {
 static inline
 ir_value ir_bool(ir_func func, ir_value value) {
     IR_INSTR_ALLOC(ir_instr_boolean, 0)
-    ir_type type = ir_typeof(value);
-    assert(ir_type_is_integral(type) || ir_type_is_pointer(type));
+    assert(ir_type_is_integral(ir_typeof(value)) ||
+           ir_type_is_pointer(ir_typeof(value)));
     instr->value = value;
     return IR_INSTR_INSERT(ir_opcode_bool, ir_type_int);
 }
@@ -477,10 +477,12 @@ ir_value ir_load(ir_func func, ir_value ptr) {
 static inline
 ir_value _ir_load_field(ir_func func, ir_value ptr, size_t offset, ir_type member_type,
                         const char *struct_name, const char *member_name) {
+#ifndef NDEBUG
     ir_type ptr_type = ir_typeof(ptr);
     ir_type base_type = ir_pointer_base(ptr_type);
     assert(base_type->kind == ir_type_kind_struct);
     assert(strcmp(base_type->name, struct_name) == 0);
+#endif
     ir_value addr = ir_get_element_ptr(func, ptr, offset, member_type, member_name);
     return ir_load(func, addr);
 }
@@ -497,8 +499,10 @@ struct ir_instr_store_t {
 static inline
 void ir_store(ir_func func, ir_value ptr, ir_value value) {
     IR_INSTR_ALLOC(ir_instr_store, 0)
+#ifndef NDEBUG
     ir_type base_type = ir_pointer_base(ir_typeof(ptr));
     assert(ir_type_equal(ir_typeof(value), base_type));
+#endif
     instr->ptr = ptr;
     instr->value = value;
     IR_INSTR_INSERT(ir_opcode_store, ir_type_void);
@@ -511,10 +515,12 @@ void ir_store(ir_func func, ir_value ptr, ir_value value) {
 static inline
 void _ir_store_field(ir_func func, ir_value ptr, size_t offset, ir_type member_type,
                          const char *struct_name, const char *member_name, ir_value new_value) {
+#ifndef NDEBUG
     ir_type ptr_type = ir_typeof(ptr);
     ir_type base_type = ir_pointer_base(ptr_type);
     assert(base_type->kind == ir_type_kind_struct);
     assert(strcmp(base_type->name, struct_name) == 0);
+#endif
     ir_value addr = ir_get_element_ptr(func, ptr, offset, member_type, member_name);
     ir_store(func, addr, new_value);
 }
