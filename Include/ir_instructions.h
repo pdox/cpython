@@ -1,5 +1,5 @@
 typedef enum {
-    /* unary ops (see ir_opcode_is_unop)*/
+    /* unary ops (see ir_opcode_is_unop) */
     ir_opcode_neg,   // -a
     ir_opcode_not,   // ~a
 
@@ -57,7 +57,7 @@ typedef enum {
     /* user-specified debug info */
     ir_opcode_info_here,   // info (string) embedded at a specific point
 
-    /* flow control */
+    /* Control flow */
     ir_opcode_branch,      // goto label;
     ir_opcode_branch_cond, // cond ? goto if_true : goto if_false;
     ir_opcode_jumptable,   // goto *label[i];
@@ -75,7 +75,7 @@ typedef enum {
     ir_opcode_setup_block,
     ir_opcode_pop_block,
 
-    /* Python-specific flow control */
+    /* Python-specific control flow */
     ir_opcode_goto_error,   // error (i.e. raise exception)
     ir_opcode_goto_fbe,     // fast_block_end
     ir_opcode_yield,        // fast_yield
@@ -87,7 +87,7 @@ typedef enum {
     ir_instr_##kind instr = (ir_instr_##kind) _instr;
 
 static inline
-int ir_instr_opcode_is_flow_control(ir_opcode opcode) {
+int ir_instr_opcode_is_control_flow(ir_opcode opcode) {
     return (opcode >= ir_opcode_branch &&
             opcode <= ir_opcode_ret) ||
            (opcode >= ir_opcode_goto_error &&
@@ -413,9 +413,7 @@ struct ir_instr_get_element_ptr_t {
     IR_INSTR_HEADER
     ir_value ptr;
     size_t offset;
-#ifdef IR_DEBUG
     const char *member_name;
-#endif
 };
 
 static inline
@@ -425,9 +423,7 @@ ir_value ir_get_element_ptr(ir_func func, ir_value ptr, size_t offset,
     assert(ir_typeof(ptr)->kind == ir_type_kind_pointer);
     instr->ptr = ptr;
     instr->offset = offset;
-#ifdef IR_DEBUG
     instr->member_name = _ir_strdup(func->context, member_name);
-#endif
     return IR_INSTR_INSERT(ir_opcode_get_element_ptr,
                            ir_create_pointer_type(func->context, member_type));
 }
@@ -1161,7 +1157,7 @@ char* ir_instr_repr(char *p, ir_instr _instr);
          BLOCK2B = [ ^, INST4, INST5 ]
 
      This function doesn't know anything about instruction opcodes, so the caller
-     must guarantee that the previous block ends with a flow control instruction,
+     must guarantee that the previous block ends with a control flow instruction,
      and that the new block receives a label.
 */
 
@@ -1223,7 +1219,7 @@ void ir_cursor_insert(ir_func func, ir_instr _instr) {
         /* If we're in the middle of a block, and the last instruction does not
            already terminate the block, branch to the next block. */
         if (b->current_instr != NULL) {
-            if (!ir_instr_opcode_is_flow_control(b->current_instr->opcode)) {
+            if (!ir_instr_opcode_is_control_flow(b->current_instr->opcode)) {
                 IR_INSTR_AS(label_here)
                 ir_branch(func, instr->label);
             }
@@ -1235,7 +1231,7 @@ void ir_cursor_insert(ir_func func, ir_instr _instr) {
         /* If we're immediately after a control flow instruction, but we're not
            inserting a label, then this code is unreachable. Create a dummy label. */
         assert(b->current_instr != NULL);
-        if (ir_instr_opcode_is_flow_control(b->current_instr->opcode)) {
+        if (ir_instr_opcode_is_control_flow(b->current_instr->opcode)) {
             ir_label unreachable_dummy = ir_label_new(func, "unreachable_dummy");
             ir_label_here(func, unreachable_dummy);
             b = func->current_block;
@@ -1287,7 +1283,7 @@ static inline void ir_cursor_close(ir_func func) {
     /* Check the constraints immediately after the cursor position */
     ir_block b = func->current_block;
     ir_instr _instr = b->current_instr;
-    int terminates_block = ir_instr_opcode_is_flow_control(_instr->opcode);
+    int terminates_block = ir_instr_opcode_is_control_flow(_instr->opcode);
 
     if (terminates_block) {
         /* If there is an instruction after a block terminator, it cannot be

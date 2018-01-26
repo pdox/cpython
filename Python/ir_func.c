@@ -95,7 +95,7 @@ void ir_func_verify(ir_func func) {
                 ASSERT(_instr == b->first_instr->next,
                        "Instruction not at front of block");
             }
-            if (ir_instr_opcode_is_flow_control(_instr->opcode)) {
+            if (ir_instr_opcode_is_control_flow(_instr->opcode)) {
                 ASSERT(_instr == b->last_instr,
                        "Control flow in block interior");
                 ASSERT(_instr->next == NULL,
@@ -194,8 +194,8 @@ void ir_func_verify(ir_func func) {
 #undef ASSERT
 
 char* ir_func_dump(ir_func func) {
-    ssize_t num_values = ir_func_largest_value_index(func);
-    ssize_t num_blocks = ir_func_largest_block_index(func);
+    size_t num_values = ir_func_next_value_index(func);
+    size_t num_blocks = ir_func_next_block_index(func);
     /* TODO: Rather than guess at a maximum buffer size, resize the buffer dynamically */
     char *buf = (char*)malloc(1024*1024 + 200 * num_values + 200 * num_blocks);
     char *p = buf;
@@ -211,8 +211,8 @@ char* ir_func_dump(ir_func func) {
         p += sprintf(p, " ");
     }
     p += sprintf(p, "\n");
-    p += sprintf(p, "  num_blocks: %ld\n", (long)num_blocks);
-    p += sprintf(p, "  num_values: %ld\n", (long)num_values);
+    p += sprintf(p, "  num_blocks: %lu\n", (unsigned long)num_blocks);
+    p += sprintf(p, "  num_values: %lu\n", (unsigned long)num_values);
     p += sprintf(p, "  blocks:\n");
 
     ir_block b;
@@ -223,14 +223,14 @@ char* ir_func_dump(ir_func func) {
     return buf;
 }
 
-void ir_func_dump_file(ir_func func, const char *filename, const char *description) {
+void ir_func_dump_file(ir_func func, const char *filename) {
     FILE *fp = fopen(filename, "w");
     char* dump = ir_func_dump(func);
     assert(fp && dump);
     fprintf(fp, "%s", dump);
     fclose(fp);
     free(dump);
-    fprintf(stderr, "%s IR dumped to %s\n", description, filename);
+    fprintf(stderr, "IR dumped to %s\n", filename);
 }
 
 char *ir_value_repr(char *p, ir_value value) {
@@ -245,7 +245,7 @@ void ir_func_move_blocks_to_end(ir_func func, ir_label from, ir_label to) {
 
     assert(from_block && to_block && pre_to_block);
 
-#ifdef IR_DEBUG
+#ifndef NDEBUG
     {
       /* Ensure they are in order */
       ir_block b;

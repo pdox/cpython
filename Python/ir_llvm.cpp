@@ -587,8 +587,8 @@ ir_llvm_compile(ir_func func) {
     llvm::IRBuilder<> builder(ctx.entry_bb);
     ctx.builder = &builder;
 
-    ctx.num_values = ir_func_largest_value_index(func);
-    ctx.num_blocks = ir_func_largest_block_index(func);
+    ctx.num_values = ir_func_next_value_index(func);
+    ctx.num_blocks = ir_func_next_block_index(func);
 
     ctx.llvm_values = (llvm::Value**)malloc(ctx.num_values * sizeof(llvm::Value*));
     memset(ctx.llvm_values, 0, ctx.num_values * sizeof(llvm::Value*));
@@ -658,7 +658,7 @@ ir_llvm_compile(ir_func func) {
     free(ctx.llvm_values);
     free(ctx.llvm_modes);
 
-#ifdef IR_DEBUG
+#ifdef Py_DEBUG
     if (llvm::verifyFunction(*ctx.llvm_func, &llvm::errs())) {
         abort();
     }

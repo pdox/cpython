@@ -8,7 +8,7 @@ extern "C" {
    complete Python function (after bytecode has been lowered to machine-like instructions).
 
    This is roughly equivalent to LLVM bitcode, with the notable difference
-   that composite Python operations without flow control (e.g. INCREF, DECREF, POP, STACKADJ)
+   that composite Python operations without control flow (e.g. INCREF, DECREF, POP, STACKADJ)
    are represented as single instructions. This makes it easier to analyze those operations
    before converting to machine code.
 
@@ -20,9 +20,6 @@ extern "C" {
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
-
-/* TODO: Condition on Py_DEBUG */
-#define IR_DEBUG   1
 
 #define IR_PROTOTYPE(name) \
     struct name ## _t; \

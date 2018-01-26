@@ -46,7 +46,7 @@ _end_stack_level(ir_block b, int entry_stack_level, int pyblock_stack_level) {
 } while (0)
 
 void ir_remove_dead_blocks(ir_func func) {
-    size_t num_blocks = ir_func_largest_block_index(func);
+    size_t num_blocks = ir_func_next_block_index(func);
     char *reachable = (char*)malloc(sizeof(char) * num_blocks);
     memset(reachable, 0, sizeof(char) * num_blocks);
     reachable[func->first_block->index] = 1;
@@ -199,7 +199,7 @@ void _transfer_pyblock(compute_pyblock_state *state, ir_label label, ir_pyblock 
 ir_pyblock_map
 ir_compute_pyblock_map(ir_func func, ir_label *ignored) {
     compute_pyblock_state state;
-    size_t num_blocks = state.num_blocks = ir_func_largest_block_index(func);
+    size_t num_blocks = state.num_blocks = ir_func_next_block_index(func);
     state.memi = 0;
     state.mem = (ir_pyblock)malloc(sizeof(ir_pyblock_t) * num_blocks);
     state.incoming = (ir_pyblock*)malloc(sizeof(ir_pyblock) * num_blocks);
@@ -412,10 +412,10 @@ void ir_free_pyblock_map(ir_pyblock_map map) {
 
 int
 ir_compute_stack_positions(ir_func func) {
-    int num_blocks = ir_func_largest_block_index(func);
+    size_t num_blocks = ir_func_next_block_index(func);
     int *incoming_stack_level = (int*)malloc(sizeof(int) * num_blocks);
     char *block_done = (char*)malloc(sizeof(char) * num_blocks);
-    for (int i = 0; i < num_blocks; i++) {
+    for (size_t i = 0; i < num_blocks; i++) {
         incoming_stack_level[i] = -1;
         block_done[i] = 0;
     }
@@ -449,9 +449,9 @@ ir_compute_stack_positions(ir_func func) {
                     assert(instr->abs_offset >= 0);
                     max_index = Py_MAX(max_index, instr->abs_offset);
                 } else {
-                    /* Python-specific flow control should have been lowered */
+                    /* Python-specific control flow should have been lowered */
                     assert(!(ir_opcode_is_python_specific(_instr->opcode) &&
-                             ir_instr_opcode_is_flow_control(_instr->opcode)));
+                             ir_instr_opcode_is_control_flow(_instr->opcode)));
                 }
             }
             /* Transfer the final stack level to target blocks */

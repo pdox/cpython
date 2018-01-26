@@ -104,11 +104,7 @@ static inline
 ir_label ir_label_new(ir_func func, const char *name) {
     IR_FUNC_ALLOC(ret, ir_label, 0)
     ret->block = NULL;
-#ifdef IR_DEBUG
     ret->name = _ir_label_qualname(func, name);
-#else
-    ret->name = NULL;
-#endif
     return ret;
 }
 
@@ -157,15 +153,14 @@ char* ir_label_repr(char *p, ir_label label) {
 
 /* Returns an upper bound on value indexes. (from ir_value_index).
    This may change if more values/instructions are added.
-   TODO: Change _largest_ to _next_, and type to size_t.
  */
 static inline
-ssize_t ir_func_largest_value_index(ir_func func) {
+size_t ir_func_next_value_index(ir_func func) {
     return func->next_value_index;
 }
 
 static inline
-ssize_t ir_func_largest_block_index(ir_func func) {
+size_t ir_func_next_block_index(ir_func func) {
     return func->next_block_index;
 }
 
@@ -185,4 +180,4 @@ char *ir_func_dump(ir_func func);
 /* Print representation of value to buffer */
 char *ir_value_repr(char *p, ir_value value);
 
-void ir_func_dump_file(ir_func func, const char *filename, const char *description);
+void ir_func_dump_file(ir_func func, const char *filename);

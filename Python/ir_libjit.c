@@ -314,10 +314,10 @@ ir_object ir_libjit_compile(ir_func func) {
     jit_function_t jit_func = jit_function_create(gcontext, jit_sig);
 
     /* Index and count the values */
-    size_t num_values = ir_func_largest_value_index(func);
+    size_t num_values = ir_func_next_value_index(func);
 
     /* Index and count blocks */
-    size_t num_blocks = ir_func_largest_block_index(func);
+    size_t num_blocks = ir_func_next_block_index(func);
 
     /* Allocate an array for the jit_value_t equivalents */
     jit_value_t *jit_values = (jit_value_t*)malloc(num_values * sizeof(jit_value_t));

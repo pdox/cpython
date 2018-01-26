@@ -496,24 +496,20 @@ _pyjit_generate_trampoline(
     LABEL(jd->error_exit);
     ir_ret(jd->func, CONSTANT_PYOBJ(NULL));
 
-#ifdef IR_DEBUG
-    ir_func_verify(jd->func);
     if (Py_JITDebugFlag > 0) {
         ir_func_dump_file(jd->func, "/tmp/tbefore.ir", "Trampoline before lowering");
+        ir_func_verify(jd->func);
     }
-#endif
 
     /* Not providing fastlocals, stack_pointer or eval_breaker_label.
        Locals and stack operations do not make sense in trampolines.
     */
     ir_lower(jd->func, NULL, NULL, NULL);
 
-#ifdef IR_DEBUG
     if (Py_JITDebugFlag > 0) {
         ir_func_dump_file(jd->func, "/tmp/tafter.ir", "Trampoline after lowering");
+        ir_func_verify(jd->func);
     }
-    ir_func_verify(jd->func);
-#endif
 
     if (Py_JITFlag == 1) {
         entrypoint = ir_libjit_compile(jd->func);

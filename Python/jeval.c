@@ -20,12 +20,6 @@ typedef void (*PyJITEmitHandlerFunction)(JITData *jd, int opcode);
 typedef void (*PyJITEmitterFunction)(JITData *jd, int next_instr_index, int opcode, int oparg);
 typedef void (*PyJITSpecialEmitterFunction)(JITData *jd);
 
-typedef struct move_entry {
-    ir_label from_label;
-    ir_label to_label;
-    struct move_entry *next;
-} move_entry;
-
 typedef struct resume_entry {
     int f_lasti;
     ir_label resume_point;
@@ -63,9 +57,6 @@ typedef struct _JITData {
     ir_type blocksetup_sig;
     ir_type blockpop_sig;
     ir_type exc_triple_sig;
-
-    /* Blocks that will be moved to the end */
-    move_entry *move_entry_list;
 
     Py_ssize_t inst_count;
     int is_gen;
@@ -182,23 +173,11 @@ int _label_to_instr_index(JITData *jd, ir_label target) {
     ir_pop_block(jd->func, IR_PYBLOCK_ ## irkind); \
 } while (0)
 
-#define MOVE_TO_END(_from_label, _to_label) do { \
-    move_entry *m = PyMem_RawMalloc(sizeof(move_entry)); \
-    assert(m); \
-    m->from_label = _from_label; \
-    m->to_label = _to_label; \
-    m->next = jd->move_entry_list; \
-    jd->move_entry_list = m; \
-} while (0)
-
-#define BEGIN_REMOTE_SECTION(label) { \
-    JLABEL remote_end_label = JLABEL_INIT(#label ".remote_end"); \
-    BRANCH(remote_end_label); \
-    LABEL(label);
-
-#define END_REMOTE_SECTION(label) \
-    LABEL(remote_end_label); \
-    MOVE_TO_END(label, remote_end_label); \
+#define REMOTE_SECTION(codeblock) do { \
+    IR_LABEL_INIT(over_remote_section); \
+    BRANCH(over_remote_section); \
+    { codeblock }; \
+    LABEL(over_remote_section); \
 } while (0)
 
 /* Stack operations */
@@ -381,16 +360,10 @@ static int _do_eval_breaker(PyFrameObject *f, int next_instr_index) {
 }
 
 static inline void _emit_check_eval_breaker(JITData *jd, ir_value next_instr_index) {
-    IR_LABEL_INIT(eval_breaker_fired);
-    IR_LABEL_INIT(after_eval_break);
-    BRANCH_IF(LOAD_EVAL_BREAKER(), eval_breaker_fired, IR_UNLIKELY);
-    LABEL(after_eval_break);
-
-    BEGIN_REMOTE_SECTION(eval_breaker_fired);
-    JVALUE res = CALL_NATIVE(jd->sig_ifi, _do_eval_breaker, jd->f, next_instr_index);
-    GOTO_ERROR_IF(res);
-    BRANCH(after_eval_break);
-    END_REMOTE_SECTION(eval_breaker_fired);
+    IF(LOAD_EVAL_BREAKER(), IR_UNLIKELY, {
+        JVALUE res = CALL_NATIVE(jd->sig_ifi, _do_eval_breaker, jd->f, next_instr_index);
+        GOTO_ERROR_IF(res);
+    });
 }
 
 #define IR_PyErr_ExceptionMatches(exc) \
@@ -591,18 +564,15 @@ EMITTER_FOR(NOP) {
     "local variable '%.200s' referenced before assignment"
 
 EMITTER_FOR(LOAD_FAST) {
-    JLABEL load_fast_error = JLABEL_INIT("load_fast_error");
     JVALUE v = GETLOCAL(oparg);
-    BRANCH_IF_NOT(v, load_fast_error, IR_UNLIKELY);
+    IF_NOT(v, IR_UNLIKELY, {
+        CALL_format_exc_check_arg(PyExc_UnboundLocalError,
+                                  UNBOUNDLOCAL_ERROR_MSG,
+                                  PyTuple_GetItem(jd->co->co_varnames, oparg));
+        GOTO_ERROR();
+    });
     INCREF(v);
     PUSH(v);
-
-    BEGIN_REMOTE_SECTION(load_fast_error);
-    CALL_format_exc_check_arg(PyExc_UnboundLocalError,
-                              UNBOUNDLOCAL_ERROR_MSG,
-                              PyTuple_GetItem(jd->co->co_varnames, oparg));
-    GOTO_ERROR();
-    END_REMOTE_SECTION(load_fast_error);
 }
 
 EMITTER_FOR(LOAD_CONST) {
@@ -670,25 +640,21 @@ EMIT_AS_UNARY_OP(UNARY_NEGATIVE, PyNumber_Negative)
 EMIT_AS_UNARY_OP(UNARY_INVERT, PyNumber_Invert)
 
 EMITTER_FOR(UNARY_NOT) {
-    JLABEL real_error = JLABEL_INIT("real_error");
     JVALUE value = TOP();
     JVALUE err = CALL_NATIVE(jd->sig_io, PyObject_IsTrue, value);
     DECREF(value);
 
-    /* Jump if err < 0 (unlikely) */
-    BRANCH_IF(CMP_LT(err, CONSTANT_INT(0)), real_error, IR_UNLIKELY);
+    /* Handle error case, err < 0 (unlikely) */
+    IF(CMP_LT(err, CONSTANT_INT(0)), IR_UNLIKELY, {
+        STACKADJ(-1);
+        GOTO_ERROR();
+    });
 
     /* Handle err > 0 case */
     JVALUE obj = TERNARY(err, CONSTANT_PYOBJ(Py_False), CONSTANT_PYOBJ(Py_True));
     INCREF(obj);
     SET_TOP(obj);
     CHECK_EVAL_BREAKER();
-
-    /* Handle err < 0 case */
-    BEGIN_REMOTE_SECTION(real_error);
-    STACKADJ(-1);
-    GOTO_ERROR();
-    END_REMOTE_SECTION(real_error);
 }
 
 EMITTER_FOR(BINARY_POWER) {
@@ -863,21 +829,18 @@ EMITTER_FOR(DELETE_SUBSCR) {
 EMITTER_FOR(PRINT_EXPR) {
     _Py_IDENTIFIER(displayhook);
     JVALUE value = POP();
-    JLABEL hook_null = JLABEL_INIT("hook_null");
     JTYPE sig1 = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_void_ptr);
     JVALUE hook = CALL_NATIVE(sig1, _PySys_GetObjectId, CONSTANT_VOID_PTR(&PyId_displayhook));
-    BRANCH_IF_NOT(hook, hook_null, IR_UNLIKELY);
+    IF_NOT(hook, IR_UNLIKELY, {
+        CALL_PyErr_SetString(PyExc_RuntimeError, "lost sys.displayhook");
+        DECREF(value);
+        GOTO_ERROR();
+    });
     JVALUE res = CALL_NATIVE(jd->sig_oooo, PyObject_CallFunctionObjArgs, hook, value, CONSTANT_PYOBJ(NULL));
     DECREF(value);
     GOTO_ERROR_IF_NOT(res);
     DECREF(res);
     CHECK_EVAL_BREAKER();
-
-    BEGIN_REMOTE_SECTION(hook_null);
-    CALL_PyErr_SetString(PyExc_RuntimeError, "lost sys.displayhook");
-    DECREF(value);
-    GOTO_ERROR();
-    END_REMOTE_SECTION(hook_null);
 }
 
 EMITTER_FOR(RAISE_VARARGS) {
@@ -909,18 +872,35 @@ EMITTER_FOR(RETURN_VALUE) {
 }
 
 EMITTER_FOR(GET_AITER) {
-    JLABEL getter_is_null = JLABEL_INIT("getter_is_null");
-    JLABEL invalid_iter = JLABEL_INIT("invalid_iter");
-    JLABEL iter_is_null = JLABEL_INIT("iter_is_null");
+    IR_LABEL_INIT(invalid_iter);
     JVALUE obj = TOP();
     JVALUE obj_type = IR_Py_TYPE(obj);
+    JVALUE getter = JVALUE_CREATE(jd->sig_oo);
+    SET_VALUE(getter, CONSTANT_PTR(jd->sig_oo, NULL));
+
     JVALUE tp_as_async = LOAD_FIELD(obj_type, PyTypeObject, tp_as_async, ir_type_pyasyncmethods_ptr);
-    BRANCH_IF_NOT(tp_as_async, getter_is_null, IR_UNLIKELY);
-    JVALUE am_aiter = LOAD_FIELD(tp_as_async, PyAsyncMethods, am_aiter, jd->sig_oo);
-    BRANCH_IF_NOT(am_aiter, getter_is_null, IR_UNLIKELY);
-    JVALUE iter = CALL_INDIRECT(am_aiter, obj);
+    IF(tp_as_async, IR_LIKELY, {
+        SET_VALUE(getter, LOAD_FIELD(tp_as_async, PyAsyncMethods, am_aiter, jd->sig_oo));
+    });
+
+    IF_NOT(getter, IR_UNLIKELY, {
+        SET_TOP(CONSTANT_PYOBJ(NULL));
+        CALL_PyErr_Format(
+            PyExc_TypeError,
+            "'async for' requires an object with "
+            "__aiter__ method, got %.100s",
+            LOAD_FIELD(obj_type, PyTypeObject, tp_name, ir_type_char_ptr));
+        DECREF(obj);
+        GOTO_ERROR();
+    });
+
+    JVALUE iter = CALL_INDIRECT(getter, obj);
     DECREF(obj);
-    BRANCH_IF_NOT(iter, iter_is_null, IR_UNLIKELY);
+    IF_NOT(iter, IR_UNLIKELY, {
+        SET_TOP(CONSTANT_PYOBJ(NULL));
+        GOTO_ERROR();
+    });
+
     JVALUE iter_type = IR_Py_TYPE(iter);
     JVALUE iter_tp_as_async = LOAD_FIELD(iter_type, PyTypeObject, tp_as_async, ir_type_pyasyncmethods_ptr);
     BRANCH_IF_NOT(iter_tp_as_async, invalid_iter, IR_UNLIKELY);
@@ -931,32 +911,17 @@ EMITTER_FOR(GET_AITER) {
     SET_TOP(iter);
     CHECK_EVAL_BREAKER();
 
-    BEGIN_REMOTE_SECTION(iter_is_null);
-    SET_TOP(CONSTANT_PYOBJ(NULL));
-    GOTO_ERROR();
-    END_REMOTE_SECTION(iter_is_null);
-
-    BEGIN_REMOTE_SECTION(getter_is_null);
-    SET_TOP(CONSTANT_PYOBJ(NULL));
-    CALL_PyErr_Format(
-        PyExc_TypeError,
-        "'async for' requires an object with "
-        "__aiter__ method, got %.100s",
-        LOAD_FIELD(obj_type, PyTypeObject, tp_name, ir_type_char_ptr));
-    DECREF(obj);
-    GOTO_ERROR();
-    END_REMOTE_SECTION(getter_is_null);
-
-    BEGIN_REMOTE_SECTION(invalid_iter);
-    SET_TOP(CONSTANT_PYOBJ(NULL));
-    CALL_PyErr_Format(
-        PyExc_TypeError,
-        "'async for' received an object from __aiter__ "
-        "that does not implement __anext__: %.100s",
-        LOAD_FIELD(iter_type, PyTypeObject, tp_name, ir_type_char_ptr));
-    DECREF(iter);
-    GOTO_ERROR();
-    END_REMOTE_SECTION(invalid_iter);
+    REMOTE_SECTION({
+        LABEL(invalid_iter);
+        SET_TOP(CONSTANT_PYOBJ(NULL));
+        CALL_PyErr_Format(
+            PyExc_TypeError,
+            "'async for' received an object from __aiter__ "
+            "that does not implement __anext__: %.100s",
+            LOAD_FIELD(iter_type, PyTypeObject, tp_name, ir_type_char_ptr));
+        DECREF(iter);
+        GOTO_ERROR();
+    });
 }
 
 /* Handle the generic (not common) case for GET_ANEXT */
@@ -1429,17 +1394,14 @@ EMITTER_FOR(STORE_GLOBAL) {
 }
 
 EMITTER_FOR(DELETE_GLOBAL) {
-    JLABEL handle_error = JLABEL_INIT("handle_error");
     PyObject *name = GETNAME(oparg);
     JVALUE globals = LOAD_FIELD(jd->f, PyFrameObject, f_globals, ir_type_pyobject_ptr);
     JVALUE err = CALL_NATIVE(jd->sig_ioo, PyDict_DelItem, globals, CONSTANT_PYOBJ(name));
-    BRANCH_IF(err, handle_error, IR_UNLIKELY);
+    IF(err, IR_UNLIKELY, {
+        CALL_format_exc_check_arg(PyExc_NameError, NAME_ERROR_MSG, name);
+        GOTO_ERROR();
+    });
     CHECK_EVAL_BREAKER();
-
-    BEGIN_REMOTE_SECTION(handle_error);
-    CALL_format_exc_check_arg(PyExc_NameError, NAME_ERROR_MSG, name);
-    GOTO_ERROR();
-    END_REMOTE_SECTION(handle_error);
 }
 
 static PyObject *
@@ -1821,16 +1783,17 @@ static void _build_unpack_common(JITData *jd, int opcode, int oparg, int next_in
     PUSH(result);
     CHECK_EVAL_BREAKER();
 
-    BEGIN_REMOTE_SECTION(handle_error);
-    DECREF(sum);
-    if (opcode == BUILD_TUPLE_UNPACK_WITH_CALL) {
-        JLABEL skip = JLABEL_INIT("skip");
-        BRANCH_IF_NOT(IR_PyErr_ExceptionMatches(PyExc_TypeError), skip, IR_SEMILIKELY);
-        CALL_NATIVE(jd->sig_ioo, check_args_iterable, PEEK(1 + oparg), badobj);
-        LABEL(skip);
-    }
-    GOTO_ERROR();
-    END_REMOTE_SECTION(handle_error);
+    REMOTE_SECTION({
+        LABEL(handle_error);
+        DECREF(sum);
+        if (opcode == BUILD_TUPLE_UNPACK_WITH_CALL) {
+            JLABEL skip = JLABEL_INIT("skip");
+            BRANCH_IF_NOT(IR_PyErr_ExceptionMatches(PyExc_TypeError), skip, IR_SEMILIKELY);
+            CALL_NATIVE(jd->sig_ioo, check_args_iterable, PEEK(1 + oparg), badobj);
+            LABEL(skip);
+        }
+        GOTO_ERROR();
+    });
 }
 
 EMITTER_FOR(BUILD_TUPLE_UNPACK_WITH_CALL) {
@@ -1862,10 +1825,11 @@ EMITTER_FOR(BUILD_SET) {
     PUSH(set);
     CHECK_EVAL_BREAKER();
 
-    BEGIN_REMOTE_SECTION(handle_error);
-    DECREF(set);
-    GOTO_ERROR();
-    END_REMOTE_SECTION(handle_error);
+    REMOTE_SECTION({
+        LABEL(handle_error);
+        DECREF(set);
+        GOTO_ERROR();
+    });
 }
 
 EMITTER_FOR(BUILD_SET_UNPACK) {
@@ -1883,10 +1847,11 @@ EMITTER_FOR(BUILD_SET_UNPACK) {
     PUSH(sum);
     CHECK_EVAL_BREAKER();
 
-    BEGIN_REMOTE_SECTION(handle_error);
-    DECREF(sum);
-    GOTO_ERROR();
-    END_REMOTE_SECTION(handle_error);
+    REMOTE_SECTION({
+        LABEL(handle_error);
+        DECREF(sum);
+        GOTO_ERROR();
+    });
 }
 
 EMITTER_FOR(BUILD_MAP) {
@@ -1907,10 +1872,11 @@ EMITTER_FOR(BUILD_MAP) {
     STACKADJ(-2*oparg);
     PUSH(map);
 
-    BEGIN_REMOTE_SECTION(handle_error);
-    DECREF(map);
-    GOTO_ERROR();
-    END_REMOTE_SECTION(handle_error);
+    REMOTE_SECTION({
+        LABEL(handle_error);
+        DECREF(map);
+        GOTO_ERROR();
+    });
 }
 
 /* This is copied from ceval.c */
@@ -2001,16 +1967,18 @@ EMITTER_FOR(BUILD_CONST_KEY_MAP) {
     PUSH(map);
     CHECK_EVAL_BREAKER();
 
-    BEGIN_REMOTE_SECTION(handle_setitem_error);
-    DECREF(map);
-    GOTO_ERROR();
-    END_REMOTE_SECTION(handle_setitem_error);
+    REMOTE_SECTION({
+        LABEL(handle_setitem_error);
+        DECREF(map);
+        GOTO_ERROR();
+    });
 
-    BEGIN_REMOTE_SECTION(bad_keys_arg);
-    CALL_PyErr_SetString(PyExc_SystemError,
-                         "bad BUILD_CONST_KEY_MAP keys argument");
-    GOTO_ERROR();
-    END_REMOTE_SECTION(bad_keys_arg);
+    REMOTE_SECTION({
+        LABEL(bad_keys_arg);
+        CALL_PyErr_SetString(PyExc_SystemError,
+                             "bad BUILD_CONST_KEY_MAP keys argument");
+        GOTO_ERROR();
+    });
 }
 
 EMITTER_FOR(BUILD_MAP_UNPACK) {
@@ -2030,15 +1998,16 @@ EMITTER_FOR(BUILD_MAP_UNPACK) {
     PUSH(sum);
     CHECK_EVAL_BREAKER();
 
-    BEGIN_REMOTE_SECTION(handle_error);
-    IF(IR_PyErr_ExceptionMatches(PyExc_AttributeError), IR_SEMILIKELY, {
-        CALL_PyErr_Format(PyExc_TypeError,
-                          "'%.200s' object is not a mapping",
-                          LOAD_FIELD(IR_Py_TYPE(arg), PyTypeObject, tp_name, ir_type_char_ptr));
+    REMOTE_SECTION({
+        LABEL(handle_error);
+        IF(IR_PyErr_ExceptionMatches(PyExc_AttributeError), IR_SEMILIKELY, {
+            CALL_PyErr_Format(PyExc_TypeError,
+                              "'%.200s' object is not a mapping",
+                              LOAD_FIELD(IR_Py_TYPE(arg), PyTypeObject, tp_name, ir_type_char_ptr));
+        });
+        DECREF(sum);
+        GOTO_ERROR();
     });
-    DECREF(sum);
-    GOTO_ERROR();
-    END_REMOTE_SECTION(handle_error);
 }
 
 extern void format_kwargs_mapping_error(PyObject *func, PyObject *kwargs);
@@ -2093,13 +2062,14 @@ EMITTER_FOR(BUILD_MAP_UNPACK_WITH_CALL) {
     PUSH(sum);
     CHECK_EVAL_BREAKER();
 
-    BEGIN_REMOTE_SECTION(handle_error);
-    JVALUE func = PEEK(2 + oparg);
-    JTYPE sig2 = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
-    CALL_NATIVE(sig2, _build_map_unpack_with_call_format_error, func, arg);
-    DECREF(sum);
-    GOTO_ERROR();
-    END_REMOTE_SECTION(handle_error);
+    REMOTE_SECTION({
+        LABEL(handle_error);
+        JVALUE func = PEEK(2 + oparg);
+        JTYPE sig2 = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
+        CALL_NATIVE(sig2, _build_map_unpack_with_call_format_error, func, arg);
+        DECREF(sum);
+        GOTO_ERROR();
+    });
 }
 
 EMITTER_FOR(MAP_ADD) {
@@ -2937,6 +2907,13 @@ EMITTER_FOR(EXTENDED_ARG) {
 #include "opcode_emitter_table.h"
 #include "opcode_names.h"
 
+#define IR_DEBUG_DUMP(filename) do { \
+    if (Py_JITDebugFlag > 1) { \
+        ir_func_dump_file(jd->func, (filename)); \
+    } \
+} while (0)
+
+
 static void
 translate_bytecode(JITData *jd, PyCodeObject *co)
 {
@@ -3009,7 +2986,6 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
 
     jd->retval = ir_value_new(jd->func, ir_type_pyobject_ptr);
     jd->next_instr_index = ir_value_new(jd->func, ir_type_int);
-    jd->move_entry_list = NULL;
 
     /* Initialization sequence */
     jd->tstate = IR_PyThreadState_GET();
@@ -3103,7 +3079,6 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     SET_RETVAL(CONSTANT_PYOBJ(NULL));
     BRANCH(jd->exit);
 
-
     LABEL(jd->exit);
     IR_Py_LeaveRecursiveCall();
     STORE_FIELD(jd->f, PyFrameObject, f_executing, ir_type_char, CONSTANT_CHAR(0));
@@ -3114,19 +3089,6 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
 
     /* Close the cursor */
     ir_cursor_close(jd->func);
-
-    /* Move extra sections to end */
-    {
-        move_entry *m = jd->move_entry_list;
-        move_entry *next;
-        while (m != NULL) {
-            next = m->next;
-            ir_func_move_blocks_to_end(jd->func, m->from_label, m->to_label);
-            PyMem_RawFree(m);
-            m = next;
-        }
-        jd->move_entry_list = NULL;
-    }
 }
 
 void ir_lower(JITData *jd);
@@ -3151,24 +3113,17 @@ _PyJIT_CodeGen(PyCodeObject *co) {
     jd->func = ir_func_new(jd->context, PyUnicode_AsUTF8(co->co_name), sig);
 
     translate_bytecode(jd, co);
-    if (Py_JITDebugFlag > 1) {
-        ir_func_dump_file(jd->func, "/tmp/before.ir", "Before lowering");
-    }
-#ifdef IR_DEBUG
-    ir_func_verify(jd->func);
-#endif
 
-    if (Py_JITDebugFlag > 1) {
-        ir_func_dump_file(jd->func, "/tmp/after_dead_blocks.ir", "After dead locks removal");
-    }
+    IR_DEBUG_DUMP("/tmp/00-initial.ir");
+    if (Py_JITDebugFlag > 0)
+        ir_func_verify(jd->func);
 
+    /* Lower all Python-specific instructions */
     ir_lower(jd);
-    if (Py_JITDebugFlag > 1) {
-        ir_func_dump_file(jd->func, "/tmp/after.ir", "After lowering");
-    }
-#ifdef IR_DEBUG
-    ir_func_verify(jd->func);
-#endif
+
+    if (Py_JITDebugFlag > 0)
+        ir_func_verify(jd->func);
+
     PyJIT_Handle *handle = PyMem_RawMalloc(sizeof(PyJIT_Handle));
     ir_object object;
     if (Py_JITFlag == 1) {
@@ -3452,7 +3407,7 @@ void _emit_precursor(JITData *jd, ir_pyblock pb) {
 }
 
 static inline
-int _ir_lower_control_flow(JITData *jd, ir_instr _instr, void *Py_UNUSED(arg)) {
+int _ir_lower_control_flow(JITData *jd, ir_instr _instr) {
     switch (_instr->opcode) {
     case ir_opcode_setup_block: {
         IR_INSTR_AS(setup_block)
@@ -3461,7 +3416,6 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr, void *Py_UNUSED(arg)) {
         assert(instr->entry_stack_level == instr->pb->b_level);
 
         /* Each error handling target has an precursor, which saves the exception to the stack */
-        /* TODO: Use remote section */
         if (instr->pb->b_type == IR_PYBLOCK_EXCEPT ||
             instr->pb->b_type == IR_PYBLOCK_FINALLY_TRY) {
             IR_LABEL_INIT(skip_over)
@@ -3661,7 +3615,7 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr, void *Py_UNUSED(arg)) {
 }
 
 static inline
-int _ir_lower_refcounting(JITData *jd, ir_instr _instr, void *Py_UNUSED(arg)) {
+int _ir_lower_refcounting(JITData *jd, ir_instr _instr) {
     ir_func func = jd->func;
     switch (_instr->opcode) {
     case ir_opcode_incref: {
@@ -3722,7 +3676,7 @@ int _ir_lower_refcounting(JITData *jd, ir_instr _instr, void *Py_UNUSED(arg)) {
 }
 
 static inline
-int _ir_lower_stack_ops(JITData *jd, ir_instr _instr, void *Py_UNUSED(arg)) {
+int _ir_lower_stack_ops(JITData *jd, ir_instr _instr) {
     switch (_instr->opcode) {
     case ir_opcode_stackadj: {
         return 1;
@@ -3747,7 +3701,7 @@ int _ir_lower_stack_ops(JITData *jd, ir_instr _instr, void *Py_UNUSED(arg)) {
 }
 
 static inline
-int _ir_lower_remaining(JITData *jd, ir_instr _instr, void *Py_UNUSED(arg)) {
+int _ir_lower_remaining(JITData *jd, ir_instr _instr) {
     ir_func func = jd->func;
     switch (_instr->opcode) {
     case ir_opcode_getlocal: {
@@ -3772,7 +3726,7 @@ int _ir_lower_remaining(JITData *jd, ir_instr _instr, void *Py_UNUSED(arg)) {
     return 0;
 }
 
-int _ir_lower_yield_dispatch(JITData *jd, ir_instr _instr, void *Py_UNUSED(arg)) {
+int _ir_lower_yield_dispatch(JITData *jd, ir_instr _instr) {
     if (_instr->opcode != ir_opcode_yield_dispatch) {
         return 0;
     }
@@ -3800,10 +3754,10 @@ int _ir_lower_yield_dispatch(JITData *jd, ir_instr _instr, void *Py_UNUSED(arg))
     return 1;
 }
 
-typedef int (*lowerfunc_type)(JITData*, ir_instr, void*);
+typedef int (*lowerfunc_t)(JITData*, ir_instr);
 
 static inline
-void _lower_pass(JITData *jd, lowerfunc_type lowerfunc, void *arg) {
+void _lower_pass(JITData *jd, lowerfunc_t lowerfunc, const char *filename) {
     ir_func func = jd->func;
     ir_block b;
     ir_instr _instr;
@@ -3822,7 +3776,7 @@ void _lower_pass(JITData *jd, lowerfunc_type lowerfunc, void *arg) {
             ir_cursor_open(func, b, _instr->prev);
 
             /* Insert lowered version */
-            int did_lower = lowerfunc(jd, _instr, arg);
+            int did_lower = lowerfunc(jd, _instr);
 
             if (did_lower) {
                 /* Unlink the instruction we lowered */
@@ -3838,63 +3792,51 @@ void _lower_pass(JITData *jd, lowerfunc_type lowerfunc, void *arg) {
             ir_cursor_close(func);
         }
     }
+    IR_DEBUG_DUMP(filename);
 }
 
 void ir_lower(JITData *jd) {
-    /* For lowering, we need to get the pyblock map */
+    /* 01: Remove dead blocks */
     ir_remove_dead_blocks(jd->func);
+    IR_DEBUG_DUMP("/tmp/01-remove_dead_blocks.ir");
 
+    /* 02: Compute pyblock map */
     ir_label ignored[] = { jd->exit, jd->error_exit, NULL };
     ir_pyblock_map map = ir_compute_pyblock_map(jd->func, ignored);
     if (Py_JITDebugFlag > 1) {
-        ir_dump_pyblock_map(map, "/tmp/pyblock_map.ir");
+        ir_dump_pyblock_map(map, "/tmp/02-pyblock_map.ir");
     }
 
-    /* First-pass: Lower pyblock control flow */
-    _lower_pass(jd, _ir_lower_control_flow, map);
+    /* 03: Lower pyblock control flow */
+    _lower_pass(jd, _ir_lower_control_flow, "/tmp/03-control_flow.ir");
     ir_free_pyblock_map(map);
 
-    if (Py_JITDebugFlag > 1) {
-        ir_func_dump_file(jd->func, "/tmp/after_lower_control_flow.ir", "After lowering control flow");
-    }
-
-    /* Second-pass: Lower yield dispatch */
+    /* 04: Lower yield dispatch */
     if (jd->is_gen) {
-        _lower_pass(jd, _ir_lower_yield_dispatch, NULL);
-        if (Py_JITDebugFlag > 1) {
-            ir_func_dump_file(jd->func, "/tmp/after_lower_yield_dispatch.ir", "After lowering yield dispatch");
-        }
+        _lower_pass(jd, _ir_lower_yield_dispatch, "/tmp/04-yield_dispatch.ir");
     }
 
+    /* 05: Remove dead blocks again */
     ir_remove_dead_blocks(jd->func);
+    IR_DEBUG_DUMP("/tmp/05-remove_dead_blocks.ir");
 
-    if (Py_JITDebugFlag > 1) {
-        ir_func_dump_file(jd->func, "/tmp/after_remove_dead_blocks_2.ir", "After remove dead blocks 2");
-    }
-
-    /* Fourth-pass: Lower stack operations */
+    /* 06: Compute stack positions */
     jd->stack_size = ir_compute_stack_positions(jd->func);
-    //assert(jd->co->co_stacksize == jd->stack_size);
+    assert(jd->stack_size <= jd->co->co_stacksize); /* TODO: Why aren't these always equal? */
     jd->stack_values = (ir_value*)malloc(sizeof(ir_value) * jd->stack_size);
     for (int i = 0; i < jd->stack_size; i++) {
         jd->stack_values[i] = ir_value_new(jd->func, ir_type_pyobject_ptr);
     }
-    _lower_pass(jd, _ir_lower_stack_ops, NULL);
+
+    /* 07: Lower stack operations */
+    _lower_pass(jd, _ir_lower_stack_ops, "/tmp/07-stack_ops.ir");
     free(jd->stack_values);
 
-    if (Py_JITDebugFlag > 1) {
-        ir_func_dump_file(jd->func, "/tmp/after_lower_stack_ops.ir", "After lowering stack operations");
-    }
+    /* 08: Lower incref/decref */
+    _lower_pass(jd, _ir_lower_refcounting, "/tmp/08-refcount_ops.ir");
 
-    /* Third-pass: Lower incref/decref */
-    _lower_pass(jd, _ir_lower_refcounting, NULL);
-
-    if (Py_JITDebugFlag > 1) {
-        ir_func_dump_file(jd->func, "/tmp/after_lower_refcounting.ir", "After lowering reference counting");
-    }
-
-    /* Fifth-pass: Lower everything else */
-    _lower_pass(jd, _ir_lower_remaining, NULL);
+    /* 09: Lower everything else */
+    _lower_pass(jd, _ir_lower_remaining, "/tmp/09-after_all_lowering.ir");
 }
 
 /* Stack Record flags */
