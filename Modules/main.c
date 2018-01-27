@@ -40,7 +40,7 @@ static wchar_t **orig_argv;
 static int  orig_argc;
 
 /* command line options */
-#define BASE_OPTS L"bBc:dEhiIJm:OqRsStuvVW:xX:?"
+#define BASE_OPTS L"bBc:dEhiIJm:OqRsStuvVW:xX:?Z"
 
 #define PROGRAM_OPTS BASE_OPTS
 
@@ -373,7 +373,7 @@ typedef struct {
 #define _Py_CommandLineDetails_INIT \
             {NULL, NULL, NULL, NULL, NULL, \
              0, 0, 0, 0, 0, 0, 0, 0, \
-             0, 0, 0, 0, 0, 0, 0}
+             0, 0, 0, 0, 0, 0, 0, 0}
 
 static int
 read_command_line(int argc, wchar_t **argv, _Py_CommandLineDetails *cmdline)
@@ -505,6 +505,10 @@ read_command_line(int argc, wchar_t **argv, _Py_CommandLineDetails *cmdline)
             /* Ignored */
             break;
 
+        case 'Z':
+            /* Handled prior to core initialization */
+            break;
+
         /* This space reserved for other options */
 
         default:
@@ -579,6 +583,7 @@ Py_Main(int argc, wchar_t **argv)
     /* Hash randomization needed early for all string operations
        (including -W and -X options). */
     _PyOS_opterr = 0;  /* prevent printing the error in 1st pass */
+    int jitflag = 0;
     while ((c = _PyOS_GetOpt(argc, argv, PROGRAM_OPTS)) != EOF) {
         if (c == 'm' || c == 'c') {
             /* -c / -m is the last option: following arguments are
@@ -586,9 +591,14 @@ Py_Main(int argc, wchar_t **argv)
             break;
         }
         if (c == 'E' || c == 'I') {
-            core_config.ignore_environment++;
-            break;
+            core_config.ignore_environment = 1;
         }
+        if (c == 'Z') {
+            jitflag++;
+        }
+    }
+    if (jitflag) {
+        Py_JITFlag = jitflag;
     }
 
     /* Initialize the core language runtime */

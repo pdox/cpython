@@ -1794,6 +1794,7 @@ static PyStructSequence_Field flags_fields[] = {
     {"quiet",                   "-q"},
     {"hash_randomization",      "-R"},
     {"isolated",                "-I"},
+    {"jit",                     "-Z"},
     {0}
 };
 
@@ -1801,7 +1802,7 @@ static PyStructSequence_Desc flags_desc = {
     "sys.flags",        /* name */
     flags__doc__,       /* doc */
     flags_fields,       /* fields */
-    13
+    14
 };
 
 static PyObject*
@@ -1832,6 +1833,7 @@ make_flags(void)
     SetFlag(Py_QuietFlag);
     SetFlag(Py_HashRandomizationFlag);
     SetFlag(Py_IsolatedFlag);
+    SetFlag(Py_JITFlag);
 #undef SetFlag
 
     if (PyErr_Occurred()) {

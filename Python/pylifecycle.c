@@ -617,6 +617,18 @@ void _Py_InitializeCore(const _PyCoreConfig *config)
     _emit_stderr_warning_for_legacy_locale();
 #endif
 #endif
+    {
+        FILE *fp = fopen("/tmp/PYJIT_DEFAULT", "r");
+        if (fp) {
+            char buf;
+            if (fread(&buf, 1, 1, fp) == 1 && (buf >= '0' && buf <= '9')) {
+                Py_JITFlag = buf - '0';
+            } else {
+                Py_FatalError("Invalid PYJIT_DEFAULT file");
+            }
+            fclose(fp);
+        }
+    }
     if ((p = Py_GETENV("PYJIT")) && *p != '\0')
         Py_JITFlag = atoi(p);
     if ((p = Py_GETENV("PYJITDEBUG")) && *p != '\0')
