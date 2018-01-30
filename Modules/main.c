@@ -373,7 +373,7 @@ typedef struct {
 #define _Py_CommandLineDetails_INIT \
             {NULL, NULL, NULL, NULL, NULL, \
              0, 0, 0, 0, 0, 0, 0, 0, \
-             0, 0, 0, 0, 0, 0, 0, 0}
+             0, 0, 0, 0, 0, 0, 0}
 
 static int
 read_command_line(int argc, wchar_t **argv, _Py_CommandLineDetails *cmdline)
