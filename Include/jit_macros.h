@@ -20,7 +20,6 @@
     ir_label name = ir_label_new(jd->func, #name);
 
 #define JVALUE_CREATE(irtype)    ir_value_new(jd->func, (irtype))
-#define ADDRESS_OF(val)          ir_address_of(jd->func, (val))
 
 #define SET_VALUE(dest, src)     ir_set_value(jd->func, (dest), (src))
 

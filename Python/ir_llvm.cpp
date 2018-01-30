@@ -382,11 +382,6 @@ void _emit_instr(_TranslationContext &ctx, ir_block b, ir_instr _instr) {
         BUILDER().CreateStore(LLVM_VALUE(instr->value), LLVM_VALUE(instr->ptr));
         break;
     }
-    case ir_opcode_address_of: {
-        IR_INSTR_AS(address_of)
-        SET_DEST(LLVM_VALUE_ADDRESS(instr->value));
-        break;
-    }
     case ir_opcode_alloca: {
         IR_INSTR_AS(alloca)
         ir_type elem_type = ir_pointer_base(ir_typeof(_instr->dest));
@@ -624,8 +619,7 @@ ir_llvm_compile(ir_func func) {
 
            Everything defaults to a bare value except those values which:
              1) Are the target of a 'set_value' instruction
-             2) Are the operand of an 'address_of' instruction.
-             3) Are used before they are defined (in the block/instruction iteration order)
+             2) Are used before they are defined (in the block/instruction iteration order)
          */
         for (_instr = b->first_instr; _instr != NULL; _instr = _instr->next) {
             size_t count;
@@ -635,9 +629,6 @@ ir_llvm_compile(ir_func func) {
             }
             if (_instr->opcode == ir_opcode_set_value) {
                 FORCE_ALLOCA_MODE(_instr->dest);
-            } else if (_instr->opcode == ir_opcode_address_of) {
-                IR_INSTR_AS(address_of)
-                FORCE_ALLOCA_MODE(instr->value);
             }
             if (_instr->dest) {
                 RECORD_DEFINE(_instr->dest);

@@ -85,10 +85,6 @@ ir_value* ir_get_uses(ir_instr _instr, size_t *count) {
         *u++ = instr->value;
         break;
     }
-    case ir_opcode_address_of: {
-        /* doesn't actually use 'value' */
-        break;
-    }
     case ir_opcode_alloca: {
         IR_INSTR_AS(alloca)
         *u++ = instr->num_elements;
@@ -280,7 +276,6 @@ _ir_opcode_repr(ir_opcode opcode) {
     OPCODE_CASE(get_index_ptr)
     OPCODE_CASE(load)
     OPCODE_CASE(store)
-    OPCODE_CASE(address_of)
     OPCODE_CASE(alloca)
 
     OPCODE_CASE(constant)
@@ -439,11 +434,6 @@ ir_instr_repr(char *p, ir_instr _instr) {
             IR_INSTR_AS(store)
             p = ir_value_repr(p, instr->ptr);
             p += sprintf(p, " <- ");
-            p = ir_value_repr(p, instr->value);
-            break;
-        }
-        case ir_opcode_address_of: {
-            IR_INSTR_AS(address_of)
             p = ir_value_repr(p, instr->value);
             break;
         }

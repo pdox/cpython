@@ -199,11 +199,6 @@ void _emit_instr(jit_function_t jit_func,
         jit_insn_store_relative(jit_func, JIT_VALUE(instr->ptr), 0, JIT_VALUE(instr->value));
         break;
     }
-    case ir_opcode_address_of: {
-        IR_INSTR_AS(address_of)
-        SET_DEST(jit_insn_address_of(jit_func, JIT_VALUE(instr->value)));
-        break;
-    }
     case ir_opcode_alloca: {
         IR_INSTR_AS(alloca)
         size_t elem_size = ir_pointer_base(ir_typeof(_instr->dest))->size;

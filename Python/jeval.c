@@ -1070,13 +1070,15 @@ EMITTER_FOR(YIELD_FROM) {
 
     /* Exiting from 'yield from' */
     LABEL(handle_null_yieldval);
-    JVALUE val = JVALUE_CREATE(ir_type_pyobject_ptr);
-    SET_VALUE(val, CONSTANT_PYOBJ(NULL));
+    /* Use the first tmpstack slot to receive 'val' */
+    assert(jd->tmpstack_size >= 1);
+    JVALUE valptr = jd->tmpstack;
+    STORE(valptr, CONSTANT_PYOBJ(NULL));
     JTYPE sig2 = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr_ptr);
-    JVALUE err = CALL_NATIVE(sig2, _PyGen_FetchStopIterationValue, ADDRESS_OF(val));
+    JVALUE err = CALL_NATIVE(sig2, _PyGen_FetchStopIterationValue, valptr);
     GOTO_ERROR_IF(CMP_LT(err, CONSTANT_INT(0)));
     DECREF(receiver);
-    SET_TOP(val);
+    SET_TOP(LOAD(valptr));
     CHECK_EVAL_BREAKER();
 }
 
@@ -2594,10 +2596,13 @@ extern int _PyObject_GetMethod(PyObject *, PyObject *, PyObject **);
 EMITTER_FOR(LOAD_METHOD) {
     PyObject *name = GETNAME(oparg);
     JVALUE obj = TOP();
-    JVALUE meth = JVALUE_CREATE(ir_type_pyobject_ptr);
-    SET_VALUE(meth, CONSTANT_PYOBJ(NULL));
+    /* Use the first tmpstack slot to receive the method */
+    assert(jd->tmpstack_size >= 1);
+    JVALUE methptr = jd->tmpstack;
+    STORE(methptr, CONSTANT_PYOBJ(NULL));
     JTYPE sig = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr_ptr);
-    JVALUE meth_found = CALL_NATIVE(sig, _PyObject_GetMethod, obj, CONSTANT_PYOBJ(name), ADDRESS_OF(meth));
+    JVALUE meth_found = CALL_NATIVE(sig, _PyObject_GetMethod, obj, CONSTANT_PYOBJ(name), methptr);
+    JVALUE meth = LOAD(methptr);
 
     /* If meth == NULL, most likely attribute wasn't found. */
     GOTO_ERROR_IF_NOT(meth);
