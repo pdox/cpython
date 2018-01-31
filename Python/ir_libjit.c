@@ -9,6 +9,7 @@ jit_context_t gcontext = NULL;
 #define SET_DEST(v) do { \
     jit_value_t _v = (v); \
     assert(_instr->dest != NULL); \
+    assert(jit_modes[_instr->dest->index] != 2); \
     if (jit_values[_instr->dest->index] == NULL) { \
         jit_values[_instr->dest->index] = _v; \
     } else { \
@@ -16,10 +17,42 @@ jit_context_t gcontext = NULL;
     } \
 } while (0)
 
-#define JIT_VALUE(irval) \
-    (jit_values[(irval)->index] ? \
-     jit_values[(irval)->index] : \
-     (jit_values[(irval)->index] = jit_value_create(jit_func, JIT_TYPE(ir_typeof(irval)))))
+#define SET_DEST_FORCE_COPY(v) do { \
+    jit_value_t _v = (v); \
+    assert(_instr->dest != NULL); \
+    assert(jit_modes[_instr->dest->index] != 2); \
+    if (jit_values[_instr->dest->index] == NULL) { \
+        jit_values[_instr->dest->index] = jit_value_create(jit_func, JIT_TYPE(ir_typeof(_instr->dest))); \
+    } \
+    jit_insn_store(jit_func, jit_values[_instr->dest->index], _v); \
+} while (0)
+
+#define JIT_VALUE_FROM_ALLOCA(irval) ({ \
+    ir_value _val = (irval); \
+    size_t _index = _val->index; \
+    jit_value_t _ret; \
+    assert(jit_modes[_index] == 2); \
+    if (jit_values[_index]) { \
+        _ret = jit_values[_index]; \
+    } else { \
+        ir_type base = ir_pointer_base(ir_typeof(_val)); \
+        _ret = jit_values[_index] = jit_value_create(jit_func, JIT_TYPE(base)); \
+    } \
+    _ret; \
+})
+
+#define JIT_VALUE(irval) ({ \
+    ir_value _val = (irval); \
+    size_t _index = _val->index; \
+    jit_value_t _ret; \
+    assert(jit_modes[_index] != 2); \
+    if (jit_values[_index]) { \
+        _ret = jit_values[_index]; \
+    } else { \
+        _ret = jit_values[_index] = jit_value_create(jit_func, JIT_TYPE(ir_typeof(_val))); \
+    } \
+    _ret; \
+})
 
 #define JIT_LABEL(irlabel)   ( \
     assert((irlabel)->block->index < num_blocks), \
@@ -67,7 +100,8 @@ jit_type_t _ir_type_to_jit(ir_type type) {
 
 static inline
 void _emit_instr(jit_function_t jit_func,
-                 jit_value_t* jit_values, size_t num_values,
+                 jit_value_t* jit_values, unsigned char *jit_modes,
+                 size_t num_values,
                  jit_label_t* jit_blocks, size_t num_blocks,
                  ir_func func, ir_block block, ir_instr _instr) {
     switch (_instr->opcode) {
@@ -190,25 +224,35 @@ void _emit_instr(jit_function_t jit_func,
     }
     case ir_opcode_load: {
         IR_INSTR_AS(load)
-        ir_type base_type = ir_pointer_base(ir_typeof(instr->ptr));
-        SET_DEST(jit_insn_load_relative(jit_func, JIT_VALUE(instr->ptr), 0, JIT_TYPE(base_type)));
+        if (jit_modes[instr->ptr->index] == 2) {
+            SET_DEST_FORCE_COPY(JIT_VALUE_FROM_ALLOCA(instr->ptr));
+        } else {
+            ir_type base_type = ir_pointer_base(ir_typeof(instr->ptr));
+            SET_DEST(jit_insn_load_relative(jit_func, JIT_VALUE(instr->ptr), 0, JIT_TYPE(base_type)));
+        }
         break;
     }
     case ir_opcode_store: {
         IR_INSTR_AS(store)
-        jit_insn_store_relative(jit_func, JIT_VALUE(instr->ptr), 0, JIT_VALUE(instr->value));
+        if (jit_modes[instr->ptr->index] == 2) {
+            jit_insn_store(jit_func, JIT_VALUE_FROM_ALLOCA(instr->ptr), JIT_VALUE(instr->value));
+        } else {
+            jit_insn_store_relative(jit_func, JIT_VALUE(instr->ptr), 0, JIT_VALUE(instr->value));
+        }
         break;
     }
     case ir_opcode_alloca: {
         IR_INSTR_AS(alloca)
-        size_t elem_size = ir_pointer_base(ir_typeof(_instr->dest))->size;
-        assert(elem_size > 0);
-        jit_value_t alloca_size = jit_insn_mul(
-            jit_func,
-            jit_insn_convert(jit_func, JIT_VALUE(instr->num_elements), jit_type_nuint, 0),
-            jit_value_create_nint_constant(jit_func, jit_type_nuint, elem_size));
-        jit_value_t mem = jit_insn_alloca(jit_func, alloca_size);
-        SET_DEST(mem);
+        if (jit_modes[_instr->dest->index] == 2) {
+            /* Nothing to do. The value will be created by JIT_VALUE_FROM_ALLOCA. */
+        } else {
+            size_t elem_size = ir_pointer_base(ir_typeof(_instr->dest))->size;
+            assert(elem_size > 0);
+            jit_value_t alloca_size =
+                jit_value_create_nint_constant(jit_func, jit_type_nuint, elem_size * instr->num_elements);
+            jit_value_t mem = jit_insn_alloca(jit_func, alloca_size);
+            SET_DEST(mem);
+        }
         break;
     }
     case ir_opcode_constant: {
@@ -236,14 +280,6 @@ void _emit_instr(jit_function_t jit_func,
         IR_INSTR_AS(cast)
         ir_type dest_type = ir_typeof(_instr->dest);
         SET_DEST(jit_insn_convert(jit_func, JIT_VALUE(instr->value), JIT_TYPE(dest_type), 0));
-        break;
-    }
-    case ir_opcode_set_value: {
-        IR_INSTR_AS(set_value)
-        if (jit_values[_instr->dest->index] == NULL) { \
-            jit_values[_instr->dest->index] = jit_value_create(jit_func, JIT_TYPE(ir_typeof(_instr->dest)));
-        }
-        jit_insn_store(jit_func, jit_values[_instr->dest->index], JIT_VALUE(instr->src));
         break;
     }
     case ir_opcode_label_here: {
@@ -318,6 +354,14 @@ ir_object ir_libjit_compile(ir_func func) {
     jit_value_t *jit_values = (jit_value_t*)malloc(num_values * sizeof(jit_value_t));
     memset(jit_values, 0, num_values * sizeof(jit_value_t));
 
+    /* Allocate array for value modes:
+       0 = undetermined
+       1 = normal value
+       2 = alloca translated to jit value
+     */
+    unsigned char *jit_modes = (unsigned char*)malloc(num_values * sizeof(unsigned char));
+    memset(jit_modes, 0, num_values * sizeof(unsigned char));
+
     /* Setup the values corresponding to the arguments */
     for (i = 0; i < func->sig->param_count - 1; i++) {
         ir_value argi = ir_func_get_argument(func, i);
@@ -330,16 +374,39 @@ ir_object ir_libjit_compile(ir_func func) {
         jit_blocks[i] = jit_label_undefined;
     }
 
-    /* Emit each block, one by one */
+    /* Convert alloca values of constant integer size 1, with only loads and stores,
+       into jit values, for libjit to optimize. This is a short-term optimization,
+       as there should eventually be a "Mem2Reg" pass. */
     ir_block b;
-    ir_instr instr;
+    ir_instr _instr;
+    for (b = func->first_block; b != NULL; b = b->next) {
+        for (_instr = b->first_instr; _instr != NULL; _instr = _instr->next) {
+            if (_instr->opcode != ir_opcode_load &&
+                _instr->opcode != ir_opcode_store) {
+                size_t uses_count;
+                ir_value *uses = ir_get_uses(_instr, &uses_count);
+                for (size_t i = 0; i < uses_count; i++) {
+                    jit_modes[uses[i]->index] = 1;
+                }
+            }
+            if (_instr->opcode == ir_opcode_alloca) {
+                IR_INSTR_AS(alloca)
+                if (instr->num_elements == 1 &&
+                    jit_modes[_instr->dest->index] == 0) {
+                    jit_modes[_instr->dest->index] = 2;
+                }
+            }
+        }
+    }
+
+    /* Emit each block, one by one */
     for (b = func->first_block; b != NULL; b = b->next) {
         assert(b->index < num_blocks);
         jit_insn_label(jit_func, &jit_blocks[b->index]);
 
         /* Emit each instruction, one by one */
-        for (instr = b->first_instr; instr != NULL; instr = instr->next) {
-            _emit_instr(jit_func, jit_values, num_values, jit_blocks, num_blocks, func, b, instr);
+        for (_instr = b->first_instr; _instr != NULL; _instr = _instr->next) {
+            _emit_instr(jit_func, jit_values, jit_modes, num_values, jit_blocks, num_blocks, func, b, _instr);
         }
     }
 

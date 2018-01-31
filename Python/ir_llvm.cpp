@@ -32,24 +32,24 @@ typedef struct {
 
 #define LLVM_TYPE(irtype)  _ir_type_to_llvm_type(ctx, (irtype))
 
-#define FORCE_ALLOCA_MODE(irval) do { \
-    ir_value v = (irval); \
-    llvm::Type *ltype = LLVM_TYPE(ir_typeof(v)); \
-    if (ctx.llvm_values[v->index] == NULL) { \
-        ctx.llvm_values[v->index] = BUILDER().CreateAlloca(ltype); \
-        ctx.llvm_modes[v->index] = 2; \
+#define FORCE_ALLOCA_MODE(irval1) do { \
+    ir_value v1 = (irval1); \
+    llvm::Type *ltype = LLVM_TYPE(ir_typeof(v1)); \
+    if (ctx.llvm_values[v1->index] == NULL) { \
+        ctx.llvm_values[v1->index] = BUILDER().CreateAlloca(ltype); \
+        ctx.llvm_modes[v1->index] = 2; \
     } else { \
-        assert(ctx.llvm_modes[v->index] == 2); \
-        assert(ctx.llvm_values[v->index] != NULL); \
+        assert(ctx.llvm_modes[v1->index] == 2); \
+        assert(ctx.llvm_values[v1->index] != NULL); \
     } \
 } while (0)
 
 /* Set the value to alloca mode if this use is not preceded by a
    value creation, in the block and instruction iteration order */
-#define ALLOCA_MODE_IF_NOT_DEFINED(irval) do { \
-    ir_value v = (irval); \
-    if (ctx.llvm_modes[v->index] == 0) { \
-        FORCE_ALLOCA_MODE(v); \
+#define ALLOCA_MODE_IF_NOT_DEFINED(irval2) do { \
+    ir_value v2 = (irval2); \
+    if (ctx.llvm_modes[v2->index] == 0) { \
+        FORCE_ALLOCA_MODE(v2); \
     } \
 } while (0)
 
@@ -387,9 +387,7 @@ void _emit_instr(_TranslationContext &ctx, ir_block b, ir_instr _instr) {
         ir_type elem_type = ir_pointer_base(ir_typeof(_instr->dest));
         assert(elem_type->size > 0);
         llvm::Value *alloca_size =
-            BUILDER().CreateMul(
-                BUILDER().getIntN(ir_type_uintptr->size * 8, (uint64_t)elem_type->size),
-                BUILDER().CreateZExt(LLVM_VALUE(instr->num_elements), LLVM_TYPE(ir_type_uintptr)));
+                BUILDER().getInt64(instr->num_elements * elem_type->size);
         SET_DEST(BUILDER().CreateAlloca(LLVM_TYPE(elem_type), alloca_size));
         break;
     }
@@ -461,11 +459,6 @@ void _emit_instr(_TranslationContext &ctx, ir_block b, ir_instr _instr) {
             }
         }
         SET_DEST(dest);
-        break;
-    }
-    case ir_opcode_set_value: {
-        IR_INSTR_AS(set_value)
-        SET_DEST(LLVM_VALUE(instr->src));
         break;
     }
     case ir_opcode_label_here: {
@@ -617,18 +610,14 @@ ir_llvm_compile(ir_func func) {
         /* Do a first pass through the code to determine which values must be
            stored using 'alloca', and which ones can be bare SSA values.
 
-           Everything defaults to a bare value except those values which:
-             1) Are the target of a 'set_value' instruction
-             2) Are used before they are defined (in the block/instruction iteration order)
+           Everything defaults to a bare value except those values which are used
+             before they are defined (in the block/instruction iteration order)
          */
         for (_instr = b->first_instr; _instr != NULL; _instr = _instr->next) {
             size_t count;
             ir_value *uses = ir_get_uses(_instr, &count);
             for (int i = 0; i < count; i++) {
                 ALLOCA_MODE_IF_NOT_DEFINED(uses[i]);
-            }
-            if (_instr->opcode == ir_opcode_set_value) {
-                FORCE_ALLOCA_MODE(_instr->dest);
             }
             if (_instr->dest) {
                 RECORD_DEFINE(_instr->dest);

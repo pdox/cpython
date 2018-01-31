@@ -47,9 +47,6 @@ typedef enum {
     /* cast to register of another type */
     ir_opcode_cast,     // new_value = (cast_type)val;
 
-    /* set register. Not present in SSA form */
-    ir_opcode_set_value,   // existing_value = value;
-
     /* label */
     ir_opcode_label_here,
 
@@ -148,7 +145,8 @@ ir_value _ir_instr_insert_helper(ir_func func, ir_instr instr, ir_opcode opcode,
     instr->opcode = opcode;
     instr->dest = dest;
     if (dest) {
-        dest->def = (opcode == ir_opcode_set_value) ? NULL : instr;
+        assert(dest->def == NULL);
+        dest->def = instr;
     }
     ir_cursor_insert(func, instr);
     return dest;
@@ -497,6 +495,7 @@ void ir_store(ir_func func, ir_value ptr, ir_value value) {
 #ifndef NDEBUG
     ir_type base_type = ir_pointer_base(ir_typeof(ptr));
     assert(ir_type_equal(ir_typeof(value), base_type));
+    assert(value != NULL);
 #endif
     instr->ptr = ptr;
     instr->value = value;
@@ -524,13 +523,12 @@ void _ir_store_field(ir_func func, ir_value ptr, size_t offset, ir_type member_t
 IR_PROTOTYPE(ir_instr_alloca)
 struct ir_instr_alloca_t {
     IR_INSTR_HEADER
-    ir_value num_elements;
+    size_t num_elements;
 };
 
 static inline
-ir_value ir_alloca(ir_func func, ir_type elem_type, ir_value num_elements) {
+ir_value ir_alloca(ir_func func, ir_type elem_type, size_t num_elements) {
     IR_INSTR_ALLOC(ir_instr_alloca, 0)
-    assert(ir_type_is_integral(ir_typeof(num_elements)));
     instr->num_elements = num_elements;
     ir_type ret_type = ir_create_pointer_type(func->context, elem_type);
     return IR_INSTR_INSERT(ir_opcode_alloca, ret_type);
@@ -601,23 +599,6 @@ ir_value ir_cast(ir_func func, ir_type type, ir_value value) {
     IR_INSTR_ALLOC(ir_instr_cast, 0)
     instr->value = value;
     return IR_INSTR_INSERT(ir_opcode_cast, type);
-}
-
-/*****************************************************************************/
-
-IR_PROTOTYPE(ir_instr_set_value)
-struct ir_instr_set_value_t {
-    IR_INSTR_HEADER
-    ir_value src;
-};
-
-static inline
-void ir_set_value(ir_func func, ir_value dest, ir_value src) {
-    IR_INSTR_ALLOC(ir_instr_set_value, 0)
-    assert(ir_type_equal(ir_typeof(dest), ir_typeof(src)));
-    instr->src = src;
-    /* Bypass automatic value creation by calling _ir_instr_insert_helper directly */
-    _ir_instr_insert_helper(func, (ir_instr)instr, ir_opcode_set_value, dest);
 }
 
 /*****************************************************************************/
@@ -1195,6 +1176,21 @@ static inline void ir_cursor_clear_pyblock(ir_func func) {
    instruction. */
 static inline
 void ir_cursor_insert(ir_func func, ir_instr _instr) {
+    if (_instr->opcode == ir_opcode_alloca) {
+        /* alloca instructions ignore the cursor. They are always placed at the
+           front of the entry node, after the label. */
+        ir_block b = func->entry_label->block;
+        ir_instr after = b->first_instr;
+        while (after->next != NULL && after->next->opcode == ir_opcode_alloca)
+            after = after->next;
+        IR_LL_INSERT_AFTER(b->first_instr, b->last_instr, after, _instr);
+        /* Make sure the cursor stays after the alloca instructions, or else the
+           alloca's could get pushed out of position. */
+        if (b->current_instr == after) {
+            b->current_instr = _instr;
+        }
+        return;
+    }
     ir_block b = func->current_block;
     assert(b != NULL); /* Cursor not open? */
     if (_instr->opcode == ir_opcode_label_here) {

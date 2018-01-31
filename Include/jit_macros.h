@@ -19,9 +19,7 @@
 #define IR_LABEL_INIT(name) \
     ir_label name = ir_label_new(jd->func, #name);
 
-#define JVALUE_CREATE(irtype)    ir_value_new(jd->func, (irtype))
-
-#define SET_VALUE(dest, src)     ir_set_value(jd->func, (dest), (src))
+#define ALLOCA(irtype)    ir_alloca(jd->func, (irtype), 1)
 
 #define CREATE_SIGNATURE(ret_type, ...) ({ \
     JTYPE _args[] = { __VA_ARGS__ }; \
@@ -86,12 +84,12 @@
 /* Logical AND with short-circuiting */
 #define LOGICAL_AND_SC(v1, v2) ({ \
     JLABEL logical_and_end = JLABEL_INIT("logical_and_end"); \
-    JVALUE ret = JVALUE_CREATE(ir_type_int); \
-    SET_VALUE(ret, BOOL(v1)); \
-    BRANCH_IF_NOT(ret, logical_and_end, IR_SEMILIKELY); \
-    SET_VALUE(ret, BOOL(v2)); \
+    JVALUE ret = ALLOCA(ir_type_int); \
+    STORE(ret, BOOL(v1)); \
+    BRANCH_IF_NOT(LOAD(ret), logical_and_end, IR_SEMILIKELY); \
+    STORE(ret, BOOL(v2)); \
     LABEL(logical_and_end); \
-    ret; \
+    LOAD(ret); \
 })
 
 #define SHIFT_RIGHT(v1, v2) ir_shr(jd->func, (v1), (v2))
@@ -317,9 +315,9 @@ static void _do_assert(int expr, const char *expr_str) {
     PyObject *callable = (_callable); \
     ir_value resultval = (_resultval); \
     const char *where = (_where); \
-    ir_value ret = ir_value_new(jd->func, ir_type_pyobject_ptr); \
+    ir_value ret = ALLOCA(ir_type_pyobject_ptr); \
     ir_value err_occurred = BOOL(IR_PyErr_Occurred()); \
-    SET_VALUE(ret, resultval); \
+    STORE(ret, resultval); \
     IF_ELSE(NOTBOOL(resultval), IR_SOMETIMES, { \
         IF_NOT(err_occurred, IR_UNLIKELY, { \
             if (callable) { \
@@ -337,7 +335,7 @@ static void _do_assert(int expr, const char *expr_str) {
     }, /* else */ { \
         IF(err_occurred, IR_UNLIKELY, { \
             DECREF(resultval); \
-            SET_VALUE(ret, CONSTANT_PYOBJ(NULL)); \
+            STORE(ret, CONSTANT_PYOBJ(NULL)); \
             if (callable) { \
                 CALL_PyErr_FormatFromCause(PyExc_SystemError, \
                         "%R returned a result with an error set", \
@@ -352,7 +350,7 @@ static void _do_assert(int expr, const char *expr_str) {
             IF_PY_DEBUG(CALL_Py_FatalError("a function returned a result with an error set");) \
         }); \
     }); \
-    ret; \
+    LOAD(ret); \
 })
 
 #define IR_Py_EnterRecursiveCall(msg) ({ \
@@ -362,13 +360,13 @@ static void _do_assert(int expr, const char *expr_str) {
     JVALUE newdepth = ADD(curdepth, CONSTANT_INT(1)); \
     STORE_FIELD(tstate, PyThreadState, recursion_depth, ir_type_int, newdepth); \
     JVALUE recursion_limit = IR_LOAD_Py_CheckRecursionLimit(); \
-    JVALUE ret = JVALUE_CREATE(ir_type_int); \
-    SET_VALUE(ret, CONSTANT_INT(0)); \
+    JVALUE ret = ALLOCA(ir_type_int); \
+    STORE(ret, CONSTANT_INT(0)); \
     BRANCH_IF_NOT(CMP_GT(newdepth, recursion_limit), recursion_ok, IR_LIKELY); \
     JTYPE _sig = CREATE_SIGNATURE(ir_type_int, ir_type_char_ptr); \
-    SET_VALUE(ret, CALL_NATIVE(_sig, _Py_CheckRecursiveCall, CONSTANT_CHAR_PTR(msg))); \
+    STORE(ret, CALL_NATIVE(_sig, _Py_CheckRecursiveCall, CONSTANT_CHAR_PTR(msg))); \
     LABEL(recursion_ok); \
-    ret; \
+    LOAD(ret); \
 })
 
 /* Who designed this?!?! */

@@ -86,8 +86,6 @@ ir_value* ir_get_uses(ir_instr _instr, size_t *count) {
         break;
     }
     case ir_opcode_alloca: {
-        IR_INSTR_AS(alloca)
-        *u++ = instr->num_elements;
         break;
     }
     case ir_opcode_constant:
@@ -95,11 +93,6 @@ ir_value* ir_get_uses(ir_instr _instr, size_t *count) {
     case ir_opcode_cast: {
         IR_INSTR_AS(cast)
         *u++ = instr->value;
-        break;
-    }
-    case ir_opcode_set_value: {
-        IR_INSTR_AS(set_value)
-        *u++ = instr->src;
         break;
     }
     case ir_opcode_label_here: {
@@ -280,7 +273,6 @@ _ir_opcode_repr(ir_opcode opcode) {
 
     OPCODE_CASE(constant)
     OPCODE_CASE(cast)
-    OPCODE_CASE(set_value)
     OPCODE_CASE(label_here)
     OPCODE_CASE(info_here)
     OPCODE_CASE(branch)
@@ -440,8 +432,7 @@ ir_instr_repr(char *p, ir_instr _instr) {
         case ir_opcode_alloca: {
             IR_INSTR_AS(alloca)
             p = ir_type_repr(p, ir_pointer_base(ir_typeof(_instr->dest)));
-            p += sprintf(p, " ");
-            p = ir_value_repr(p, instr->num_elements);
+            p += sprintf(p, " %zu", instr->num_elements);
             break;
         }
         case ir_opcode_constant: {
@@ -456,11 +447,6 @@ ir_instr_repr(char *p, ir_instr _instr) {
             break;
         }
         case ir_opcode_cast: {
-            IR_INSTR_AS(cast)
-            p = ir_value_repr(p, instr->value);
-            break;
-        }
-        case ir_opcode_set_value: {
             IR_INSTR_AS(cast)
             p = ir_value_repr(p, instr->value);
             break;
