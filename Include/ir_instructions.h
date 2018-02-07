@@ -44,6 +44,9 @@ typedef enum {
     /* assign constant value */
     ir_opcode_constant, // new_value = $imm;
 
+    /* internal instruction to fetch function arguments */
+    ir_opcode_func_arg,
+
     /* cast to register of another type */
     ir_opcode_cast,     // new_value = (cast_type)val;
 
@@ -82,6 +85,38 @@ typedef enum {
 #define IR_INSTR_AS(kind) \
     ir_instr_##kind instr = (ir_instr_##kind) _instr;
 
+#define IR_SET_USE(use, val) _ir_set_use(&(use), (val))
+
+static inline void
+_ir_set_use(ir_use use, ir_value value) {
+    use->value = value;
+    use->prev = NULL;
+    if (value) {
+      use->next = value->use_list;
+      if (use->next) {
+           use->next->prev = use;
+      }
+      value->use_list = use;
+    } else {
+      use->next = NULL;
+    }
+}
+
+static inline void
+_ir_clear_use(ir_use use) {
+    if (use->prev) {
+        use->prev->next = use->next;
+    } else {
+        use->value->use_list = use->next;
+    }
+    if (use->next) {
+        use->next->prev = use->prev;
+    }
+    use->prev = NULL;
+    use->next = NULL;
+    use->value = NULL;
+}
+
 static inline
 int ir_instr_opcode_is_control_flow(ir_opcode opcode) {
     return (opcode >= ir_opcode_branch &&
@@ -104,12 +139,21 @@ int ir_opcode_is_python_specific(ir_opcode opcode) {
 
 IR_PROTOTYPE(ir_instr)
 struct ir_instr_t {
+    ir_value_t dest; /* This has type ir_type_void to indicate no value. */
     ir_instr prev;
     ir_instr next;
     ir_opcode opcode;
-    ir_value dest; /* This is NULL to indicate no destination value. The dest
-                      type is considered ir_type_void in this case. */
 };
+
+/* Get the instruction which defines an ir_value */
+#define IR_VALUE_DEF(val)           ((ir_instr)(val))
+
+/* Get the ir_value which is defined by an instruction.
+   If the instruction's return type is ir_type_void, this will
+   not be a real value, but a placeholder with type ir_type_void
+   and index IR_INVALID_INDEX.
+ */
+#define IR_INSTR_DEST(_instr)       (&(_instr)->dest)
 
 /* Get the values that are used as operands by '_instr'.
    This does not include the instruction's return (dest) value.
@@ -117,7 +161,7 @@ struct ir_instr_t {
    length *count. The reference is invalidated when either
    ir_get_uses() is called again, or the IR is modified.
  */
-ir_value* ir_get_uses(ir_instr _instr, size_t *count);
+ir_use ir_get_uses(ir_instr _instr, size_t *count);
 
 /* Get all outgoing labels for a block.
    This returns a borrowed reference which is only valid until
@@ -136,29 +180,46 @@ void ir_cursor_insert(ir_func func, ir_instr _instr);
 #define IR_INSTR_ALLOC(_type, _extra_size) \
     _type instr = (_type) _ir_alloc(func->context, sizeof(_type ## _t) + (_extra_size), _alignof(_type##_t));
 
-#define IR_INSTR_INSERT(_opcode, _ret_type) \
-    _ir_instr_insert_helper(func, (ir_instr)instr, (_opcode), ir_value_new(func, (_ret_type)))
+#define IR_INSTR_INSERT(_opcode, _dest_type) \
+    _ir_instr_insert_helper(func, (ir_instr)instr, (_opcode), (_dest_type))
 
 /* Append an instruction to the current block of the current function (internal use only) */
 static inline
-ir_value _ir_instr_insert_helper(ir_func func, ir_instr instr, ir_opcode opcode, ir_value dest) {
+ir_value _ir_instr_insert_helper(ir_func func, ir_instr instr, ir_opcode opcode, ir_type dest_type) {
     instr->opcode = opcode;
-    instr->dest = dest;
-    if (dest) {
-        assert(dest->def == NULL);
-        dest->def = instr;
-    }
+    ir_value dest = IR_INSTR_DEST(instr);
+    dest->type = dest_type;
+    dest->index = (dest_type == ir_type_void) ? IR_INVALID_INDEX : (func->next_value_index)++;
+    dest->use_list = NULL;
     ir_cursor_insert(func, instr);
     return dest;
 }
 
-/* Replace the destination value of the current instruction */
+/* Replace all uses of 'old_value' with 'new_value' */
 static inline
-void _ir_instr_replace_dest(ir_func func, ir_value old_dest, ir_value new_dest) {
-    ir_block b = func->current_block;
-    ir_instr instr = b->current_instr;
-    assert(instr->dest == old_dest);
-    instr->dest = new_dest;
+void ir_replace_all_uses(ir_func func, ir_value old_value, ir_value new_value) {
+    assert(ir_type_equal(ir_typeof(old_value), ir_typeof(new_value)));
+
+    /* Find the first and last uses of 'old_value', and then attach them to 'new_value' */
+    ir_use first = old_value->use_list;
+    ir_use last = NULL;
+    ir_use cur = first;
+    while (cur != NULL) {
+        assert(cur->value == old_value);
+        cur->value = new_value;
+        last = cur;
+        cur = cur->next;
+    }
+    if (first) {
+        assert(first->prev == NULL);
+        assert(last->next == NULL);
+        last->next = new_value->use_list;
+        if (last->next) {
+            last->next->prev = last;
+        }
+        new_value->use_list = first;
+        old_value->use_list = NULL;
+    }
 }
 
 /* Forward declaration */
@@ -180,7 +241,7 @@ ir_value ir_promote(ir_func func, ir_value value) {
 IR_PROTOTYPE(ir_instr_unop)
 struct ir_instr_unop_t {
     IR_INSTR_HEADER
-    ir_value value;
+    ir_use_t value;
 };
 
 static inline
@@ -192,7 +253,7 @@ int ir_opcode_is_unop(ir_opcode opcode) {
 static inline
 ir_value _ir_insert_unop(ir_func func, ir_opcode opcode, ir_value value) {
     IR_INSTR_ALLOC(ir_instr_unop, 0)
-    instr->value = value;
+    IR_SET_USE(instr->value, value);
     return IR_INSTR_INSERT(opcode, ir_typeof(value));
 }
 
@@ -210,8 +271,8 @@ UNOP_METHOD(ir_not, ir_opcode_not)
 IR_PROTOTYPE(ir_instr_binop)
 struct ir_instr_binop_t {
     IR_INSTR_HEADER
-    ir_value left;
-    ir_value right;
+    ir_use_t left;
+    ir_use_t right;
 };
 
 static inline
@@ -227,8 +288,8 @@ ir_value _ir_insert_binop(ir_func func, ir_opcode opcode, ir_value left, ir_valu
     left = ir_promote(func, left);
     right = ir_promote(func, right);
     assert(ir_type_equal(ir_typeof(left), ir_typeof(right)));
-    instr->left = left;
-    instr->right = right;
+    IR_SET_USE(instr->left, left);
+    IR_SET_USE(instr->right, right);
     return IR_INSTR_INSERT(opcode, ir_typeof(left));
 }
 
@@ -254,7 +315,7 @@ BINOP_METHOD(ir_shr, ir_opcode_shr);
 IR_PROTOTYPE(ir_instr_boolean)
 struct ir_instr_boolean_t {
     IR_INSTR_HEADER
-    ir_value value;
+    ir_use_t value;
 };
 
 static inline
@@ -262,7 +323,7 @@ ir_value ir_notbool(ir_func func, ir_value value) {
     IR_INSTR_ALLOC(ir_instr_boolean, 0)
     assert(ir_type_is_integral(ir_typeof(value)) ||
            ir_type_is_pointer(ir_typeof(value)));
-    instr->value = value;
+    IR_SET_USE(instr->value, value);
     return IR_INSTR_INSERT(ir_opcode_notbool, ir_type_int);
 }
 
@@ -271,7 +332,7 @@ ir_value ir_bool(ir_func func, ir_value value) {
     IR_INSTR_ALLOC(ir_instr_boolean, 0)
     assert(ir_type_is_integral(ir_typeof(value)) ||
            ir_type_is_pointer(ir_typeof(value)));
-    instr->value = value;
+    IR_SET_USE(instr->value, value);
     return IR_INSTR_INSERT(ir_opcode_bool, ir_type_int);
 }
 
@@ -281,8 +342,8 @@ ir_value ir_bool(ir_func func, ir_value value) {
 IR_PROTOTYPE(ir_instr_comparison)
 struct ir_instr_comparison_t {
     IR_INSTR_HEADER
-    ir_value left;
-    ir_value right;
+    ir_use_t left;
+    ir_use_t right;
 };
 
 static inline
@@ -296,8 +357,8 @@ static inline
 ir_value _ir_insert_comparison(ir_func func, ir_opcode opcode, ir_value left, ir_value right) {
     IR_INSTR_ALLOC(ir_instr_comparison, 0)
     assert(ir_type_equal(ir_typeof(left), ir_typeof(right)));
-    instr->left = left;
-    instr->right = right;
+    IR_SET_USE(instr->left, left);
+    IR_SET_USE(instr->right, right);
     return IR_INSTR_INSERT(opcode, ir_type_int);
 }
 
@@ -319,18 +380,18 @@ COMPARISON_METHOD(ir_ge, ir_opcode_ge)
 IR_PROTOTYPE(ir_instr_ternary)
 struct ir_instr_ternary_t {
     IR_INSTR_HEADER
-    ir_value cond;
-    ir_value if_true;
-    ir_value if_false;
+    ir_use_t cond;
+    ir_use_t if_true;
+    ir_use_t if_false;
 };
 
 static inline
 ir_value ir_ternary(ir_func func, ir_value cond, ir_value if_true, ir_value if_false) {
     IR_INSTR_ALLOC(ir_instr_ternary, 0)
     assert(ir_type_equal(ir_typeof(if_true), ir_typeof(if_false)));
-    instr->cond = cond;
-    instr->if_true = if_true;
-    instr->if_false = if_false;
+    IR_SET_USE(instr->cond, cond);
+    IR_SET_USE(instr->if_true, if_true);
+    IR_SET_USE(instr->if_false, if_false);
     return IR_INSTR_INSERT(ir_opcode_ternary, ir_typeof(if_true));
 }
 
@@ -341,25 +402,25 @@ struct ir_instr_call_t {
     IR_INSTR_HEADER
     int arg_count;
     /* Don't change the layout below without also updating ir_get_uses */
-    ir_value target;
-    ir_value arg[1];
+    ir_use_t target;
+    ir_use_t arg[1];
 };
 
 /* target must be a value of function type */
 static inline
 ir_value ir_call(ir_func func, ir_value target, size_t arg_count, ir_value *args) {
     size_t i;
-    IR_INSTR_ALLOC(ir_instr_call, arg_count * sizeof(ir_value))
+    IR_INSTR_ALLOC(ir_instr_call, arg_count * sizeof(ir_use_t))
     ir_type sig = ir_typeof(target);
     ir_type ret_type = sig->param[0];
     assert(sig->kind == ir_type_kind_function);
     assert(sig->param_count == 1 + arg_count);
-    instr->target = target;
+    IR_SET_USE(instr->target, target);
     instr->arg_count = arg_count;
     /* Check that the arguments match the signature */
     for (i = 0; i < arg_count; i++) {
         assert(ir_type_equal(sig->param[i+1], ir_typeof(args[i])));
-        instr->arg[i] = args[i];
+        IR_SET_USE(instr->arg[i], args[i]);
     }
     return IR_INSTR_INSERT(ir_opcode_call, ret_type);
 }
@@ -379,26 +440,26 @@ struct ir_instr_patchpoint_t {
     size_t arg_count; /* Total length of arg array */
 
     /* Don't change the layout below without also updating ir_get_uses */
-    ir_value target;  /* Function to call */
-    ir_value arg[1];
+    ir_use_t target;  /* Function to call */
+    ir_use_t arg[1];
 };
 
 /* Generate a patchpoint at this point in the code. */
 static inline
 ir_value ir_patchpoint(ir_func func, void *user_data, ir_value target,
                        size_t real_arg_count, size_t arg_count, ir_value *args) {
-    IR_INSTR_ALLOC(ir_instr_patchpoint, arg_count * sizeof(ir_value));
+    IR_INSTR_ALLOC(ir_instr_patchpoint, arg_count * sizeof(ir_use_t));
     ir_type sig = ir_typeof(target);
     ir_type ret_type = sig->param[0];
     assert(sig->kind == ir_type_kind_function);
     assert(sig->param_count == 1 + real_arg_count);
     instr->user_data = user_data;
-    instr->target = target;
+    IR_SET_USE(instr->target, target);
     instr->real_arg_count = real_arg_count;
     instr->arg_count = arg_count;
     assert(real_arg_count <= arg_count);
     for (size_t i = 0; i < arg_count; i++) {
-        instr->arg[i] = args[i];
+        IR_SET_USE(instr->arg[i], args[i]);
     }
     return IR_INSTR_INSERT(ir_opcode_patchpoint, ret_type);
 }
@@ -408,7 +469,7 @@ ir_value ir_patchpoint(ir_func func, void *user_data, ir_value target,
 IR_PROTOTYPE(ir_instr_get_element_ptr)
 struct ir_instr_get_element_ptr_t {
     IR_INSTR_HEADER
-    ir_value ptr;
+    ir_use_t ptr;
     size_t offset;
     const char *member_name;
 };
@@ -418,7 +479,7 @@ ir_value ir_get_element_ptr(ir_func func, ir_value ptr, size_t offset,
                             ir_type member_type, const char *member_name) {
     IR_INSTR_ALLOC(ir_instr_get_element_ptr, 0)
     assert(ir_typeof(ptr)->kind == ir_type_kind_pointer);
-    instr->ptr = ptr;
+    IR_SET_USE(instr->ptr, ptr);
     instr->offset = offset;
     instr->member_name = _ir_strdup(func->context, member_name);
     return IR_INSTR_INSERT(ir_opcode_get_element_ptr,
@@ -430,8 +491,8 @@ ir_value ir_get_element_ptr(ir_func func, ir_value ptr, size_t offset,
 IR_PROTOTYPE(ir_instr_get_index_ptr)
 struct ir_instr_get_index_ptr_t {
     IR_INSTR_HEADER
-    ir_value ptr;
-    ir_value index;
+    ir_use_t ptr;
+    ir_use_t index;
 };
 
 /* index is allowed to be any integral type */
@@ -441,8 +502,8 @@ ir_value ir_get_index_ptr(ir_func func, ir_value ptr, ir_value index) {
     ir_type ptr_type = ir_typeof(ptr);
     assert(ptr_type->kind == ir_type_kind_pointer);
     assert(ir_type_is_integral(ir_typeof(index)));
-    instr->ptr = ptr;
-    instr->index = index;
+    IR_SET_USE(instr->ptr, ptr);
+    IR_SET_USE(instr->index, index);
     return IR_INSTR_INSERT(ir_opcode_get_index_ptr, ptr_type);
 };
 
@@ -451,7 +512,7 @@ ir_value ir_get_index_ptr(ir_func func, ir_value ptr, ir_value index) {
 IR_PROTOTYPE(ir_instr_load)
 struct ir_instr_load_t {
     IR_INSTR_HEADER
-    ir_value ptr;
+    ir_use_t ptr;
 };
 
 static inline
@@ -459,7 +520,7 @@ ir_value ir_load(ir_func func, ir_value ptr) {
     IR_INSTR_ALLOC(ir_instr_load, 0)
     ir_type ptr_type = ir_typeof(ptr);
     ir_type base_type = ir_pointer_base(ptr_type);
-    instr->ptr = ptr;
+    IR_SET_USE(instr->ptr, ptr);
     return IR_INSTR_INSERT(ir_opcode_load, base_type);
 }
 
@@ -485,8 +546,8 @@ ir_value _ir_load_field(ir_func func, ir_value ptr, size_t offset, ir_type membe
 IR_PROTOTYPE(ir_instr_store)
 struct ir_instr_store_t {
     IR_INSTR_HEADER
-    ir_value ptr;
-    ir_value value;
+    ir_use_t ptr;
+    ir_use_t value;
 };
 
 static inline
@@ -497,8 +558,8 @@ void ir_store(ir_func func, ir_value ptr, ir_value value) {
     assert(ir_type_equal(ir_typeof(value), base_type));
     assert(value != NULL);
 #endif
-    instr->ptr = ptr;
-    instr->value = value;
+    IR_SET_USE(instr->ptr, ptr);
+    IR_SET_USE(instr->value, value);
     IR_INSTR_INSERT(ir_opcode_store, ir_type_void);
 }
 
@@ -587,17 +648,34 @@ ir_value ir_constant_from_ptr(ir_func func, ir_type type, void *value, const cha
 
 /*****************************************************************************/
 
+IR_PROTOTYPE(ir_instr_func_arg)
+struct ir_instr_func_arg_t {
+    IR_INSTR_HEADER
+    size_t index;
+};
+
+static inline
+ir_value _ir_func_arg(ir_func func, size_t index, ir_type type) {
+    IR_INSTR_ALLOC(ir_instr_func_arg, 0)
+    assert(index < func->sig->param_count);
+    assert(ir_type_equal(func->sig->param[index], type));
+    instr->index = index;
+    return IR_INSTR_INSERT(ir_opcode_func_arg, type);
+}
+
+/*****************************************************************************/
+
 /* C-style cast from one type to another, without safety check. */
 IR_PROTOTYPE(ir_instr_cast)
 struct ir_instr_cast_t {
     IR_INSTR_HEADER
-    ir_value value;
+    ir_use_t value;
 };
 
 static inline
 ir_value ir_cast(ir_func func, ir_type type, ir_value value) {
     IR_INSTR_ALLOC(ir_instr_cast, 0)
-    instr->value = value;
+    IR_SET_USE(instr->value, value);
     return IR_INSTR_INSERT(ir_opcode_cast, type);
 }
 
@@ -653,7 +731,7 @@ void ir_label_here(ir_func func, ir_label label) {
 IR_PROTOTYPE(ir_instr_branch_cond)
 struct ir_instr_branch_cond_t {
     IR_INSTR_HEADER
-    ir_value cond;
+    ir_use_t cond;
     int if_true_weight;
     int if_false_weight;
 
@@ -666,7 +744,7 @@ static inline
 void ir_branch_cond(ir_func func, ir_value cond, ir_label if_true, ir_label if_false,
                     int if_true_weight, int if_false_weight) {
     IR_INSTR_ALLOC(ir_instr_branch_cond, 0)
-    instr->cond = cond;
+    IR_SET_USE(instr->cond, cond);
     instr->if_true_weight = if_true_weight;
     instr->if_false_weight = if_false_weight;
     instr->if_true = if_true;
@@ -710,7 +788,7 @@ void ir_branch_if_not(ir_func func, ir_value cond, ir_label if_not, int likelyho
 IR_PROTOTYPE(ir_instr_jumptable)
 struct ir_instr_jumptable_t {
     IR_INSTR_HEADER
-    ir_value index;
+    ir_use_t index;
 
     /* Changes to the labels require updating ir_list_outgoing_labels() */
     size_t table_size;
@@ -720,7 +798,7 @@ struct ir_instr_jumptable_t {
 static inline
 void ir_jumptable(ir_func func, ir_value index, ir_label *table, size_t table_size) {
     IR_INSTR_ALLOC(ir_instr_jumptable, sizeof(ir_label) * table_size)
-    instr->index = index;
+    IR_SET_USE(instr->index, index);
     instr->table_size = table_size;
     memcpy(&instr->table[0], table, table_size * sizeof(ir_label));
     IR_INSTR_INSERT(ir_opcode_jumptable, ir_type_void);
@@ -731,14 +809,14 @@ void ir_jumptable(ir_func func, ir_value index, ir_label *table, size_t table_si
 IR_PROTOTYPE(ir_instr_ret)
 struct ir_instr_ret_t {
     IR_INSTR_HEADER
-    ir_value value; /* may be NULL to indicate void return */
+    ir_use_t value; /* may be NULL to indicate void return */
 };
 
 static inline
 void ir_ret(ir_func func, ir_value value) {
     IR_INSTR_ALLOC(ir_instr_ret, 0)
     assert(ir_type_equal(ir_typeof(value), func->sig->param[0]));
-    instr->value = value;
+    IR_SET_USE(instr->value, value);
     IR_INSTR_INSERT(ir_opcode_ret, ir_type_void);
 }
 
@@ -763,14 +841,14 @@ IR_PROTOTYPE(ir_instr_setlocal)
 struct ir_instr_setlocal_t {
     IR_INSTR_HEADER
     size_t index;
-    ir_value value;
+    ir_use_t value;
 };
 
 static inline
 void ir_setlocal(ir_func func, size_t index, ir_value value) {
     IR_INSTR_ALLOC(ir_instr_setlocal, 0)
     instr->index = index;
-    instr->value = value;
+    IR_SET_USE(instr->value, value);
     IR_INSTR_INSERT(ir_opcode_setlocal, ir_type_void);
 }
 
@@ -779,7 +857,7 @@ void ir_setlocal(ir_func func, size_t index, ir_value value) {
 IR_PROTOTYPE(ir_instr_incref)
 struct ir_instr_incref_t {
     IR_INSTR_HEADER
-    ir_value obj;
+    ir_use_t obj;
     int is_xincref;
 };
 
@@ -787,7 +865,7 @@ static inline
 void ir_incref(ir_func func, ir_value obj, int is_xincref) {
     IR_INSTR_ALLOC(ir_instr_incref, 0)
     instr->is_xincref = is_xincref;
-    instr->obj = obj;
+    IR_SET_USE(instr->obj, obj);
     IR_INSTR_INSERT(ir_opcode_incref, ir_type_void);
 }
 
@@ -796,7 +874,7 @@ void ir_incref(ir_func func, ir_value obj, int is_xincref) {
 IR_PROTOTYPE(ir_instr_decref)
 struct ir_instr_decref_t {
     IR_INSTR_HEADER
-    ir_value obj;
+    ir_use_t obj;
     int is_xdecref;
 };
 
@@ -804,7 +882,7 @@ static inline
 void ir_decref(ir_func func, ir_value obj, int is_xdecref) {
     IR_INSTR_ALLOC(ir_instr_decref, 0)
     instr->is_xdecref = is_xdecref;
-    instr->obj = obj;
+    IR_SET_USE(instr->obj, obj);
     IR_INSTR_INSERT(ir_opcode_decref, ir_type_void);
 }
 
@@ -846,7 +924,7 @@ IR_PROTOTYPE(ir_instr_stack_put)
 struct ir_instr_stack_put_t {
     IR_INSTR_HEADER
     int offset;
-    ir_value value;
+    ir_use_t value;
     int abs_offset; /* computed */
 };
 
@@ -854,7 +932,7 @@ static inline
 ir_value ir_stack_put(ir_func func, int offset, ir_value value) {
     IR_INSTR_ALLOC(ir_instr_stack_put, 0)
     instr->offset = offset;
-    instr->value = value;
+    IR_SET_USE(instr->value, value);
     instr->abs_offset = -1;
     assert(ir_pointer_base(ir_typeof(value)) == ir_type_pyobject);
     return IR_INSTR_INSERT(ir_opcode_stack_put, ir_type_void);
@@ -951,7 +1029,7 @@ void ir_pop_block(ir_func func, ir_pyblock_type b_type) {
 IR_PROTOTYPE(ir_instr_goto_error)
 struct ir_instr_goto_error_t {
     IR_INSTR_HEADER
-    ir_value cond;
+    ir_use_t cond;
 
     /* Changes to the labels require updating ir_list_outgoing_labels() */
     ir_label fallthrough;
@@ -964,7 +1042,7 @@ struct ir_instr_goto_error_t {
 static inline
 void ir_goto_error(ir_func func, ir_value cond, ir_label fallthrough, ir_label error_exit) {
     IR_INSTR_ALLOC(ir_instr_goto_error, 0)
-    instr->cond = cond;
+    IR_SET_USE(instr->cond, cond);
     instr->fallthrough = fallthrough;
     instr->error_exit = error_exit;
     instr->pb = func->current_pyblock;
@@ -1025,7 +1103,7 @@ void ir_goto_fbe(ir_func func, ir_why why, ir_label continue_target, ir_label ex
 IR_PROTOTYPE(ir_instr_yield)
 struct ir_instr_yield_t {
     IR_INSTR_HEADER
-    ir_value value;
+    ir_use_t value;
     int resume_instr_index;
 
     /* Changes to the labels require updating ir_list_outgoing_labels() */
@@ -1048,7 +1126,7 @@ void ir_yield(
         ir_label exit) {
     IR_INSTR_ALLOC(ir_instr_yield, 0)
     assert(ir_type_equal(ir_typeof(value), ir_type_pyobject_ptr));
-    instr->value = value;
+    IR_SET_USE(instr->value, value);
     instr->resume_instr_index = resume_instr_index;
     instr->resume_inst_label = resume_inst_label;
     instr->throw_inst_label = throw_inst_label;
@@ -1148,6 +1226,20 @@ void _ir_func_new_block(ir_func func) {
         block->last_instr = to_instr;
     }
     func->current_block = block;
+}
+
+/* Remove an instruction from a block */
+static inline
+void _ir_remove_instr(ir_block b, ir_instr _instr) {
+    IR_LL_REMOVE(b->first_instr, b->last_instr, _instr);
+    _instr->prev = _instr->next = NULL;
+
+    /* Remove uses caused by this instruction */
+    size_t uses_count;
+    ir_use uses = ir_get_uses(_instr, &uses_count);
+    for (size_t i = 0; i < uses_count; i++) {
+        _ir_clear_use(&uses[i]);
+    }
 }
 
 /* Open the cursor, and position it immediately after "_instr" in block "b" */
@@ -1252,8 +1344,11 @@ void ir_cursor_remove_next(ir_func func) {
     ir_block b = func->current_block;
     ir_instr _instr = b->current_instr->next;
     assert(_instr);
-    IR_LL_REMOVE(b->first_instr, b->last_instr, _instr);
-    _instr->prev = _instr->next = NULL;
+
+    /* Nothing should be using this instruction's value */
+    assert(IR_INSTR_DEST(_instr)->use_list == NULL);
+
+    _ir_remove_instr(b, _instr);
 }
 
 static inline void ir_cursor_close(ir_func func) {

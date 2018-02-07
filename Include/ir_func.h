@@ -1,5 +1,6 @@
 IR_PROTOTYPE(ir_instr)
 IR_PROTOTYPE(ir_value)
+IR_PROTOTYPE(ir_use)
 IR_PROTOTYPE(ir_block)
 IR_PROTOTYPE(ir_label)
 IR_PROTOTYPE(ir_func)
@@ -8,12 +9,21 @@ IR_PROTOTYPE(ir_pyblock)
 /* Marks an uninitialized pyblock value */
 #define INVALID_PYBLOCK   ((ir_pyblock)(~((uintptr_t)0)))
 
+#define IR_INVALID_INDEX   (~((size_t)0))
+
 struct ir_value_t {
     ir_type type;
-    ir_instr def;    /* Set when a value is created by an instruction */
-    ir_imm rtv;      /* Runtime value. Only used during interpretation */
-    size_t index;   /* Used when register numbering */
+    size_t index;    /* Register number assignment */
+    ir_use use_list; /* Uses of this value (linked list) */
 };
+
+struct ir_use_t {
+    ir_value value;
+    ir_use prev;
+    ir_use next;
+};
+
+#define IR_USE_VALUE(use)   ((use).value)
 
 struct ir_block_t {
     ir_block prev;
@@ -55,9 +65,8 @@ struct ir_func_t {
     /* Value numbering */
     size_t next_value_index;
 
-    /* These match the signature. param[0] is not used. */
-    size_t param_count;
-    ir_value param[1];
+    /* These match the signature parameters. arg[0] is NULL. */
+    ir_value arg[1];
 };
 
 /* Start a new function in this context. 'sig' must be a function pointer type. */
@@ -66,8 +75,8 @@ ir_func ir_func_new(ir_context context, const char *name, ir_type sig);
 /* Get the value corresponding to the i'th argument to this function */
 static inline
 ir_value ir_func_get_argument(ir_func func, size_t i) {
-    assert(i + 1 < func->param_count);
-    return func->param[i + 1];
+    assert(i + 1 < func->sig->param_count);
+    return func->arg[i + 1];
 }
 
 #define IR_FUNC_ALLOC(_varname, _type, _extra) \
@@ -76,18 +85,6 @@ ir_value ir_func_get_argument(ir_func func, size_t i) {
 static inline
 ir_type ir_typeof(ir_value v) {
     return v->type;
-}
-
-static inline
-ir_value ir_value_new(ir_func func, ir_type type) {
-    if (type->kind == ir_type_kind_void) {
-        return NULL;
-    }
-    IR_FUNC_ALLOC(v, ir_value, 0)
-    v->type = type;
-    v->def = NULL;
-    v->index = (func->next_value_index)++;
-    return v;
 }
 
 static inline
@@ -178,5 +175,8 @@ char *ir_func_dump(ir_func func);
 
 /* Print representation of value to buffer */
 char *ir_value_repr(char *p, ir_value value);
+
+/* Print representation of use (value) to buffer */
+#define ir_use_repr(p, use)   ir_value_repr(p, IR_USE_VALUE((use)))
 
 void ir_func_dump_file(ir_func func, const char *filename);

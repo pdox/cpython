@@ -81,6 +81,10 @@ void ir_remove_dead_blocks(ir_func func) {
     for (b = func->first_block; b != NULL; b = b_next) {
         b_next = b->next;
         if (!reachable[b->index]) {
+            /* Remove all the instructions. This fixes the use lists. */
+            while (b->last_instr != NULL) {
+                _ir_remove_instr(b, b->last_instr);
+            }
             IR_LL_REMOVE(func->first_block, func->last_block, b);
         }
     }

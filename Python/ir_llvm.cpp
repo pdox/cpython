@@ -137,10 +137,13 @@ _ir_type_to_llvm_type(_TranslationContext &ctx, ir_type type) {
     ret; \
 })
 
+#define LLVM_VALUE_FROM_USE(use) LLVM_VALUE(IR_USE_VALUE((use)))
+
 /* Given an llvm::Value*, use it as the 'dest' value for the current instruction */
 #define SET_DEST(__v) do { \
     llvm::Value *_v = (__v); \
-    ir_value dest = _instr->dest; \
+    ir_value dest = IR_INSTR_DEST(_instr); \
+    assert(dest->type != ir_type_void); \
     if (ctx.llvm_modes[dest->index] == 1) { \
         assert(ctx.llvm_values[dest->index] == NULL); \
         ctx.llvm_values[dest->index] = _v; \
@@ -155,110 +158,122 @@ void _emit_instr(_TranslationContext &ctx, ir_block b, ir_instr _instr) {
     switch (_instr->opcode) {
     case ir_opcode_neg: {
         IR_INSTR_AS(unop)
-        SET_DEST(BUILDER().CreateNeg(LLVM_VALUE(instr->value)));
+        SET_DEST(BUILDER().CreateNeg(LLVM_VALUE_FROM_USE(instr->value)));
         break;
     }
     case ir_opcode_not: {
         IR_INSTR_AS(unop)
-        SET_DEST(BUILDER().CreateNot(LLVM_VALUE(instr->value)));
+        SET_DEST(BUILDER().CreateNot(LLVM_VALUE_FROM_USE(instr->value)));
         break;
     }
     case ir_opcode_add: { \
         IR_INSTR_AS(binop) \
-        SET_DEST(BUILDER().CreateAdd(LLVM_VALUE(instr->left), LLVM_VALUE(instr->right))); \
+        SET_DEST(BUILDER().CreateAdd(LLVM_VALUE_FROM_USE(instr->left), LLVM_VALUE_FROM_USE(instr->right))); \
         break; \
     }
     case ir_opcode_sub: {
         IR_INSTR_AS(binop)
-        SET_DEST(BUILDER().CreateSub(LLVM_VALUE(instr->left), LLVM_VALUE(instr->right)));
+        SET_DEST(BUILDER().CreateSub(LLVM_VALUE_FROM_USE(instr->left), LLVM_VALUE_FROM_USE(instr->right)));
         break;
     }
     case ir_opcode_mul: {
         IR_INSTR_AS(binop)
-        SET_DEST(BUILDER().CreateMul(LLVM_VALUE(instr->left), LLVM_VALUE(instr->right)));
+        SET_DEST(BUILDER().CreateMul(LLVM_VALUE_FROM_USE(instr->left), LLVM_VALUE_FROM_USE(instr->right)));
         break;
     }
     case ir_opcode_div: {
         IR_INSTR_AS(binop)
-        if (ir_type_is_signed(ir_typeof(instr->left))) {
-            SET_DEST(BUILDER().CreateSDiv(LLVM_VALUE(instr->left), LLVM_VALUE(instr->right)));
+        ir_value left = IR_USE_VALUE(instr->left);
+        ir_value right = IR_USE_VALUE(instr->right);
+        if (ir_type_is_signed(ir_typeof(left))) {
+            SET_DEST(BUILDER().CreateSDiv(LLVM_VALUE(left), LLVM_VALUE(right)));
         } else {
-            SET_DEST(BUILDER().CreateUDiv(LLVM_VALUE(instr->left), LLVM_VALUE(instr->right)));
+            SET_DEST(BUILDER().CreateUDiv(LLVM_VALUE(left), LLVM_VALUE(right)));
         }
         break;
     }
     case ir_opcode_rem: {
         IR_INSTR_AS(binop)
-        if (ir_type_is_signed(ir_typeof(instr->left))) {
-            SET_DEST(BUILDER().CreateSRem(LLVM_VALUE(instr->left), LLVM_VALUE(instr->right)));
+        ir_value left = IR_USE_VALUE(instr->left);
+        ir_value right = IR_USE_VALUE(instr->right);
+        if (ir_type_is_signed(ir_typeof(left))) {
+            SET_DEST(BUILDER().CreateSRem(LLVM_VALUE(left), LLVM_VALUE(right)));
         } else {
-            SET_DEST(BUILDER().CreateURem(LLVM_VALUE(instr->left), LLVM_VALUE(instr->right)));
+            SET_DEST(BUILDER().CreateURem(LLVM_VALUE(left), LLVM_VALUE(right)));
         }
         break;
     }
     case ir_opcode_and: {
         IR_INSTR_AS(binop)
-        SET_DEST(BUILDER().CreateAnd(LLVM_VALUE(instr->left), LLVM_VALUE(instr->right)));
+        SET_DEST(BUILDER().CreateAnd(LLVM_VALUE_FROM_USE(instr->left), LLVM_VALUE_FROM_USE(instr->right)));
         break;
     }
     case ir_opcode_or: {
         IR_INSTR_AS(binop)
-        SET_DEST(BUILDER().CreateOr(LLVM_VALUE(instr->left), LLVM_VALUE(instr->right)));
+        SET_DEST(BUILDER().CreateOr(LLVM_VALUE_FROM_USE(instr->left), LLVM_VALUE_FROM_USE(instr->right)));
         break;
     }
     case ir_opcode_xor: {
         IR_INSTR_AS(binop)
-        SET_DEST(BUILDER().CreateXor(LLVM_VALUE(instr->left), LLVM_VALUE(instr->right)));
+        SET_DEST(BUILDER().CreateXor(LLVM_VALUE_FROM_USE(instr->left), LLVM_VALUE_FROM_USE(instr->right)));
         break;
     }
     case ir_opcode_shl: {
         IR_INSTR_AS(binop)
-        SET_DEST(BUILDER().CreateShl(LLVM_VALUE(instr->left), LLVM_VALUE(instr->right)));
+        SET_DEST(BUILDER().CreateShl(LLVM_VALUE_FROM_USE(instr->left), LLVM_VALUE_FROM_USE(instr->right)));
         break;
     }
     case ir_opcode_shr: {
         IR_INSTR_AS(binop)
-        if (ir_type_is_signed(ir_typeof(instr->left))) {
-            SET_DEST(BUILDER().CreateAShr(LLVM_VALUE(instr->left), LLVM_VALUE(instr->right)));
+        ir_value left = IR_USE_VALUE(instr->left);
+        ir_value right = IR_USE_VALUE(instr->right);
+        if (ir_type_is_signed(ir_typeof(left))) {
+            SET_DEST(BUILDER().CreateAShr(LLVM_VALUE(left), LLVM_VALUE(right)));
         } else {
-            SET_DEST(BUILDER().CreateLShr(LLVM_VALUE(instr->left), LLVM_VALUE(instr->right)));
+            SET_DEST(BUILDER().CreateLShr(LLVM_VALUE(left), LLVM_VALUE(right)));
         }
         break;
     }
     case ir_opcode_notbool: {
         IR_INSTR_AS(boolean)
+        ir_value value = IR_USE_VALUE(instr->value);
         llvm::Value *v = BUILDER().CreateICmpEQ(
-            LLVM_VALUE(instr->value),
-            llvm::Constant::getNullValue(LLVM_TYPE(ir_typeof(instr->value))));
+            LLVM_VALUE(value),
+            llvm::Constant::getNullValue(LLVM_TYPE(ir_typeof(value))));
         SET_DEST(BUILDER().CreateZExt(v, LLVM_TYPE(ir_type_int)));
         break;
     }
     case ir_opcode_bool: {
         IR_INSTR_AS(boolean)
+        ir_value value = IR_USE_VALUE(instr->value);
         llvm::Value *v = BUILDER().CreateICmpNE(
-            LLVM_VALUE(instr->value),
-            llvm::Constant::getNullValue(LLVM_TYPE(ir_typeof(instr->value))));
+            LLVM_VALUE(value),
+            llvm::Constant::getNullValue(LLVM_TYPE(ir_typeof(value))));
         SET_DEST(BUILDER().CreateZExt(v, LLVM_TYPE(ir_type_int)));
         break;
     }
     case ir_opcode_lt: {
         IR_INSTR_AS(comparison)
+        ir_value left = IR_USE_VALUE(instr->left);
+        ir_value right = IR_USE_VALUE(instr->right);
         llvm::Value *v;
-        if (ir_type_is_signed(ir_typeof(instr->left))) {
-            v = BUILDER().CreateICmpSLT(LLVM_VALUE(instr->left), LLVM_VALUE(instr->right));
+        if (ir_type_is_signed(ir_typeof(left))) {
+            v = BUILDER().CreateICmpSLT(LLVM_VALUE(left), LLVM_VALUE(right));
         } else {
-            v = BUILDER().CreateICmpULT(LLVM_VALUE(instr->left), LLVM_VALUE(instr->right));
+            v = BUILDER().CreateICmpULT(LLVM_VALUE(left), LLVM_VALUE(right));
         }
         SET_DEST(BUILDER().CreateZExt(v, LLVM_TYPE(ir_type_int)));
         break;
     }
     case ir_opcode_gt: {
         IR_INSTR_AS(comparison)
+        ir_value left = IR_USE_VALUE(instr->left);
+        ir_value right = IR_USE_VALUE(instr->right);
         llvm::Value *v;
-        if (ir_type_is_signed(ir_typeof(instr->left))) {
-            v = BUILDER().CreateICmpSGT(LLVM_VALUE(instr->left), LLVM_VALUE(instr->right));
+        if (ir_type_is_signed(ir_typeof(left))) {
+            v = BUILDER().CreateICmpSGT(LLVM_VALUE(left), LLVM_VALUE(right));
         } else {
-            v = BUILDER().CreateICmpUGT(LLVM_VALUE(instr->left), LLVM_VALUE(instr->right));
+            v = BUILDER().CreateICmpUGT(LLVM_VALUE(left), LLVM_VALUE(right));
         }
         SET_DEST(BUILDER().CreateZExt(v, LLVM_TYPE(ir_type_int)));
         break;
@@ -266,35 +281,39 @@ void _emit_instr(_TranslationContext &ctx, ir_block b, ir_instr _instr) {
     case ir_opcode_eq: {
         IR_INSTR_AS(comparison)
         llvm::Value *v;
-        v = BUILDER().CreateICmpEQ(LLVM_VALUE(instr->left), LLVM_VALUE(instr->right));
+        v = BUILDER().CreateICmpEQ(LLVM_VALUE_FROM_USE(instr->left), LLVM_VALUE_FROM_USE(instr->right));
         SET_DEST(BUILDER().CreateZExt(v, LLVM_TYPE(ir_type_int)));
         break;
     }
     case ir_opcode_ne: {
         IR_INSTR_AS(comparison)
         llvm::Value *v;
-        v = BUILDER().CreateICmpNE(LLVM_VALUE(instr->left), LLVM_VALUE(instr->right));
+        v = BUILDER().CreateICmpNE(LLVM_VALUE_FROM_USE(instr->left), LLVM_VALUE_FROM_USE(instr->right));
         SET_DEST(BUILDER().CreateZExt(v, LLVM_TYPE(ir_type_int)));
         break;
     }
     case ir_opcode_le: {
         IR_INSTR_AS(comparison)
+        ir_value left = IR_USE_VALUE(instr->left);
+        ir_value right = IR_USE_VALUE(instr->right);
         llvm::Value *v;
-        if (ir_type_is_signed(ir_typeof(instr->left))) {
-            v = BUILDER().CreateICmpSLE(LLVM_VALUE(instr->left), LLVM_VALUE(instr->right));
+        if (ir_type_is_signed(ir_typeof(left))) {
+            v = BUILDER().CreateICmpSLE(LLVM_VALUE(left), LLVM_VALUE(right));
         } else {
-            v = BUILDER().CreateICmpULE(LLVM_VALUE(instr->left), LLVM_VALUE(instr->right));
+            v = BUILDER().CreateICmpULE(LLVM_VALUE(left), LLVM_VALUE(right));
         }
         SET_DEST(BUILDER().CreateZExt(v, LLVM_TYPE(ir_type_int)));
         break;
     }
     case ir_opcode_ge: {
         IR_INSTR_AS(comparison)
+        ir_value left = IR_USE_VALUE(instr->left);
+        ir_value right = IR_USE_VALUE(instr->right);
         llvm::Value *v;
-        if (ir_type_is_signed(ir_typeof(instr->left))) {
-            v = BUILDER().CreateICmpSGE(LLVM_VALUE(instr->left), LLVM_VALUE(instr->right));
+        if (ir_type_is_signed(ir_typeof(left))) {
+            v = BUILDER().CreateICmpSGE(LLVM_VALUE(left), LLVM_VALUE(right));
         } else {
-            v = BUILDER().CreateICmpUGE(LLVM_VALUE(instr->left), LLVM_VALUE(instr->right));
+            v = BUILDER().CreateICmpUGE(LLVM_VALUE(left), LLVM_VALUE(right));
         }
         SET_DEST(BUILDER().CreateZExt(v, LLVM_TYPE(ir_type_int)));
         break;
@@ -302,9 +321,9 @@ void _emit_instr(_TranslationContext &ctx, ir_block b, ir_instr _instr) {
     case ir_opcode_ternary: {
         IR_INSTR_AS(ternary)
         llvm::Value *cond = BUILDER().CreateICmpEQ(
-            LLVM_VALUE(instr->cond),
-            llvm::Constant::getNullValue(LLVM_TYPE(ir_typeof(instr->cond))));
-        SET_DEST(BUILDER().CreateSelect(cond, LLVM_VALUE(instr->if_false), LLVM_VALUE(instr->if_true)));
+            LLVM_VALUE_FROM_USE(instr->cond),
+            llvm::Constant::getNullValue(LLVM_TYPE(ir_typeof(IR_USE_VALUE(instr->cond)))));
+        SET_DEST(BUILDER().CreateSelect(cond, LLVM_VALUE_FROM_USE(instr->if_false), LLVM_VALUE_FROM_USE(instr->if_true)));
         break;
     }
     case ir_opcode_call: {
@@ -313,12 +332,12 @@ void _emit_instr(_TranslationContext &ctx, ir_block b, ir_instr _instr) {
         llvm::Value** args = (llvm::Value**)malloc(num_args * sizeof(llvm::Value*));
         size_t i;
         for (i = 0; i < num_args; i++) {
-            args[i] = LLVM_VALUE(instr->arg[i]);
+            args[i] = LLVM_VALUE_FROM_USE(instr->arg[i]);
         }
         llvm::Value *ret =
-            BUILDER().CreateCall(LLVM_VALUE(instr->target), llvm::ArrayRef<llvm::Value*>(args, num_args));
+            BUILDER().CreateCall(LLVM_VALUE_FROM_USE(instr->target), llvm::ArrayRef<llvm::Value*>(args, num_args));
         free(args);
-        if (_instr->dest != NULL) {
+        if (ir_typeof(IR_INSTR_DEST(_instr)) != ir_type_void) {
             SET_DEST(ret);
         }
         break;
@@ -337,11 +356,11 @@ void _emit_instr(_TranslationContext &ctx, ir_block b, ir_instr _instr) {
         llvm::Value** iargs = (llvm::Value**)malloc(niargs * sizeof(llvm::Value));
         iargs[0] = BUILDER().getInt64((uintptr_t)instr->user_data); /* stuff the user_data into the id */
         iargs[1] = BUILDER().getInt32(16); /* numBytes in shadow region */
-        iargs[2] = BUILDER().CreateBitCast(LLVM_VALUE(instr->target), BUILDER().getInt8PtrTy());
+        iargs[2] = BUILDER().CreateBitCast(LLVM_VALUE_FROM_USE(instr->target), BUILDER().getInt8PtrTy());
         iargs[3] = BUILDER().getInt32(instr->real_arg_count);
         size_t i;
         for (i = 0; i < instr->arg_count; i++) {
-            iargs[4 + i] = LLVM_VALUE(instr->arg[i]);
+            iargs[4 + i] = LLVM_VALUE_FROM_USE(instr->arg[i]);
         }
         assert(4 + i == niargs);
         llvm::Function *f = llvm::Intrinsic::getDeclaration(ctx.module, llvm::Intrinsic::experimental_patchpoint_void);
@@ -350,41 +369,43 @@ void _emit_instr(_TranslationContext &ctx, ir_block b, ir_instr _instr) {
     }
     case ir_opcode_get_element_ptr: {
         IR_INSTR_AS(get_element_ptr)
-        llvm::Value *casted_ptr = BUILDER().CreateBitCast(LLVM_VALUE(instr->ptr), BUILDER().getInt8PtrTy());
+        llvm::Value *casted_ptr = BUILDER().CreateBitCast(LLVM_VALUE_FROM_USE(instr->ptr), BUILDER().getInt8PtrTy());
         llvm::Value *offset_ptr = BUILDER().CreateGEP(casted_ptr, BUILDER().getInt64(instr->offset));
-        llvm::Value *new_ptr = BUILDER().CreateBitCast(offset_ptr, LLVM_TYPE(ir_typeof(_instr->dest)));
+        ir_type dest_type = ir_typeof(IR_INSTR_DEST(_instr));
+        llvm::Value *new_ptr = BUILDER().CreateBitCast(offset_ptr, LLVM_TYPE(dest_type));
         SET_DEST(new_ptr);
         break;
     }
     case ir_opcode_get_index_ptr: {
         IR_INSTR_AS(get_index_ptr)
-        ir_type base_type = ir_pointer_base(ir_typeof(instr->ptr));
+        ir_type base_type = ir_pointer_base(ir_typeof(IR_USE_VALUE(instr->ptr)));
+        ir_type dest_type = ir_typeof(IR_INSTR_DEST(_instr));
         if (base_type->kind == ir_type_kind_struct) {
-            llvm::Value *casted_ptr = BUILDER().CreateBitCast(LLVM_VALUE(instr->ptr), BUILDER().getInt8PtrTy());
+            llvm::Value *casted_ptr = BUILDER().CreateBitCast(LLVM_VALUE_FROM_USE(instr->ptr), BUILDER().getInt8PtrTy());
             llvm::Value *offset = BUILDER().CreateMul(
-                BUILDER().CreateZExt(LLVM_VALUE(instr->index), BUILDER().getInt64Ty()),
+                BUILDER().CreateZExt(LLVM_VALUE_FROM_USE(instr->index), BUILDER().getInt64Ty()),
                 BUILDER().getInt64(base_type->size));
             llvm::Value *offset_ptr = BUILDER().CreateGEP(casted_ptr, offset);
-            llvm::Value *new_ptr = BUILDER().CreateBitCast(offset_ptr, LLVM_TYPE(ir_typeof(_instr->dest)));
+            llvm::Value *new_ptr = BUILDER().CreateBitCast(offset_ptr, LLVM_TYPE(dest_type));
             SET_DEST(new_ptr);
         } else {
-            SET_DEST(BUILDER().CreateGEP(LLVM_VALUE(instr->ptr), LLVM_VALUE(instr->index)));
+            SET_DEST(BUILDER().CreateGEP(LLVM_VALUE_FROM_USE(instr->ptr), LLVM_VALUE_FROM_USE(instr->index)));
         }
         break;
     }
     case ir_opcode_load: {
         IR_INSTR_AS(load)
-        SET_DEST(BUILDER().CreateLoad(LLVM_VALUE(instr->ptr)));
+        SET_DEST(BUILDER().CreateLoad(LLVM_VALUE_FROM_USE(instr->ptr)));
         break;
     }
     case ir_opcode_store: {
         IR_INSTR_AS(store)
-        BUILDER().CreateStore(LLVM_VALUE(instr->value), LLVM_VALUE(instr->ptr));
+        BUILDER().CreateStore(LLVM_VALUE_FROM_USE(instr->value), LLVM_VALUE_FROM_USE(instr->ptr));
         break;
     }
     case ir_opcode_alloca: {
         IR_INSTR_AS(alloca)
-        ir_type elem_type = ir_pointer_base(ir_typeof(_instr->dest));
+        ir_type elem_type = ir_pointer_base(ir_typeof(IR_INSTR_DEST(_instr)));
         assert(elem_type->size > 0);
         llvm::Value *alloca_size =
                 BUILDER().getInt64(instr->num_elements * elem_type->size);
@@ -393,7 +414,7 @@ void _emit_instr(_TranslationContext &ctx, ir_block b, ir_instr _instr) {
     }
     case ir_opcode_constant: {
         IR_INSTR_AS(constant)
-        ir_type dest_type = ir_typeof(_instr->dest);
+        ir_type dest_type = ir_typeof(IR_INSTR_DEST(_instr));
         llvm::Value *ret;
         switch (dest_type->kind) {
 #define PROCESS(name, ctype, ps, _id, va_arg_type) \
@@ -416,8 +437,8 @@ void _emit_instr(_TranslationContext &ctx, ir_block b, ir_instr _instr) {
     }
     case ir_opcode_cast: {
         IR_INSTR_AS(cast)
-        ir_type src_type = ir_typeof(instr->value);
-        ir_type dest_type = ir_typeof(_instr->dest);
+        ir_type src_type = ir_typeof(IR_USE_VALUE(instr->value));
+        ir_type dest_type = ir_typeof(IR_INSTR_DEST(_instr));
         assert(!ir_type_is_void(src_type));
         assert(!ir_type_is_void(dest_type));
         assert(!ir_type_is_struct(src_type));
@@ -434,13 +455,13 @@ void _emit_instr(_TranslationContext &ctx, ir_block b, ir_instr _instr) {
 
             if (src_is_integral && dest_is_integral) {
                 /* No casting needed. We collapse integer types to their width for LLVM. */
-                dest = LLVM_VALUE(instr->value);
+                dest = LLVM_VALUE_FROM_USE(instr->value);
             } else if (src_is_pointer && dest_is_pointer) {
-                dest = BUILDER().CreateBitCast(LLVM_VALUE(instr->value), LLVM_TYPE(dest_type));
+                dest = BUILDER().CreateBitCast(LLVM_VALUE_FROM_USE(instr->value), LLVM_TYPE(dest_type));
             } else if (src_is_integral && dest_is_pointer) {
-                dest = BUILDER().CreateIntToPtr(LLVM_VALUE(instr->value), LLVM_TYPE(dest_type));
+                dest = BUILDER().CreateIntToPtr(LLVM_VALUE_FROM_USE(instr->value), LLVM_TYPE(dest_type));
             } else if (src_is_pointer && dest_is_integral) {
-                dest = BUILDER().CreatePtrToInt(LLVM_VALUE(instr->value), LLVM_TYPE(dest_type));
+                dest = BUILDER().CreatePtrToInt(LLVM_VALUE_FROM_USE(instr->value), LLVM_TYPE(dest_type));
             } else {
                 abort(); /* Unhandled case */
             }
@@ -448,17 +469,23 @@ void _emit_instr(_TranslationContext &ctx, ir_block b, ir_instr _instr) {
             /* Integer casting */
             if (src_type->size > dest_type->size) {
                 /* Truncation */
-                dest = BUILDER().CreateTrunc(LLVM_VALUE(instr->value), LLVM_TYPE(dest_type));
+                dest = BUILDER().CreateTrunc(LLVM_VALUE_FROM_USE(instr->value), LLVM_TYPE(dest_type));
             } else {
                 /* Zero-Extension or Sign-extension */
                 if (ir_type_is_signed(src_type)) {
-                    dest = BUILDER().CreateSExt(LLVM_VALUE(instr->value), LLVM_TYPE(dest_type));
+                    dest = BUILDER().CreateSExt(LLVM_VALUE_FROM_USE(instr->value), LLVM_TYPE(dest_type));
                 } else {
-                    dest = BUILDER().CreateZExt(LLVM_VALUE(instr->value), LLVM_TYPE(dest_type));
+                    dest = BUILDER().CreateZExt(LLVM_VALUE_FROM_USE(instr->value), LLVM_TYPE(dest_type));
                 }
             }
         }
         SET_DEST(dest);
+        break;
+    }
+    case ir_opcode_func_arg: {
+        IR_INSTR_AS(func_arg)
+        assert(instr->index - 1 < ctx.llvm_func->arg_size());
+        SET_DEST(ctx.llvm_func->arg_begin() + (instr->index - 1));
         break;
     }
     case ir_opcode_label_here: {
@@ -476,8 +503,8 @@ void _emit_instr(_TranslationContext &ctx, ir_block b, ir_instr _instr) {
         IR_INSTR_AS(branch_cond)
         llvm::Value *cond =
             BUILDER().CreateICmpNE(
-                LLVM_VALUE(instr->cond),
-                llvm::Constant::getNullValue(LLVM_TYPE(ir_typeof(instr->cond))));
+                LLVM_VALUE_FROM_USE(instr->cond),
+                llvm::Constant::getNullValue(LLVM_TYPE(ir_typeof(IR_USE_VALUE(instr->cond)))));
         llvm::MDNode* branchWeights =
             llvm::MDBuilder(context).createBranchWeights(instr->if_true_weight, instr->if_false_weight);
         BUILDER().CreateCondBr(
@@ -498,7 +525,7 @@ void _emit_instr(_TranslationContext &ctx, ir_block b, ir_instr _instr) {
 
 
         llvm::SwitchInst *sw = BUILDER().CreateSwitch(
-            LLVM_VALUE(instr->index),
+            LLVM_VALUE_FROM_USE(instr->index),
             error_block,
             instr->table_size);
         for (size_t i = 0; i < instr->table_size; i++) {
@@ -508,8 +535,8 @@ void _emit_instr(_TranslationContext &ctx, ir_block b, ir_instr _instr) {
     }
     case ir_opcode_ret: {
         IR_INSTR_AS(ret)
-        if (instr->value) {
-            BUILDER().CreateRet(LLVM_VALUE(instr->value));
+        if (ir_typeof(IR_USE_VALUE(instr->value)) != ir_type_void) {
+            BUILDER().CreateRet(LLVM_VALUE_FROM_USE(instr->value));
         } else {
             BUILDER().CreateRetVoid();
         }
@@ -584,14 +611,6 @@ ir_llvm_compile(ir_func func) {
     ctx.llvm_modes = (char*)malloc(ctx.num_values * sizeof(char));
     memset(ctx.llvm_modes, 0, ctx.num_values * sizeof(char));
 
-    /* Setup the values corresponding to the arguments */
-    llvm::Function::arg_iterator llvm_args = ctx.llvm_func->arg_begin();
-    for (size_t i = 0; i < func->sig->param_count - 1; i++) {
-        ir_value argi = ir_func_get_argument(func, i);
-        ctx.llvm_values[argi->index] = llvm_args++;
-        ctx.llvm_modes[argi->index] = 1;
-    }
-
     ctx.llvm_blocks = (llvm::BasicBlock**)malloc(ctx.num_blocks * sizeof(llvm::BasicBlock*));
     memset(ctx.llvm_blocks, 0, ctx.num_blocks * sizeof(llvm::BasicBlock*));
 
@@ -615,12 +634,12 @@ ir_llvm_compile(ir_func func) {
          */
         for (_instr = b->first_instr; _instr != NULL; _instr = _instr->next) {
             size_t count;
-            ir_value *uses = ir_get_uses(_instr, &count);
+            ir_use uses = ir_get_uses(_instr, &count);
             for (int i = 0; i < count; i++) {
-                ALLOCA_MODE_IF_NOT_DEFINED(uses[i]);
+                ALLOCA_MODE_IF_NOT_DEFINED(IR_USE_VALUE(uses[i]));
             }
-            if (_instr->dest) {
-                RECORD_DEFINE(_instr->dest);
+            if (ir_typeof(IR_INSTR_DEST(_instr)) != ir_type_void) {
+                RECORD_DEFINE(IR_INSTR_DEST(_instr));
             }
 
         }

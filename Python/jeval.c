@@ -3447,8 +3447,8 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr) {
         IR_INSTR_AS(goto_error)
         assert(instr->pb != INVALID_PYBLOCK);
 
-        if (instr->cond != NULL) {
-            BRANCH_IF_NOT(instr->cond, instr->fallthrough, IR_LIKELY);
+        if (IR_USE_VALUE(instr->cond) != NULL) {
+            BRANCH_IF_NOT(IR_USE_VALUE(instr->cond), instr->fallthrough, IR_LIKELY);
         }
 
         if (jd->use_patchpoint_error_handler) {
@@ -3578,7 +3578,7 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr) {
         int yield_f_lasti = sizeof(_Py_CODEUNIT) * (resume_instr_index - 1);
         assert(yield_f_lasti >= 0);
 
-        SET_RETVAL(instr->value);
+        SET_RETVAL(IR_USE_VALUE(instr->value));
         JVALUE f_valuestack = LOAD_FIELD(jd->f, PyFrameObject, f_valuestack, ir_type_pyobject_ptr_ptr);
         JVALUE stack_pointer = ir_get_index_ptr(jd->func, f_valuestack, CONSTANT_INT(instr->entry_stack_level));
         STORE_FIELD(jd->f, PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr, stack_pointer);
@@ -3622,7 +3622,7 @@ int _ir_lower_refcounting(JITData *jd, ir_instr _instr) {
     switch (_instr->opcode) {
     case ir_opcode_incref: {
         IR_INSTR_AS(incref)
-        ir_value obj = instr->obj;
+        ir_value obj = IR_USE_VALUE(instr->obj);
         ir_label skip_incref = NULL;
         if (instr->is_xincref) {
             skip_incref = ir_label_new(func, "x_skip_incref");
@@ -3646,7 +3646,7 @@ int _ir_lower_refcounting(JITData *jd, ir_instr _instr) {
     case ir_opcode_decref: {
         IR_INSTR_AS(decref)
         ir_label skip_dealloc = ir_label_new(func, "decref_skip_dealloc");
-        ir_value obj = instr->obj;
+        ir_value obj = IR_USE_VALUE(instr->obj);
         if (instr->is_xdecref) {
             ir_branch_if_not(func, obj, skip_dealloc, IR_UNLIKELY);
         }
@@ -3688,14 +3688,14 @@ int _ir_lower_stack_ops(JITData *jd, ir_instr _instr) {
         assert(instr->abs_offset >= 0);
         assert(instr->abs_offset < jd->stack_size);
         ir_value tmp = LOAD(jd->stack_values[instr->abs_offset]);
-        _ir_instr_replace_dest(jd->func, tmp, _instr->dest);
+        ir_replace_all_uses(jd->func, IR_INSTR_DEST(_instr), tmp);
         return 1;
     }
     case ir_opcode_stack_put: {
         IR_INSTR_AS(stack_put)
         assert(instr->abs_offset >= 0);
         assert(instr->abs_offset < jd->stack_size);
-        STORE(jd->stack_values[instr->abs_offset], instr->value);
+        STORE(jd->stack_values[instr->abs_offset], IR_USE_VALUE(instr->value));
         return 1;
     }
     default: break;
@@ -3710,13 +3710,13 @@ int _ir_lower_remaining(JITData *jd, ir_instr _instr) {
         IR_INSTR_AS(getlocal)
         ir_value addr = ir_get_index_ptr(jd->func, jd->fastlocals, ir_constant_int(jd->func, instr->index, NULL));
         ir_value tmp = LOAD(addr);
-        _ir_instr_replace_dest(jd->func, tmp, _instr->dest);
+        ir_replace_all_uses(jd->func, IR_INSTR_DEST(_instr), tmp);
         return 1;
     }
     case ir_opcode_setlocal: {
         IR_INSTR_AS(setlocal)
         ir_value addr = ir_get_index_ptr(jd->func, jd->fastlocals, ir_constant_int(jd->func, instr->index, NULL));
-        STORE(addr, instr->value);
+        STORE(addr, IR_USE_VALUE(instr->value));
         return 1;
     }
     case ir_opcode_check_eval_breaker: {
