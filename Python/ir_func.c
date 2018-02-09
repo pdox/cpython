@@ -140,7 +140,7 @@ static void ir_func_verify_structure(ir_func func) {
 
         ASSERT(b->first_instr != NULL,
                "Empty block, without label");
-        ASSERT(b->first_instr->opcode == ir_opcode_label_here,
+        ASSERT(IR_INSTR_OPCODE(b->first_instr) == ir_opcode_label_here,
                "First instruction must be label");
 
         /* Scan instructions */
@@ -149,13 +149,16 @@ static void ir_func_verify_structure(ir_func func) {
         int found_branch = 0;
         for (_instr = b->first_instr; _instr != NULL; _instr = _instr->next) {
             ASSERT(_instr_prev == _instr->prev, "Corrupted instruction list");
+            ASSERT(_instr->parent == b, "Instruction 'parent' points to wrong block");
+            ASSERT(_instr->magic == IR_INSTR_MAGIC, "Corrupted magic pointer");
             _instr_prev = _instr;
+            ir_opcode opcode = IR_INSTR_OPCODE(_instr);
 
-            if (ir_instr_opcode_needs_to_be_at_front(_instr->opcode)) {
+            if (ir_opcode_needs_to_be_at_front(opcode)) {
                 ASSERT(_instr == b->first_instr->next,
                        "Instruction not at front of block");
             }
-            if (ir_instr_opcode_is_control_flow(_instr->opcode)) {
+            if (ir_opcode_is_control_flow(opcode)) {
                 ASSERT(_instr == b->last_instr,
                        "Control flow in block interior");
                 ASSERT(_instr->next == NULL,

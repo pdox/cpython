@@ -2,205 +2,10 @@
 #include <stdio.h>
 #include "ir.h"
 
-ir_use ir_get_uses(ir_instr _instr, size_t *count) {
-    switch (_instr->opcode) {
-    case ir_opcode_neg:
-    case ir_opcode_not: {
-        IR_INSTR_AS(unop)
-        *count = 1;
-        return &instr->value;
-    }
-    case ir_opcode_add:
-    case ir_opcode_sub:
-    case ir_opcode_mul:
-    case ir_opcode_div:
-    case ir_opcode_rem:
-    case ir_opcode_and:
-    case ir_opcode_or:
-    case ir_opcode_xor:
-    case ir_opcode_shl:
-    case ir_opcode_shr: {
-        IR_INSTR_AS(binop)
-        *count = 2;
-        return &instr->left;
-    }
-    case ir_opcode_notbool:
-    case ir_opcode_bool: {
-        IR_INSTR_AS(boolean)
-        *count = 1;
-        return &instr->value;
-    }
-    case ir_opcode_lt:
-    case ir_opcode_gt:
-    case ir_opcode_eq:
-    case ir_opcode_ne:
-    case ir_opcode_le:
-    case ir_opcode_ge: {
-        IR_INSTR_AS(comparison)
-        *count = 2;
-        return &instr->left;
-    }
-    case ir_opcode_ternary: {
-        IR_INSTR_AS(ternary)
-        *count = 3;
-        return &instr->cond;
-    }
-    case ir_opcode_call: {
-        IR_INSTR_AS(call)
-        *count = 1 + instr->arg_count;
-        return &instr->target;
-    }
-    case ir_opcode_patchpoint: {
-        IR_INSTR_AS(patchpoint)
-        *count = 1 + instr->arg_count;
-        return &instr->target;
-    }
-    case ir_opcode_get_element_ptr: {
-        IR_INSTR_AS(get_element_ptr)
-        *count = 1;
-        return &instr->ptr;
-    }
-    case ir_opcode_get_index_ptr: {
-        IR_INSTR_AS(get_index_ptr)
-        *count = 2;
-        return &instr->ptr;
-    }
-    case ir_opcode_load: {
-        IR_INSTR_AS(load)
-        *count = 1;
-        return &instr->ptr;
-    }
-    case ir_opcode_store: {
-        IR_INSTR_AS(store)
-        *count = 2;
-        return &instr->ptr;
-    }
-    case ir_opcode_alloca: {
-        *count = 0;
-        return NULL;
-    }
-    case ir_opcode_constant: {
-        *count = 0;
-        return NULL;
-    }
-    case ir_opcode_func_arg: {
-        *count = 0;
-        return NULL;
-    }
-    case ir_opcode_cast: {
-        IR_INSTR_AS(cast)
-        *count = 1;
-        return &instr->value;
-    }
-    case ir_opcode_label_here: {
-        *count = 0;
-        return NULL;
-    }
-    case ir_opcode_info_here: {
-        *count = 0;
-        return NULL;
-    }
-    case ir_opcode_branch: {
-        *count = 0;
-        return NULL;
-    }
-    case ir_opcode_branch_cond: {
-        IR_INSTR_AS(branch_cond)
-        *count = 1;
-        return &instr->cond;
-    }
-    case ir_opcode_jumptable: {
-        IR_INSTR_AS(jumptable)
-        *count = 1;
-        return &instr->index;
-    }
-    case ir_opcode_ret: {
-        IR_INSTR_AS(ret)
-        if (IR_USE_VALUE(instr->value) != NULL) {
-            *count = 1;
-            return &instr->value;
-        }
-        *count = 0;
-        return NULL;
-    }
-    case ir_opcode_getlocal: {
-        *count = 0;
-        return NULL;
-    }
-    case ir_opcode_setlocal: {
-        IR_INSTR_AS(setlocal)
-        *count = 1;
-        return &instr->value;
-    }
-    case ir_opcode_incref: {
-        IR_INSTR_AS(incref)
-        *count = 1;
-        return &instr->obj;
-    }
-    case ir_opcode_decref: {
-        IR_INSTR_AS(decref)
-        *count = 1;
-        return &instr->obj;
-    }
-    case ir_opcode_stackadj: {
-        *count = 0;
-        return NULL;
-    }
-    case ir_opcode_stack_peek: {
-        *count = 0;
-        return NULL;
-    }
-    case ir_opcode_stack_put: {
-        IR_INSTR_AS(stack_put)
-        *count = 1;
-        return &instr->value;
-    }
-    case ir_opcode_check_eval_breaker: {
-        *count = 0;
-        return NULL;
-    }
-    case ir_opcode_setup_block: {
-        *count = 0;
-        return NULL;
-    }
-    case ir_opcode_pop_block: {
-        *count = 0;
-        return NULL;
-    }
-    case ir_opcode_goto_error: {
-        IR_INSTR_AS(goto_error)
-        if (IR_USE_VALUE(instr->cond) != NULL) {
-            *count = 1;
-            return &instr->cond;
-        }
-        *count = 0;
-        return NULL;
-    }
-    case ir_opcode_goto_fbe: {
-        *count = 0;
-        return NULL;
-    }
-    case ir_opcode_yield: {
-        IR_INSTR_AS(yield)
-        *count = 1;
-        return &instr->value;
-    }
-    case ir_opcode_yield_dispatch: {
-        *count = 0;
-        return NULL;
-    }
-    case ir_opcode_end_finally: {
-        *count = 0;
-        return NULL;
-    }
-    } // switch
-    Py_UNREACHABLE();
-}
-
 ir_label*
 ir_list_outgoing_labels(ir_block b, size_t *count) {
     ir_instr _instr = b->last_instr;
-    switch (_instr->opcode) {
+    switch (IR_INSTR_OPCODE(_instr)) {
     case ir_opcode_branch: {
         IR_INSTR_AS(branch)
         *count = 1;
@@ -220,10 +25,14 @@ ir_list_outgoing_labels(ir_block b, size_t *count) {
         *count = 0;
         return NULL;
     }
+    case ir_opcode_retval: {
+        *count = 0;
+        return NULL;
+    }
     case ir_opcode_goto_error: {
         IR_INSTR_AS(goto_error)
-        *count = 2;
-        return &instr->fallthrough;
+        *count = 1;
+        return &instr->error_exit;
     }
     case ir_opcode_goto_fbe: {
         IR_INSTR_AS(goto_fbe)
@@ -302,6 +111,7 @@ _ir_opcode_repr(ir_opcode opcode) {
     OPCODE_CASE(branch_cond)
     OPCODE_CASE(jumptable)
     OPCODE_CASE(ret)
+    OPCODE_CASE(retval)
     OPCODE_CASE(getlocal)
     OPCODE_CASE(setlocal)
     OPCODE_CASE(incref)
@@ -324,6 +134,16 @@ _ir_opcode_repr(ir_opcode opcode) {
     }
 }
 
+
+static char *
+_list_operands(char *p, ir_instr _instr, size_t start, size_t stop) {
+    for (size_t i = start; i < stop; i++) {
+        if (i != start) p += sprintf(p, ", ");
+        p = ir_use_repr(p, IR_INSTR_OPERAND(_instr, i));
+    }
+    return p;
+}
+
 char *
 ir_instr_repr(char *p, ir_instr _instr) {
     p += sprintf(p, "      ");
@@ -333,125 +153,76 @@ ir_instr_repr(char *p, ir_instr _instr) {
         p = ir_value_repr(p, dest);
         p += sprintf(p, " = ");
     }
-    p += sprintf(p, "%s ", _ir_opcode_repr(_instr->opcode));
+    ir_opcode opcode = IR_INSTR_OPCODE(_instr);
+    p += sprintf(p, "%s ", _ir_opcode_repr(opcode));
 
-    switch (_instr->opcode) {
-        /* Unary ops */
-        case ir_opcode_neg:
-        case ir_opcode_not: {
-            IR_INSTR_AS(unop)
-            p = ir_use_repr(p, instr->value);
-            break;
-        }
-
-        /* Binary ops */
-        case ir_opcode_add:
-        case ir_opcode_sub:
-        case ir_opcode_mul:
-        case ir_opcode_div:
-        case ir_opcode_rem:
-        case ir_opcode_and:
-        case ir_opcode_or:
-        case ir_opcode_xor:
-        case ir_opcode_shl:
-        case ir_opcode_shr: {
-            IR_INSTR_AS(binop)
-            p = ir_use_repr(p, instr->left);
-            p += sprintf(p, ", ");
-            p = ir_use_repr(p, instr->right);
-            break;
-        }
-        case ir_opcode_lt:
-        case ir_opcode_gt:
-        case ir_opcode_eq:
-        case ir_opcode_ne:
-        case ir_opcode_le:
-        case ir_opcode_ge: {
-            IR_INSTR_AS(comparison)
-            p = ir_use_repr(p, instr->left);
-            p += sprintf(p, ", ");
-            p = ir_use_repr(p, instr->right);
-            break;
-        }
-        case ir_opcode_notbool:
-        case ir_opcode_bool: {
-            IR_INSTR_AS(boolean)
-            p = ir_use_repr(p, instr->value);
-            break;
-        }
-        case ir_opcode_ternary: {
-            IR_INSTR_AS(ternary)
-            p = ir_use_repr(p, instr->cond);
-            p += sprintf(p, " ? ");
-            p = ir_use_repr(p, instr->if_true);
-            p += sprintf(p, " : ");
-            p = ir_use_repr(p, instr->if_false);
+    switch (opcode) {
+        default: {
+            /* Default action is to just list the operands */
+            size_t count = IR_INSTR_NUM_OPERANDS(_instr);
+            p = _list_operands(p, _instr, 0, count);
             break;
         }
         case ir_opcode_call: {
-            IR_INSTR_AS(call)
-            p = ir_type_repr(p, ir_typeof(IR_USE_VALUE(instr->target)));
-            p += sprintf(p, " ");
-            p = ir_use_repr(p, instr->target);
+            size_t num_operands = IR_INSTR_NUM_OPERANDS(_instr);
+            /* First operand is function to call */
+            p = ir_use_repr(p, IR_INSTR_OPERAND(_instr, 0));
             p += sprintf(p, " (");
-            for (int i = 0; i < instr->arg_count; i++) {
-                if (i != 0)
-                    p += sprintf(p, ", ");
-                p = ir_use_repr(p, instr->arg[i]);
-            }
+            p = _list_operands(p, _instr, 1, num_operands);
             p += sprintf(p, ")");
             break;
         }
         case ir_opcode_patchpoint: {
             IR_INSTR_AS(patchpoint)
-            p += sprintf(p, "[user_data=%p] ", instr->user_data);
-            p = ir_type_repr(p, ir_typeof(IR_USE_VALUE(instr->target)));
-            p += sprintf(p, " ");
-            p = ir_use_repr(p, instr->target);
+            size_t num_operands = IR_INSTR_NUM_OPERANDS(_instr);
+            /* First operand is function to call */
+            p = ir_use_repr(p, IR_INSTR_OPERAND(_instr, 0));
             p += sprintf(p, " (");
-            for (size_t i = 0; i < instr->arg_count; i++) {
-                if (i == instr->real_arg_count) {
-                    p += sprintf(p, " | ");
-                } else if (i != 0) {
-                    p += sprintf(p, ", ");
-                }
-                p = ir_use_repr(p, instr->arg[i]);
-            }
+            /* The first 'real_arg_count' values are actual arguments to the call,
+               the rest are present in the stackmap only. Mark the separation between
+               the two groups. */
+            p = _list_operands(p, _instr, 1, 1 + instr->real_arg_count);
+            p += sprintf(p, " | ");
+            p = _list_operands(p, _instr, 1 + instr->real_arg_count, num_operands);
             p += sprintf(p, ")");
+            p += sprintf(p, " [user_data=%p] ", instr->user_data);
             break;
         }
         case ir_opcode_get_element_ptr: {
             IR_INSTR_AS(get_element_ptr)
             /* struct name */
-            p = ir_type_repr(p, ir_pointer_base(ir_typeof(IR_USE_VALUE(instr->ptr))));
+            ir_value ptr = IR_USE_VALUE(IR_INSTR_OPERAND(_instr, 0));
+            p = ir_type_repr(p, ir_pointer_base(ir_typeof(ptr)));
             /* member name */
             p += sprintf(p, " %s", instr->member_name ? instr->member_name : "<NULL>");
             p += sprintf(p, " ");
-            p = ir_use_repr(p, instr->ptr);
+            p = ir_value_repr(p, ptr);
             p += sprintf(p, " (offset %ld)", (long)instr->offset);
             break;
         }
         case ir_opcode_get_index_ptr: {
-            IR_INSTR_AS(get_index_ptr)
-            p = ir_type_repr(p, ir_pointer_base(ir_typeof(IR_USE_VALUE(instr->ptr))));
+            ir_value ptr = IR_USE_VALUE(IR_INSTR_OPERAND(_instr, 0));
+            ir_value index = IR_USE_VALUE(IR_INSTR_OPERAND(_instr, 1));
+            p = ir_type_repr(p, ir_pointer_base(ir_typeof(ptr)));
             p += sprintf(p, " ");
-            p = ir_use_repr(p, instr->ptr);
+            p = ir_value_repr(p, ptr);
             p += sprintf(p, " index ");
-            p = ir_use_repr(p, instr->index);
+            p = ir_value_repr(p, index);
             break;
         }
         case ir_opcode_load: {
-            IR_INSTR_AS(load)
-            p = ir_type_repr(p, ir_pointer_base(ir_typeof(IR_USE_VALUE(instr->ptr))));
+            ir_value ptr = IR_USE_VALUE(IR_INSTR_OPERAND(_instr, 0));
+            p = ir_type_repr(p, ir_pointer_base(ir_typeof(ptr)));
             p += sprintf(p, " ");
-            p = ir_use_repr(p, instr->ptr);
+            p = ir_value_repr(p, ptr);
             break;
         }
         case ir_opcode_store: {
-            IR_INSTR_AS(store)
-            p = ir_use_repr(p, instr->ptr);
+            ir_value ptr = IR_USE_VALUE(IR_INSTR_OPERAND(_instr, 0));
+            ir_value value = IR_USE_VALUE(IR_INSTR_OPERAND(_instr, 1));
+            p = ir_value_repr(p, ptr);
             p += sprintf(p, " <- ");
-            p = ir_use_repr(p, instr->value);
+            p = ir_value_repr(p, value);
             break;
         }
         case ir_opcode_alloca: {
@@ -471,8 +242,9 @@ ir_instr_repr(char *p, ir_instr _instr) {
             break;
         }
         case ir_opcode_cast: {
-            IR_INSTR_AS(cast)
-            p = ir_use_repr(p, instr->value);
+            p = ir_type_repr(p, dest_type);
+            p += sprintf(p, " ");
+            p = ir_use_repr(p, IR_INSTR_OPERAND(_instr, 0));
             break;
         }
         case ir_opcode_func_arg: {
@@ -497,7 +269,8 @@ ir_instr_repr(char *p, ir_instr _instr) {
         }
         case ir_opcode_branch_cond: {
             IR_INSTR_AS(branch_cond)
-            p = ir_use_repr(p, instr->cond);
+            ir_value cond = IR_USE_VALUE(IR_INSTR_OPERAND(_instr, 0));
+            p = ir_value_repr(p, cond);
             p += sprintf(p, " ? ");
             p = ir_label_repr(p, instr->if_true);
             p += sprintf(p, " : ");
@@ -507,9 +280,9 @@ ir_instr_repr(char *p, ir_instr _instr) {
         }
         case ir_opcode_jumptable: {
             IR_INSTR_AS(jumptable)
-            unsigned int i;
-            p = ir_use_repr(p, instr->index);
+            p = ir_use_repr(p, IR_INSTR_OPERAND(_instr, 0));
             p += sprintf(p, " [ ");
+            size_t i;
             for (i = 0; i < instr->table_size && i < 10; i++) {
                 if (i != 0) p += sprintf(p, ", ");
                 p = ir_label_repr(p, instr->table[i]);
@@ -520,13 +293,6 @@ ir_instr_repr(char *p, ir_instr _instr) {
             p += sprintf(p, " ]");
             break;
         }
-        case ir_opcode_ret: {
-            IR_INSTR_AS(ret)
-            if (IR_USE_VALUE(instr->value) != NULL) {
-                p = ir_use_repr(p, instr->value);
-            }
-            break;
-        }
         case ir_opcode_getlocal: {
             IR_INSTR_AS(getlocal)
             p += sprintf(p, "%ld", (long)instr->index);
@@ -535,22 +301,22 @@ ir_instr_repr(char *p, ir_instr _instr) {
         case ir_opcode_setlocal: {
             IR_INSTR_AS(setlocal)
             p += sprintf(p, "%ld ", (long)instr->index);
-            p = ir_use_repr(p, instr->value);
+            p = ir_use_repr(p, IR_INSTR_OPERAND(_instr, 0));
             break;
         }
         case ir_opcode_incref: {
             IR_INSTR_AS(incref)
-            p = ir_use_repr(p, instr->obj);
+            p = ir_use_repr(p, IR_INSTR_OPERAND(_instr, 0));
             if (instr->is_xincref) {
-                p += sprintf(p, " allows_null");
+                p += sprintf(p, " maybe_null");
             }
             break;
         }
         case ir_opcode_decref: {
             IR_INSTR_AS(decref)
-            p = ir_use_repr(p, instr->obj);
+            p = ir_use_repr(p, IR_INSTR_OPERAND(_instr, 0));
             if (instr->is_xdecref) {
-                p += sprintf(p, " allows_null");
+                p += sprintf(p, " maybe_null");
             }
             break;
         }
@@ -567,11 +333,10 @@ ir_instr_repr(char *p, ir_instr _instr) {
         case ir_opcode_stack_put: {
             IR_INSTR_AS(stack_put)
             p += sprintf(p, "%d ", instr->offset);
-            p = ir_use_repr(p, instr->value);
+            p = ir_use_repr(p, IR_INSTR_OPERAND(_instr, 0));
             break;
         }
         case ir_opcode_check_eval_breaker: {
-            //IR_INSTR_AS(check_eval_breaker)
             break;
         }
         case ir_opcode_setup_block: {
@@ -589,13 +354,7 @@ ir_instr_repr(char *p, ir_instr _instr) {
         }
         case ir_opcode_goto_error: {
             IR_INSTR_AS(goto_error)
-            if (IR_USE_VALUE(instr->cond) != NULL) {
-                p = ir_use_repr(p, instr->cond);
-                p += sprintf(p, " ");
-            }
-            if (instr->fallthrough) {
-                p = ir_label_repr(p, instr->fallthrough);
-            }
+            p = ir_label_repr(p, instr->error_exit);
             break;
         }
         case ir_opcode_goto_fbe: {
@@ -608,7 +367,7 @@ ir_instr_repr(char *p, ir_instr _instr) {
         }
         case ir_opcode_yield: {
             IR_INSTR_AS(yield)
-            p = ir_use_repr(p, instr->value);
+            p = ir_use_repr(p, IR_INSTR_OPERAND(_instr, 0));
             p += sprintf(p, " %d ", instr->resume_instr_index);
             p = ir_label_repr(p, instr->resume_inst_label);
             if (instr->throw_inst_label) {

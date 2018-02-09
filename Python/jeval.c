@@ -106,9 +106,10 @@ typedef struct _JITData {
 } while (0)
 
 #define GOTO_ERROR_IF(val) do { \
-    IR_LABEL_INIT(fallthrough); \
-    ir_goto_error(jd->func, (val), fallthrough, jd->error_exit); \
-    LABEL(fallthrough); \
+    IR_LABEL_INIT(skip_error); \
+    BRANCH_IF_NOT((val), skip_error, IR_LIKELY); \
+    ir_goto_error(jd->func, jd->error_exit); \
+    LABEL(skip_error); \
 } while (0)
 
 #define GOTO_ERROR_IF_EX(val, with_stack_level, with_pb) do { \
@@ -119,7 +120,7 @@ typedef struct _JITData {
 
 #define GOTO_ERROR_IF_NOT(val)   GOTO_ERROR_IF(NOTBOOL((val)))
 
-#define GOTO_ERROR()             ir_goto_error(jd->func, NULL, NULL, jd->error_exit)
+#define GOTO_ERROR()             ir_goto_error(jd->func, jd->error_exit)
 
 #define GOTO_ERROR_EX(with_stack_level, with_pb) do { \
     ir_cursor_set_pyblock(jd->func, (with_stack_level), (with_pb)); \
@@ -2995,7 +2996,7 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
 
     /* push frame */
     IF(IR_Py_EnterRecursiveCall(""), IR_UNLIKELY, {
-        ir_ret(jd->func, CONSTANT_PYOBJ(NULL));
+        ir_retval(jd->func, CONSTANT_PYOBJ(NULL));
     });
     STORE_FIELD(jd->tstate, PyThreadState, frame, ir_type_pyframeobject_ptr, jd->f);
 
@@ -3087,7 +3088,7 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     JVALUE f_back = LOAD_FIELD(jd->f, PyFrameObject, f_back, ir_type_pyframeobject_ptr);
     STORE_FIELD(jd->tstate, PyThreadState, frame, ir_type_pyframeobject_ptr, f_back);
     JVALUE ret = IR_Py_CheckFunctionResult(NULL, LOAD(jd->retval), "PyJIT_EvalFrame");
-    ir_ret(jd->func, ret);
+    ir_retval(jd->func, ret);
 
     /* Close the cursor */
     ir_cursor_close(jd->func);
@@ -3410,7 +3411,7 @@ void _emit_precursor(JITData *jd, ir_pyblock pb) {
 
 static inline
 int _ir_lower_control_flow(JITData *jd, ir_instr _instr) {
-    switch (_instr->opcode) {
+    switch (IR_INSTR_OPCODE(_instr)) {
     case ir_opcode_setup_block: {
         IR_INSTR_AS(setup_block)
         assert(instr->pb != NULL && instr->pb != INVALID_PYBLOCK);
@@ -3446,11 +3447,6 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr) {
     case ir_opcode_goto_error: {
         IR_INSTR_AS(goto_error)
         assert(instr->pb != INVALID_PYBLOCK);
-
-        if (IR_USE_VALUE(instr->cond) != NULL) {
-            BRANCH_IF_NOT(IR_USE_VALUE(instr->cond), instr->fallthrough, IR_LIKELY);
-        }
-
         if (jd->use_patchpoint_error_handler) {
             /* This will unwind the stack and branch to the precursor
                (same as the code below) */
@@ -3578,7 +3574,7 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr) {
         int yield_f_lasti = sizeof(_Py_CODEUNIT) * (resume_instr_index - 1);
         assert(yield_f_lasti >= 0);
 
-        SET_RETVAL(IR_USE_VALUE(instr->value));
+        SET_RETVAL(IR_USE_VALUE(IR_INSTR_OPERAND(_instr, 0)));
         JVALUE f_valuestack = LOAD_FIELD(jd->f, PyFrameObject, f_valuestack, ir_type_pyobject_ptr_ptr);
         JVALUE stack_pointer = ir_get_index_ptr(jd->func, f_valuestack, CONSTANT_INT(instr->entry_stack_level));
         STORE_FIELD(jd->f, PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr, stack_pointer);
@@ -3619,10 +3615,10 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr) {
 static inline
 int _ir_lower_refcounting(JITData *jd, ir_instr _instr) {
     ir_func func = jd->func;
-    switch (_instr->opcode) {
+    switch (IR_INSTR_OPCODE(_instr)) {
     case ir_opcode_incref: {
         IR_INSTR_AS(incref)
-        ir_value obj = IR_USE_VALUE(instr->obj);
+        ir_value obj = IR_USE_VALUE(IR_INSTR_OPERAND(_instr, 0));
         ir_label skip_incref = NULL;
         if (instr->is_xincref) {
             skip_incref = ir_label_new(func, "x_skip_incref");
@@ -3646,7 +3642,7 @@ int _ir_lower_refcounting(JITData *jd, ir_instr _instr) {
     case ir_opcode_decref: {
         IR_INSTR_AS(decref)
         ir_label skip_dealloc = ir_label_new(func, "decref_skip_dealloc");
-        ir_value obj = IR_USE_VALUE(instr->obj);
+        ir_value obj = IR_USE_VALUE(IR_INSTR_OPERAND(_instr, 0));
         if (instr->is_xdecref) {
             ir_branch_if_not(func, obj, skip_dealloc, IR_UNLIKELY);
         }
@@ -3679,7 +3675,7 @@ int _ir_lower_refcounting(JITData *jd, ir_instr _instr) {
 
 static inline
 int _ir_lower_stack_ops(JITData *jd, ir_instr _instr) {
-    switch (_instr->opcode) {
+    switch (IR_INSTR_OPCODE(_instr)) {
     case ir_opcode_stackadj: {
         return 1;
     }
@@ -3695,7 +3691,7 @@ int _ir_lower_stack_ops(JITData *jd, ir_instr _instr) {
         IR_INSTR_AS(stack_put)
         assert(instr->abs_offset >= 0);
         assert(instr->abs_offset < jd->stack_size);
-        STORE(jd->stack_values[instr->abs_offset], IR_USE_VALUE(instr->value));
+        STORE(jd->stack_values[instr->abs_offset], IR_USE_VALUE(IR_INSTR_OPERAND(_instr, 0)));
         return 1;
     }
     default: break;
@@ -3705,7 +3701,7 @@ int _ir_lower_stack_ops(JITData *jd, ir_instr _instr) {
 
 static inline
 int _ir_lower_remaining(JITData *jd, ir_instr _instr) {
-    switch (_instr->opcode) {
+    switch (IR_INSTR_OPCODE(_instr)) {
     case ir_opcode_getlocal: {
         IR_INSTR_AS(getlocal)
         ir_value addr = ir_get_index_ptr(jd->func, jd->fastlocals, ir_constant_int(jd->func, instr->index, NULL));
@@ -3716,7 +3712,7 @@ int _ir_lower_remaining(JITData *jd, ir_instr _instr) {
     case ir_opcode_setlocal: {
         IR_INSTR_AS(setlocal)
         ir_value addr = ir_get_index_ptr(jd->func, jd->fastlocals, ir_constant_int(jd->func, instr->index, NULL));
-        STORE(addr, IR_USE_VALUE(instr->value));
+        STORE(addr, IR_USE_VALUE(IR_INSTR_OPERAND(_instr, 0)));
         return 1;
     }
     case ir_opcode_check_eval_breaker: {
@@ -3729,7 +3725,7 @@ int _ir_lower_remaining(JITData *jd, ir_instr _instr) {
 }
 
 int _ir_lower_yield_dispatch(JITData *jd, ir_instr _instr) {
-    if (_instr->opcode != ir_opcode_yield_dispatch) {
+    if (IR_INSTR_OPCODE(_instr) != ir_opcode_yield_dispatch) {
         return 0;
     }
     IR_INSTR_AS(yield_dispatch)
@@ -3771,7 +3767,7 @@ void _lower_pass(JITData *jd, lowerfunc_t lowerfunc, const char *filename) {
             _instr_next = _instr->next;
             _instr_prev = _instr->prev;
 
-            if (!ir_opcode_is_python_specific(_instr->opcode))
+            if (!ir_opcode_is_python_specific(IR_INSTR_OPCODE(_instr)))
                 continue;
 
             /* Set our position to just before instruction we may replace */

@@ -58,6 +58,12 @@ jit_context_t gcontext = NULL;
     _ret; \
 })
 
+/* ir_value corresponding to operand i */
+#define VOP(i)   IR_USE_VALUE(IR_INSTR_OPERAND(_instr, (i)))
+
+/* jit_value_t corresponding to operand i */
+#define JOP(i)   JIT_VALUE(VOP(i))
+
 #define JIT_VALUE_FROM_USE(iruse)  JIT_VALUE(IR_USE_VALUE((iruse)))
 
 #define JIT_LABEL(irlabel)   ( \
@@ -110,22 +116,19 @@ void _emit_instr(jit_function_t jit_func,
                  size_t num_values,
                  jit_label_t* jit_blocks, size_t num_blocks,
                  ir_func func, ir_block block, ir_instr _instr) {
-    switch (_instr->opcode) {
+    switch (IR_INSTR_OPCODE(_instr)) {
     case ir_opcode_neg: {
-        IR_INSTR_AS(unop)
-        SET_DEST(jit_insn_neg(jit_func, JIT_VALUE_FROM_USE(instr->value)));
+        SET_DEST(jit_insn_neg(jit_func, JOP(0)));
         break;
     }
     case ir_opcode_not: {
-        IR_INSTR_AS(unop)
-        SET_DEST(jit_insn_not(jit_func, JIT_VALUE_FROM_USE(instr->value)));
+        SET_DEST(jit_insn_not(jit_func, JOP(0)));
         break;
     }
 
 #define EMIT_BINOP(name) \
     case ir_opcode_ ## name: { \
-        IR_INSTR_AS(binop) \
-        SET_DEST(jit_insn_ ## name (jit_func, JIT_VALUE_FROM_USE(instr->left), JIT_VALUE_FROM_USE(instr->right))); \
+        SET_DEST(jit_insn_ ## name (jit_func, JOP(0), JOP(1))); \
         break; \
     }
     EMIT_BINOP(add)
@@ -141,20 +144,17 @@ void _emit_instr(jit_function_t jit_func,
 #undef EMIT_BINOP
 
     case ir_opcode_notbool: {
-        IR_INSTR_AS(boolean)
-        SET_DEST(jit_insn_to_not_bool(jit_func, JIT_VALUE_FROM_USE(instr->value)));
+        SET_DEST(jit_insn_to_not_bool(jit_func, JOP(0)));
         break;
     }
     case ir_opcode_bool: {
-        IR_INSTR_AS(boolean)
-        SET_DEST(jit_insn_to_bool(jit_func, JIT_VALUE_FROM_USE(instr->value)));
+        SET_DEST(jit_insn_to_bool(jit_func, JOP(0)));
         break;
     }
 
 #define EMIT_COMPARISON(name) \
     case ir_opcode_ ## name: { \
-        IR_INSTR_AS(comparison) \
-        SET_DEST(jit_insn_ ## name (jit_func, JIT_VALUE_FROM_USE(instr->left), JIT_VALUE_FROM_USE(instr->right))); \
+        SET_DEST(jit_insn_ ## name (jit_func, JOP(0), JOP(1))); \
         break; \
     }
     EMIT_COMPARISON(lt)
@@ -166,12 +166,11 @@ void _emit_instr(jit_function_t jit_func,
 #undef EMIT_COMPARISON
 
     case ir_opcode_ternary: {
-        IR_INSTR_AS(ternary)
         jit_label_t if_false_label = jit_label_undefined;
         jit_label_t after = jit_label_undefined;
-        jit_value_t cond = JIT_VALUE_FROM_USE(instr->cond);
-        jit_value_t value_if_true = JIT_VALUE_FROM_USE(instr->if_true);
-        jit_value_t value_if_false = JIT_VALUE_FROM_USE(instr->if_false);
+        jit_value_t cond = JOP(0);
+        jit_value_t value_if_true = JOP(1);
+        jit_value_t value_if_false = JOP(2);
         jit_value_t output = jit_value_create(jit_func, jit_value_get_type(value_if_true));
         jit_insn_branch_if_not(jit_func, cond, &if_false_label);
         jit_insn_store(jit_func, output, value_if_true);
@@ -183,19 +182,19 @@ void _emit_instr(jit_function_t jit_func,
         break;
     }
     case ir_opcode_call: {
-        IR_INSTR_AS(call)
-        int num_args = instr->arg_count;
+        int num_args = IR_INSTR_NUM_OPERANDS(_instr) - 1;
         jit_value_t *args = (jit_value_t*)malloc(num_args * sizeof(jit_value_t));
         int i;
         for (i = 0; i < num_args; i++) {
-            args[i] = JIT_VALUE_FROM_USE(instr->arg[i]);
+            args[i] = JOP(1 + i);
         }
-        ir_value target = IR_USE_VALUE(instr->target);
+        ir_value target = VOP(0);
         jit_type_t jit_sig = JIT_TYPE(ir_typeof(target));
         jit_value_t ret;
         /* Optimization: if we're calling a constant function pointer, use jit_insn_call_native */
-        if (IR_VALUE_DEF(target)->opcode == ir_opcode_constant) {
-            void *native_func = ((ir_instr_constant)IR_VALUE_DEF(target))->imm.ptr;
+        ir_instr def = IR_VALUE_DEF(target);
+        if (IR_INSTR_OPCODE(def) == ir_opcode_constant) {
+            void *native_func = ((ir_instr_constant)def)->imm.ptr;
             ret = jit_insn_call_native(jit_func, NULL, native_func, jit_sig, args, num_args, JIT_CALL_NOTHROW);
         } else {
             ret = jit_insn_call_indirect(jit_func, JIT_VALUE(target), jit_sig, args, num_args, JIT_CALL_NOTHROW);
@@ -213,26 +212,26 @@ void _emit_instr(jit_function_t jit_func,
     }
     case ir_opcode_get_element_ptr: {
         IR_INSTR_AS(get_element_ptr)
-        SET_DEST(jit_insn_add_relative(jit_func, JIT_VALUE_FROM_USE(instr->ptr), instr->offset));
+        SET_DEST(jit_insn_add_relative(jit_func, JOP(0), instr->offset));
         break;
     }
     case ir_opcode_get_index_ptr: {
-        IR_INSTR_AS(get_index_ptr)
-        ir_type base_type = ir_pointer_base(ir_typeof(IR_USE_VALUE(instr->ptr)));
+        /* operands: ptr, index */
+        ir_value ptr = VOP(0);
+        ir_type base_type = ir_pointer_base(ir_typeof(ptr));
         if (base_type->kind == ir_type_kind_struct) {
             jit_value_t offset = jit_insn_mul(
                 jit_func,
-                JIT_VALUE_FROM_USE(instr->index),
+                JOP(1),
                 jit_value_create_nint_constant(jit_func, jit_type_void_ptr, base_type->size));
-            SET_DEST(jit_insn_add(jit_func, JIT_VALUE_FROM_USE(instr->ptr), offset));
+            SET_DEST(jit_insn_add(jit_func, JOP(0), offset));
         } else {
-            SET_DEST(jit_insn_load_elem_address(jit_func, JIT_VALUE_FROM_USE(instr->ptr), JIT_VALUE_FROM_USE(instr->index), JIT_TYPE(base_type)));
+            SET_DEST(jit_insn_load_elem_address(jit_func, JOP(0), JOP(1), JIT_TYPE(base_type)));
         }
         break;
     }
     case ir_opcode_load: {
-        IR_INSTR_AS(load)
-        ir_value ptr = IR_USE_VALUE(instr->ptr);
+        ir_value ptr = VOP(0);
         if (jit_modes[ptr->index] == 2) {
             SET_DEST_FORCE_COPY(JIT_VALUE_FROM_ALLOCA(ptr));
         } else {
@@ -242,12 +241,11 @@ void _emit_instr(jit_function_t jit_func,
         break;
     }
     case ir_opcode_store: {
-        IR_INSTR_AS(store)
-        ir_value ptr = IR_USE_VALUE(instr->ptr);
+        ir_value ptr = VOP(0);
         if (jit_modes[ptr->index] == 2) {
-            jit_insn_store(jit_func, JIT_VALUE_FROM_ALLOCA(ptr), JIT_VALUE_FROM_USE(instr->value));
+            jit_insn_store(jit_func, JIT_VALUE_FROM_ALLOCA(ptr), JOP(1));
         } else {
-            jit_insn_store_relative(jit_func, JIT_VALUE(ptr), 0, JIT_VALUE_FROM_USE(instr->value));
+            jit_insn_store_relative(jit_func, JIT_VALUE(ptr), 0, JOP(1));
         }
         break;
     }
@@ -288,9 +286,8 @@ void _emit_instr(jit_function_t jit_func,
         break;
     }
     case ir_opcode_cast: {
-        IR_INSTR_AS(cast)
         ir_type dest_type = ir_typeof(IR_INSTR_DEST(_instr));
-        SET_DEST(jit_insn_convert(jit_func, JIT_VALUE_FROM_USE(instr->value), JIT_TYPE(dest_type), 0));
+        SET_DEST(jit_insn_convert(jit_func, JOP(0), JIT_TYPE(dest_type), 0));
         break;
     }
     case ir_opcode_func_arg: {
@@ -315,7 +312,7 @@ void _emit_instr(jit_function_t jit_func,
     }
     case ir_opcode_branch_cond: {
         IR_INSTR_AS(branch_cond)
-        jit_value_t cond = JIT_VALUE_FROM_USE(instr->cond);
+        jit_value_t cond = JOP(0);
         /* Optimization: Omit branch if we're jumping to the next block. */
         if (instr->if_true->block != block->next) {
             jit_insn_branch_if(jit_func, cond, JIT_LABEL(instr->if_true));
@@ -337,14 +334,16 @@ void _emit_instr(jit_function_t jit_func,
             }
             labels[i] = *p;
         }
-        jit_insn_jump_table(jit_func, JIT_VALUE_FROM_USE(instr->index), labels, num_labels);
+        jit_insn_jump_table(jit_func, JOP(0), labels, num_labels);
         free(labels);
         break;
     }
     case ir_opcode_ret: {
-        IR_INSTR_AS(ret)
-        ir_value value = IR_USE_VALUE(instr->value);
-        jit_insn_return(jit_func, ir_typeof(value) != ir_type_void ? JIT_VALUE(value) : NULL);
+        jit_insn_return(jit_func, NULL);
+        break;
+    }
+    case ir_opcode_retval: {
+        jit_insn_return(jit_func, JOP(0));
         break;
     }
     default:
@@ -393,15 +392,16 @@ ir_object ir_libjit_compile(ir_func func) {
     ir_instr _instr;
     for (b = func->first_block; b != NULL; b = b->next) {
         for (_instr = b->first_instr; _instr != NULL; _instr = _instr->next) {
-            if (_instr->opcode != ir_opcode_load &&
-                _instr->opcode != ir_opcode_store) {
+            ir_opcode opcode = IR_INSTR_OPCODE(_instr);
+            if (opcode != ir_opcode_load &&
+                opcode != ir_opcode_store) {
                 size_t uses_count;
                 ir_use uses = ir_get_uses(_instr, &uses_count);
                 for (size_t i = 0; i < uses_count; i++) {
                     jit_modes[IR_USE_VALUE(uses[i])->index] = 1;
                 }
             }
-            if (_instr->opcode == ir_opcode_alloca) {
+            if (opcode == ir_opcode_alloca) {
                 IR_INSTR_AS(alloca)
                 ir_value dest = IR_INSTR_DEST(_instr);
                 if (instr->num_elements == 1 &&

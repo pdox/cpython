@@ -20,11 +20,11 @@ _end_stack_level(ir_block b, int entry_stack_level, int pyblock_stack_level) {
     ir_instr _instr;
     int level = entry_stack_level;
     for (_instr = b->first_instr; _instr != NULL; _instr = _instr->next) {
-        if (_instr->opcode == ir_opcode_stackadj) {
+        if (IR_INSTR_OPCODE(_instr) == ir_opcode_stackadj) {
             IR_INSTR_AS(stackadj)
             level += instr->amount;
             assert(level >= 0);
-        } else if (_instr->opcode == ir_opcode_pop_block) {
+        } else if (IR_INSTR_OPCODE(_instr) == ir_opcode_pop_block) {
             assert(level >= pyblock_stack_level);
             level = pyblock_stack_level;
         }
@@ -66,7 +66,7 @@ void ir_remove_dead_blocks(ir_func func) {
             }
             /* Look for labels in setup_block */
             assert(b->first_instr->next);
-            if (b->first_instr->next->opcode == ir_opcode_setup_block) {
+            if (IR_INSTR_OPCODE(b->first_instr->next) == ir_opcode_setup_block) {
                 ir_instr _instr = b->first_instr->next;
                 IR_INSTR_AS(setup_block);
                 if (instr->b_handler) {
@@ -251,7 +251,7 @@ ir_compute_pyblock_map(ir_func func, ir_label *ignored) {
             int in_stack = state.incoming_stack_level[b->index];
             ir_instr _instr = b->first_instr->next;
             assert(_instr);
-            if (_instr->opcode == ir_opcode_setup_block) {
+            if (IR_INSTR_OPCODE(_instr) == ir_opcode_setup_block) {
                 IR_INSTR_AS(setup_block)
                 at = _new_pyblock(&state, instr->b_type, instr->b_handler, in_stack, in);
                 instr->pb = at;
@@ -268,7 +268,7 @@ ir_compute_pyblock_map(ir_func func, ir_label *ignored) {
                     _transfer_pyblock(&state, instr->b_handler, at->prev, 0);
                     _transfer_stack_level(&state, instr->b_handler, in_stack);
                 }
-            } else if (_instr->opcode == ir_opcode_pop_block) {
+            } else if (IR_INSTR_OPCODE(_instr) == ir_opcode_pop_block) {
                 IR_INSTR_AS(pop_block)
                 assert(in != NULL);
                 if (instr->b_type == IR_PYBLOCK_EXCEPT_HANDLER) {
@@ -290,16 +290,11 @@ ir_compute_pyblock_map(ir_func func, ir_label *ignored) {
 
             /* Decide what to do based on the control flow opcode */
             _instr = b->last_instr; /* Need to set this for IR_INSTR_AS */
-            switch (_instr->opcode) {
+            switch (IR_INSTR_OPCODE(_instr)) {
             case ir_opcode_goto_error: {
                 IR_INSTR_AS(goto_error)
                 instr->pb = at;
                 instr->entry_stack_level = out_stack_level;
-                /* Only map fall through */
-                if (instr->fallthrough) {
-                    _transfer_pyblock(&state, instr->fallthrough, at, 0);
-                    _transfer_stack_level(&state, instr->fallthrough, out_stack_level);
-                }
                 break;
             }
             case ir_opcode_goto_fbe: {
@@ -438,24 +433,25 @@ ir_compute_stack_positions(ir_func func) {
             block_done[b->index] = 1;
 
             for (_instr = b->first_instr; _instr != NULL; _instr = _instr->next) {
-                if (_instr->opcode == ir_opcode_stackadj) {
+                ir_opcode opcode = IR_INSTR_OPCODE(_instr);
+                if (opcode == ir_opcode_stackadj) {
                     IR_INSTR_AS(stackadj)
                     stack_level += instr->amount;
                     assert(stack_level >= 0);
-                } else if (_instr->opcode == ir_opcode_stack_peek) {
+                } else if (opcode == ir_opcode_stack_peek) {
                     IR_INSTR_AS(stack_peek)
                     instr->abs_offset = stack_level - instr->offset;
                     assert(instr->abs_offset >= 0);
                     max_index = Py_MAX(max_index, instr->abs_offset);
-                } else if (_instr->opcode == ir_opcode_stack_put) {
+                } else if (opcode == ir_opcode_stack_put) {
                     IR_INSTR_AS(stack_put)
                     instr->abs_offset = stack_level - instr->offset;
                     assert(instr->abs_offset >= 0);
                     max_index = Py_MAX(max_index, instr->abs_offset);
                 } else {
                     /* Python-specific control flow should have been lowered */
-                    assert(!(ir_opcode_is_python_specific(_instr->opcode) &&
-                             ir_instr_opcode_is_control_flow(_instr->opcode)));
+                    assert(!(ir_opcode_is_python_specific(opcode) &&
+                             ir_opcode_is_control_flow(opcode)));
                 }
             }
             /* Transfer the final stack level to target blocks */
@@ -478,10 +474,10 @@ ir_compute_stack_positions(ir_func func) {
     /* We should have assigned a stack slot to every peek/put */
     for (b = func->first_block; b != NULL; b = b->next) {
         for (_instr = b->first_instr; _instr != NULL; _instr = _instr->next) {
-            if (_instr->opcode == ir_opcode_stack_put) {
+            if (IR_INSTR_OPCODE(_instr) == ir_opcode_stack_put) {
                 IR_INSTR_AS(stack_put)
                 assert(instr->abs_offset >= 0);
-            } else if (_instr->opcode == ir_opcode_stack_peek) {
+            } else if (IR_INSTR_OPCODE(_instr) == ir_opcode_stack_peek) {
                 IR_INSTR_AS(stack_peek)
                 assert(instr->abs_offset >= 0);
             }
