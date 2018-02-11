@@ -28,7 +28,7 @@ typedef struct {
 
 #define BUILDER()   (*(ctx.builder))
 
-#define LLVM_BLOCK(label)  ctx.llvm_blocks[(label)->block->index]
+#define LLVM_BLOCK(irblock)  ctx.llvm_blocks[(irblock)->index]
 
 #define LLVM_TYPE(irtype)  _ir_type_to_llvm_type(ctx, (irtype))
 
@@ -138,10 +138,12 @@ _ir_type_to_llvm_type(_TranslationContext &ctx, ir_type type) {
 })
 
 /* Get ir_value corresponding to i'th operand */
-#define VOP(i) IR_USE_VALUE(IR_INSTR_OPERAND(_instr, (i)))
+#define VOP(i) IR_INSTR_OPERAND(_instr, (i))
 
 /* Get llvm::Value* corresponding to i'th operand */
 #define LOP(i) LLVM_VALUE(VOP((i)))
+
+#define BOP(i) IR_LABEL_BLOCK(VOP(i))
 
 /* Given an llvm::Value*, use it as the 'dest' value for the current instruction */
 #define SET_DEST(__v) do { \
@@ -479,8 +481,7 @@ void _emit_instr(_TranslationContext &ctx, ir_block b, ir_instr _instr) {
         break;
     }
     case ir_opcode_branch: {
-        IR_INSTR_AS(branch)
-        BUILDER().CreateBr(LLVM_BLOCK(instr->target));
+        BUILDER().CreateBr(LLVM_BLOCK(BOP(0)));
         break;
     }
     case ir_opcode_branch_cond: {
@@ -493,27 +494,25 @@ void _emit_instr(_TranslationContext &ctx, ir_block b, ir_instr _instr) {
             llvm::MDBuilder(context).createBranchWeights(instr->if_true_weight, instr->if_false_weight);
         BUILDER().CreateCondBr(
             cond,
-            LLVM_BLOCK(instr->if_true),
-            LLVM_BLOCK(instr->if_false),
+            LLVM_BLOCK(BOP(1)),
+            LLVM_BLOCK(BOP(2)),
             branchWeights);
         break;
     }
     case ir_opcode_jumptable: {
-        IR_INSTR_AS(jumptable)
-
         auto ip = BUILDER().saveIP();
         llvm::BasicBlock* error_block = llvm::BasicBlock::Create(context, "error_block", ctx.llvm_func);
         BUILDER().SetInsertPoint(error_block);
         BUILDER().CreateUnreachable();
         BUILDER().restoreIP(ip);
 
-
+        size_t num_cases = IR_INSTR_NUM_OPERANDS(_instr) - 1;
         llvm::SwitchInst *sw = BUILDER().CreateSwitch(
             LOP(0),
             error_block,
-            instr->table_size);
-        for (size_t i = 0; i < instr->table_size; i++) {
-            sw->addCase(BUILDER().getInt32(i), LLVM_BLOCK(instr->table[i]));
+            num_cases);
+        for (size_t i = 0; i < num_cases; i++) {
+            sw->addCase(BUILDER().getInt32(i), LLVM_BLOCK(BOP(1+i)));
         }
         break;
     }
@@ -617,11 +616,15 @@ ir_llvm_compile(ir_func func) {
          */
         for (_instr = b->first_instr; _instr != NULL; _instr = _instr->next) {
             size_t count;
+            ir_type dest_type = ir_typeof(IR_INSTR_DEST(_instr));
             ir_use uses = ir_get_uses(_instr, &count);
             for (int i = 0; i < count; i++) {
-                ALLOCA_MODE_IF_NOT_DEFINED(IR_USE_VALUE(uses[i]));
+                ir_value v = IR_USE_VALUE(uses[i]);
+                if (!ir_type_is_label(ir_typeof(v))) {
+                    ALLOCA_MODE_IF_NOT_DEFINED(IR_USE_VALUE(uses[i]));
+                }
             }
-            if (ir_typeof(IR_INSTR_DEST(_instr)) != ir_type_void) {
+            if (dest_type != ir_type_void && dest_type != ir_type_label) {
                 RECORD_DEFINE(IR_INSTR_DEST(_instr));
             }
 

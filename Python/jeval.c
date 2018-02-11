@@ -131,17 +131,17 @@ typedef struct _JITData {
 #define GOTO_EXIT()              BRANCH(jd->exit)
 
 #define GOTO_FAST_BLOCK_END(why) \
-    ir_goto_fbe(jd->func, IR_WHY_ ## why, NULL, jd->exit)
+    ir_goto_fbe(jd->func, IR_WHY_ ## why, jd->exit, NULL)
 
 /* Issue a fast_block_end, but with a pre-computed stack level and pyblock */
 #define GOTO_FAST_BLOCK_END_EX(why, with_stack_level, with_pb) do { \
     ir_cursor_set_pyblock(jd->func, (with_stack_level), (with_pb)); \
-    ir_goto_fbe(jd->func, IR_WHY_ ## why, NULL, jd->exit); \
+    ir_goto_fbe(jd->func, IR_WHY_ ## why, jd->exit, NULL); \
     ir_cursor_clear_pyblock(jd->func); \
 } while (0)
 
 #define GOTO_FAST_BLOCK_END_CONTINUE(continue_target) \
-    ir_goto_fbe(jd->func, IR_WHY_CONTINUE, continue_target, jd->exit)
+    ir_goto_fbe(jd->func, IR_WHY_CONTINUE, jd->exit, continue_target)
 
 ir_label _instr_index_to_label(JITData *jd, int instr_index) {
     assert(instr_index >= 0);
@@ -1066,11 +1066,11 @@ EMITTER_FOR(YIELD_FROM) {
 
     /* Receiver remains on the stack */
     ir_yield(jd->func,
-             LOAD(yieldval),
              next_instr_index - 1,
+             LOAD(yieldval),
+             jd->exit,
              jd->jmptab[next_instr_index - 1],
-             jd->jmptab[next_instr_index],
-             jd->exit);
+             jd->jmptab[next_instr_index]);
 
     /* Exiting from 'yield from' */
     LABEL(handle_null_yieldval);
@@ -1094,7 +1094,7 @@ EMITTER_FOR(YIELD_VALUE) {
         GOTO_ERROR_IF_NOT(wrapped);
         v = wrapped;
     }
-    ir_yield(jd->func, v, next_instr_index, jd->jmptab[next_instr_index], NULL, jd->exit);
+    ir_yield(jd->func, next_instr_index, v, jd->exit, jd->jmptab[next_instr_index], NULL);
 }
 
 EMITTER_FOR(POP_EXCEPT) {
@@ -3234,6 +3234,7 @@ void _emit_end_finally(JITData *jd, ir_instr_end_finally instr) {
     IR_LABEL_INIT(normal_exit);
     ir_pyblock pb = instr->pb;
     int estack = instr->entry_stack_level;
+    ir_label fallthrough = IR_INSTR_OPERAND((ir_instr)instr, 0);
 
     _pop_pyblock_from_blockstack(jd, pb);
 
@@ -3272,7 +3273,7 @@ void _emit_end_finally(JITData *jd, ir_instr_end_finally instr) {
         created when the exception was caught, otherwise
         the stack will be in an inconsistent state. */
         UNWIND_EXCEPT_ONLY_NEW(estack-1, pb);
-        BRANCH(instr->fallthrough);
+        BRANCH(fallthrough);
     });
     CRASH(); /* Shouldn't get here. Invalid why value? */
 
@@ -3300,7 +3301,7 @@ void _emit_end_finally(JITData *jd, ir_instr_end_finally instr) {
     LABEL(normal_exit);
     UNWIND_BLOCK_NEW(estack-1, pb);
     DECREF(status);
-    BRANCH(instr->fallthrough);
+    BRANCH(fallthrough);
 }
 
 static inline
@@ -3574,7 +3575,7 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr) {
         int yield_f_lasti = sizeof(_Py_CODEUNIT) * (resume_instr_index - 1);
         assert(yield_f_lasti >= 0);
 
-        SET_RETVAL(IR_USE_VALUE(IR_INSTR_OPERAND(_instr, 0)));
+        SET_RETVAL(IR_INSTR_OPERAND(_instr, 0));
         JVALUE f_valuestack = LOAD_FIELD(jd->f, PyFrameObject, f_valuestack, ir_type_pyobject_ptr_ptr);
         JVALUE stack_pointer = ir_get_index_ptr(jd->func, f_valuestack, CONSTANT_INT(instr->entry_stack_level));
         STORE_FIELD(jd->f, PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr, stack_pointer);
@@ -3588,16 +3589,17 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr) {
         BRANCH(jd->exit);
 
         /* ~~~ Magic happens ~~~ */
-
+        ir_label resume_inst_label = IR_INSTR_OPERAND(_instr, 2);
         ADD_RESUME_ENTRY(yield_f_lasti, resume);
-        _emit_resume_stub(jd, resume, instr->entry_stack_level + 1, instr->pb, resume_instr_index, instr->resume_inst_label);
+        _emit_resume_stub(jd, resume, instr->entry_stack_level + 1, instr->pb, resume_instr_index, resume_inst_label);
 
-        if (instr->throw_inst_label) {
+        if (IR_INSTR_NUM_OPERANDS(_instr) > 3) {
             /* There is terrible code in genobject.c which increments f_lasti
                when an exception is thrown on a YIELD FROM. Handle this case */
+            ir_label throw_inst_label = IR_INSTR_OPERAND(_instr, 3);
             IR_LABEL_INIT(resume_extra);
             ADD_RESUME_ENTRY(yield_f_lasti + sizeof(_Py_CODEUNIT), resume_extra);
-            _emit_resume_stub(jd, resume_extra, instr->entry_stack_level, instr->pb, resume_instr_index + 1, instr->throw_inst_label);
+            _emit_resume_stub(jd, resume_extra, instr->entry_stack_level, instr->pb, resume_instr_index + 1, throw_inst_label);
         }
         return 1;
     }
@@ -3618,7 +3620,7 @@ int _ir_lower_refcounting(JITData *jd, ir_instr _instr) {
     switch (IR_INSTR_OPCODE(_instr)) {
     case ir_opcode_incref: {
         IR_INSTR_AS(incref)
-        ir_value obj = IR_USE_VALUE(IR_INSTR_OPERAND(_instr, 0));
+        ir_value obj = IR_INSTR_OPERAND(_instr, 0);
         ir_label skip_incref = NULL;
         if (instr->is_xincref) {
             skip_incref = ir_label_new(func, "x_skip_incref");
@@ -3642,7 +3644,7 @@ int _ir_lower_refcounting(JITData *jd, ir_instr _instr) {
     case ir_opcode_decref: {
         IR_INSTR_AS(decref)
         ir_label skip_dealloc = ir_label_new(func, "decref_skip_dealloc");
-        ir_value obj = IR_USE_VALUE(IR_INSTR_OPERAND(_instr, 0));
+        ir_value obj = IR_INSTR_OPERAND(_instr, 0);
         if (instr->is_xdecref) {
             ir_branch_if_not(func, obj, skip_dealloc, IR_UNLIKELY);
         }
@@ -3691,7 +3693,7 @@ int _ir_lower_stack_ops(JITData *jd, ir_instr _instr) {
         IR_INSTR_AS(stack_put)
         assert(instr->abs_offset >= 0);
         assert(instr->abs_offset < jd->stack_size);
-        STORE(jd->stack_values[instr->abs_offset], IR_USE_VALUE(IR_INSTR_OPERAND(_instr, 0)));
+        STORE(jd->stack_values[instr->abs_offset], IR_INSTR_OPERAND(_instr, 0));
         return 1;
     }
     default: break;
@@ -3712,7 +3714,7 @@ int _ir_lower_remaining(JITData *jd, ir_instr _instr) {
     case ir_opcode_setlocal: {
         IR_INSTR_AS(setlocal)
         ir_value addr = ir_get_index_ptr(jd->func, jd->fastlocals, ir_constant_int(jd->func, instr->index, NULL));
-        STORE(addr, IR_USE_VALUE(IR_INSTR_OPERAND(_instr, 0)));
+        STORE(addr, IR_INSTR_OPERAND(_instr, 0));
         return 1;
     }
     case ir_opcode_check_eval_breaker: {
@@ -3728,13 +3730,12 @@ int _ir_lower_yield_dispatch(JITData *jd, ir_instr _instr) {
     if (IR_INSTR_OPCODE(_instr) != ir_opcode_yield_dispatch) {
         return 0;
     }
-    IR_INSTR_AS(yield_dispatch)
-
     /* TODO: Find a less quadratic way to do this dispatch */
     JVALUE f_lasti = LOAD_FIELD(jd->f, PyFrameObject, f_lasti, ir_type_int);
 
     /* Handle generator start */
-    BRANCH_IF(CMP_LT(f_lasti, CONSTANT_INT(0)), instr->body_start, IR_SEMILIKELY);
+    ir_label body_start = IR_INSTR_OPERAND(_instr, 0);
+    BRANCH_IF(CMP_LT(f_lasti, CONSTANT_INT(0)), body_start, IR_SEMILIKELY);
 
     /* Handle each resume point */
     resume_entry *re = jd->resume_entry_list;

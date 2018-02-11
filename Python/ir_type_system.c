@@ -7,6 +7,7 @@
 
 /* Define void */
 ir_type_t _ir_type_void = {"void", ir_type_kind_void, 0, 0, {NULL}};
+ir_type_t _ir_type_label = {"label", ir_type_kind_label, 0, 0, {NULL}};
 
 /* Define integral types */
 #define PROCESS(name, ctype, ps, id, va_arg_type) \

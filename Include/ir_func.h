@@ -2,9 +2,12 @@ IR_PROTOTYPE(ir_instr)
 IR_PROTOTYPE(ir_value)
 IR_PROTOTYPE(ir_use)
 IR_PROTOTYPE(ir_block)
-IR_PROTOTYPE(ir_label)
 IR_PROTOTYPE(ir_func)
 IR_PROTOTYPE(ir_pyblock)
+
+/* ir_label is an alias to ir_value. It is used as a type hint,
+   for when a value is required to contain a label. */
+typedef ir_value ir_label;
 
 /* Marks an uninitialized pyblock value */
 #define INVALID_PYBLOCK   ((ir_pyblock)(~((uintptr_t)0)))
@@ -34,19 +37,13 @@ struct ir_block_t {
     size_t index;
 };
 
-struct ir_label_t {
-    /* This is NULL when the label hasn't been assigned yet. */
-    ir_block block;
-    const char *name;
-};
-
 #define LABEL_PREFIX_STACK_SIZE   8
 
 struct ir_func_t {
     ir_context context;
     char *name;
     ir_type sig;
-    ir_label entry_label;
+    ir_block entry_block;
     ir_block first_block;
     ir_block current_block; /* NULL means 'insert after last_block' */
     ir_block last_block;
@@ -95,18 +92,6 @@ ssize_t ir_value_index(ir_value value) {
 /* Generates fully-qualified label name, for use in debug mode */
 const char* _ir_label_qualname(ir_func func, const char *name);
 
-/* Create a not-yet-assigned label */
-static inline
-ir_label ir_label_new(ir_func func, const char *name) {
-    IR_FUNC_ALLOC(ret, ir_label, 0)
-    ret->block = NULL;
-    ret->name = _ir_label_qualname(func, name);
-    return ret;
-}
-
-static inline
-void ir_branch(ir_func func, ir_label target);
-
 /* Add a prefix to all labels from this point on.
    This must be matched with a corresponding ir_label_pop_prefix()
  */
@@ -137,15 +122,7 @@ void ir_label_pop_prefix(ir_func func) {
     func->label_prefix_stack[i-1] = NULL;
 }
 
-static inline
-char* ir_label_repr(char *p, ir_label label) {
-    if (label->name) {
-        p += sprintf(p, "%s(%p)", label->name, label->block);
-    } else {
-        p += sprintf(p, "%p", label->block);
-    }
-    return p;
-}
+char* ir_label_repr(char *p, ir_label label);
 
 /* Returns an upper bound on value indexes. (from ir_value_index).
    This may change if more values/instructions are added.
@@ -167,16 +144,10 @@ size_t ir_func_next_block_index(ir_func func) {
 */
 void ir_func_verify(ir_func func);
 
-/* Move all blocks from 'from' (inclusive) to 'to' (exclusive) to the end of the function. */
-void ir_func_move_blocks_to_end(ir_func func, ir_label from, ir_label to);
-
 /* Dump function IR to string */
 char *ir_func_dump(ir_func func);
 
 /* Print representation of value to buffer */
 char *ir_value_repr(char *p, ir_value value);
-
-/* Print representation of use (value) to buffer */
-#define ir_use_repr(p, use)   ir_value_repr(p, IR_USE_VALUE((use)))
 
 void ir_func_dump_file(ir_func func, const char *filename);

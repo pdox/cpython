@@ -1,5 +1,6 @@
 typedef enum {
     ir_type_kind_void,
+    ir_type_kind_label,
 
     /* If you change these, make sure to update the ir_type_is_* functions below */
     /* Signed integral types */
@@ -76,6 +77,11 @@ int ir_type_is_struct(ir_type type) {
 static inline
 int ir_type_is_void(ir_type type) {
     return type->kind == ir_type_kind_void;
+}
+
+static inline
+int ir_type_is_label(ir_type type) {
+    return type->kind == ir_type_kind_label;
 }
 
 /* Declare all base types */

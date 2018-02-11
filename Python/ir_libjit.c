@@ -59,16 +59,17 @@ jit_context_t gcontext = NULL;
 })
 
 /* ir_value corresponding to operand i */
-#define VOP(i)   IR_USE_VALUE(IR_INSTR_OPERAND(_instr, (i)))
+#define VOP(i)   IR_INSTR_OPERAND(_instr, (i))
 
 /* jit_value_t corresponding to operand i */
 #define JOP(i)   JIT_VALUE(VOP(i))
 
-#define JIT_VALUE_FROM_USE(iruse)  JIT_VALUE(IR_USE_VALUE((iruse)))
+/* get ir_block corresponding to operand i */
+#define BOP(i)   IR_LABEL_BLOCK(VOP(i))
 
-#define JIT_LABEL(irlabel)   ( \
-    assert((irlabel)->block->index < num_blocks), \
-    &jit_blocks[(irlabel)->block->index])
+#define JIT_LABEL(irblock)   ( \
+    assert((irblock)->index < num_blocks), \
+    &jit_blocks[(irblock)->index])
 
 #define JIT_TYPE(irtype) _ir_type_to_jit(irtype)
 
@@ -102,8 +103,9 @@ jit_type_t _ir_type_to_jit(ir_type type) {
         free(jit_params);
         return ret;
     }
+    case ir_type_kind_label:
     case ir_type_kind_struct:
-        abort(); /* struct literals not supported */
+        abort(); /* struct and label literals not supported */
         break;
     }
     Py_UNREACHABLE();
@@ -303,32 +305,32 @@ void _emit_instr(jit_function_t jit_func,
         break;
     }
     case ir_opcode_branch: {
-        IR_INSTR_AS(branch)
+        ir_block target = BOP(0);
         /* Optimization: Don't emit branch if we're jumping to the next block, just fall through. */
-        if (instr->target->block != block->next) {
-            jit_insn_branch(jit_func, JIT_LABEL(instr->target));
+        if (target != block->next) {
+            jit_insn_branch(jit_func, JIT_LABEL(target));
         }
         break;
     }
     case ir_opcode_branch_cond: {
-        IR_INSTR_AS(branch_cond)
         jit_value_t cond = JOP(0);
+        ir_block if_true = BOP(1);
+        ir_block if_false = BOP(2);
         /* Optimization: Omit branch if we're jumping to the next block. */
-        if (instr->if_true->block != block->next) {
-            jit_insn_branch_if(jit_func, cond, JIT_LABEL(instr->if_true));
+        if (if_true != block->next) {
+            jit_insn_branch_if(jit_func, cond, JIT_LABEL(if_true));
         }
-        if (instr->if_false->block != block->next) {
-            jit_insn_branch_if_not(jit_func, cond, JIT_LABEL(instr->if_false));
+        if (if_false != block->next) {
+            jit_insn_branch_if_not(jit_func, cond, JIT_LABEL(if_false));
         }
         break;
     }
     case ir_opcode_jumptable: {
-        IR_INSTR_AS(jumptable)
-        int num_labels = instr->table_size;
+        int num_labels = IR_INSTR_NUM_OPERANDS(_instr) - 1;
         jit_label_t *labels = (jit_label_t*)malloc(sizeof(jit_label_t) * num_labels);
         int i;
         for (i = 0; i < num_labels; i++) {
-            jit_label_t *p = JIT_LABEL(instr->table[i]);
+            jit_label_t *p = JIT_LABEL(BOP(1+i));
             if (*p == jit_label_undefined) {
                 *p = jit_function_reserve_label(jit_func);
             }

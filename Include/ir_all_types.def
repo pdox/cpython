@@ -1,6 +1,7 @@
 /* This is an X-macro which invokes PROCESS for all built-in base types */
 
 PROCESS(void)
+PROCESS(label)
 
 PROCESS(char)
 PROCESS(short)

@@ -15,13 +15,14 @@ ir_func ir_func_new(ir_context context, const char *name, ir_type sig) {
     func->context = context;
     func->name = _ir_strdup(context, name);
     func->sig = sig;
-    func->entry_label = ir_label_new(func, "entry");
+    ir_label entry_label = ir_label_new(func, "entry");
     func->current_pyblock = INVALID_PYBLOCK;
     func->current_stack_level = -1;
 
     /* Open a cursor at the entry block */
     _ir_func_new_block(func);
-    ir_label_here(func, func->entry_label);
+    ir_label_here(func, entry_label);
+    func->entry_block = IR_LABEL_BLOCK(entry_label);
 
     /* Emit the instructions that fetch the arguments */
     func->arg[0] = NULL;
@@ -52,6 +53,18 @@ const char* _ir_label_qualname(ir_func func, const char *name) {
     p += sprintf(p, "%s", name);
     assert(p == qualname + qualname_size);
     return qualname;
+}
+
+char* ir_label_repr(char *p, ir_label label) {
+    assert(ir_type_is_label(ir_typeof(label)));
+    ir_instr _instr = IR_VALUE_DEF(label);
+    IR_INSTR_AS(label_here)
+    if (instr->name) {
+        p += sprintf(p, "%s(%p)", instr->name, _instr->parent);
+    } else {
+        p += sprintf(p, "%p", _instr->parent);
+    }
+    return p;
 }
 
 char* ir_block_repr(char *p, ir_block b) {
@@ -175,11 +188,11 @@ static void ir_func_verify_structure(ir_func func) {
 
         /* Make sure that outgoing labels are resolved */
         size_t label_count;
-        ir_label *labels = ir_list_outgoing_labels(b, &label_count);
+        ir_use labels = ir_list_outgoing_labels(b, &label_count);
         for (size_t i = 0; i < label_count; i++) {
-            if (labels[i] != NULL) {
-                ASSERT(labels[i]->block != NULL, "Branch to unresolved label");
-            }
+            ir_label label = IR_USE_VALUE(labels[i]);
+            ASSERT(ir_type_is_label(ir_typeof(label)), "Non-label in outgoing labels list");
+            ASSERT(IR_LABEL_BLOCK(label) != NULL, "Branch to unresolved label");
         }
     }
 }
@@ -227,26 +240,4 @@ void ir_func_dump_file(ir_func func, const char *filename) {
 char *ir_value_repr(char *p, ir_value value) {
     p += sprintf(p, "%%%ld", (long)value->index);
     return p;
-}
-
-void ir_func_move_blocks_to_end(ir_func func, ir_label from, ir_label to) {
-    ir_block from_block = from->block;
-    ir_block to_block = to->block;
-    ir_block pre_to_block = to_block->prev;
-
-    assert(from_block && to_block && pre_to_block);
-
-#ifndef NDEBUG
-    {
-      /* Ensure they are in order */
-      ir_block b;
-      for (b = from_block; b != NULL && b != pre_to_block; b = b->next);
-      assert(b == pre_to_block);
-    }
-#endif
-
-    IR_LL_DETACH_CHAIN(func->first_block, func->last_block, from_block, pre_to_block);
-    /* This needs to be a copy (rather than a reference) to last_block */
-    ir_block after = func->last_block;
-    IR_LL_ATTACH_CHAIN(func->first_block, func->last_block, from_block, pre_to_block, after);
 }
