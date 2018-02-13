@@ -53,8 +53,8 @@ _ir_opcode_repr(ir_opcode opcode) {
     OPCODE_CASE(jumptable)
     OPCODE_CASE(ret)
     OPCODE_CASE(retval)
-    OPCODE_CASE(getlocal)
     OPCODE_CASE(setlocal)
+    OPCODE_CASE(dellocal)
     OPCODE_CASE(incref)
     OPCODE_CASE(decref)
     OPCODE_CASE(stackadj)
@@ -64,6 +64,7 @@ _ir_opcode_repr(ir_opcode opcode) {
     OPCODE_CASE(setup_block)
     OPCODE_CASE(pop_block)
     OPCODE_CASE(goto_error)
+    OPCODE_CASE(getlocal)
     OPCODE_CASE(goto_fbe)
     OPCODE_CASE(yield)
     OPCODE_CASE(yield_dispatch)
@@ -236,13 +237,27 @@ ir_instr_repr(char *p, ir_instr _instr) {
         }
         case ir_opcode_getlocal: {
             IR_INSTR_AS(getlocal)
-            p += sprintf(p, "%ld", (long)instr->index);
+            p += sprintf(p, "%ld ", (long)instr->index);
+            if (instr->undef_check) {
+                p += sprintf(p, "undef_check ");
+            }
+            if (instr->known_defined) {
+                p += sprintf(p, "known_defined ");
+            }
+            p = ir_label_repr(p, IR_INSTR_OPERAND(_instr, 0));
+            p += sprintf(p, " ");
+            p = ir_label_repr(p, IR_INSTR_OPERAND(_instr, 1));
             break;
         }
         case ir_opcode_setlocal: {
             IR_INSTR_AS(setlocal)
             p += sprintf(p, "%ld ", (long)instr->index);
             p = ir_value_repr(p, IR_INSTR_OPERAND(_instr, 0));
+            break;
+        }
+        case ir_opcode_dellocal: {
+            IR_INSTR_AS(dellocal)
+            p += sprintf(p, "%ld", (long)instr->index);
             break;
         }
         case ir_opcode_incref: {

@@ -52,6 +52,7 @@ typedef struct _JITData {
     ir_type sig_ioo;
     ir_type sig_iooo;
     ir_type sig_ifi; /* for _do_eval_breaker() helper */
+    ir_type sig_if;  /* for PyTraceBack_Here */
     ir_type sig_ol;  /* for PyLong_FromLong */
     ir_type dealloc_sig;
     ir_type blocksetup_sig;
@@ -76,6 +77,7 @@ typedef struct _JITData {
     ir_label fast_block_end_int;
     ir_label error_exit;
     ir_label exit;
+    ir_label unknown_handler;
 
     resume_entry *resume_entry_list;
 
@@ -108,40 +110,49 @@ typedef struct _JITData {
 #define GOTO_ERROR_IF(val) do { \
     IR_LABEL_INIT(skip_error); \
     BRANCH_IF_NOT((val), skip_error, IR_LIKELY); \
-    ir_goto_error(jd->func, jd->error_exit); \
+    ir_goto_error(jd->func, jd->unknown_handler); \
     LABEL(skip_error); \
 } while (0)
 
-#define GOTO_ERROR_IF_EX(val, with_stack_level, with_pb) do { \
+#define GOTO_ERROR_IF_EX(val, handler, with_stack_level, with_pb) do { \
     ir_cursor_set_pyblock(jd->func, (with_stack_level), (with_pb)); \
-    GOTO_ERROR_IF((val)); \
+    IR_LABEL_INIT(skip_error); \
+    BRANCH_IF_NOT((val), skip_error, IR_LIKELY); \
+    ir_goto_error(jd->func, (handler)); \
+    LABEL(skip_error); \
     ir_cursor_clear_pyblock(jd->func); \
 } while (0)
 
 #define GOTO_ERROR_IF_NOT(val)   GOTO_ERROR_IF(NOTBOOL((val)))
 
-#define GOTO_ERROR()             ir_goto_error(jd->func, jd->error_exit)
+#define GOTO_ERROR()             ir_goto_error(jd->func, jd->unknown_handler)
 
-#define GOTO_ERROR_EX(with_stack_level, with_pb) do { \
+#define GOTO_ERROR_EX(handler, with_stack_level, with_pb) do { \
     ir_cursor_set_pyblock(jd->func, (with_stack_level), (with_pb)); \
-    GOTO_ERROR(); \
+    ir_goto_error(jd->func, (handler)); \
     ir_cursor_clear_pyblock(jd->func); \
 } while (0)
 
 #define GOTO_EXIT()              BRANCH(jd->exit)
 
 #define GOTO_FAST_BLOCK_END(why) \
-    ir_goto_fbe(jd->func, IR_WHY_ ## why, jd->exit, NULL)
+    ir_goto_fbe(jd->func, IR_WHY_ ## why, jd->unknown_handler, NULL)
+
+#define GOTO_FAST_BLOCK_END_CONTINUE(continue_target) \
+    ir_goto_fbe(jd->func, IR_WHY_CONTINUE, jd->unknown_handler, (continue_target))
 
 /* Issue a fast_block_end, but with a pre-computed stack level and pyblock */
-#define GOTO_FAST_BLOCK_END_EX(why, with_stack_level, with_pb) do { \
+#define GOTO_FAST_BLOCK_END_EX(why, handler, with_stack_level, with_pb) do { \
     ir_cursor_set_pyblock(jd->func, (with_stack_level), (with_pb)); \
-    ir_goto_fbe(jd->func, IR_WHY_ ## why, jd->exit, NULL); \
+    ir_goto_fbe(jd->func, IR_WHY_ ## why, (handler), NULL); \
     ir_cursor_clear_pyblock(jd->func); \
 } while (0)
 
-#define GOTO_FAST_BLOCK_END_CONTINUE(continue_target) \
-    ir_goto_fbe(jd->func, IR_WHY_CONTINUE, jd->exit, continue_target)
+#define GOTO_FAST_BLOCK_END_CONTINUE_EX(handler, continue_target, with_stack_level, with_pb) do { \
+    ir_cursor_set_pyblock(jd->func, (with_stack_level), (with_pb)); \
+    ir_goto_fbe(jd->func, IR_WHY_CONTINUE, (handler), (continue_target)); \
+    ir_cursor_clear_pyblock(jd->func); \
+} while (0)
 
 ir_label _instr_index_to_label(JITData *jd, int instr_index) {
     assert(instr_index >= 0);
@@ -438,15 +449,6 @@ int do_raise(PyObject *, PyObject *);
         STORE(jd->next_instr_index, computed_next_instr_index); \
 } while (0)
 
-#define GETLOCAL(i)  ir_getlocal(jd->func, (i))
-
-/* Notice that the SETLOCAL macro does more than just ir_setlocal! */
-#define SETLOCAL(i, val) do { \
-    JVALUE tmp = GETLOCAL(i); \
-    ir_setlocal(jd->func, (i), (val)); \
-    XDECREF(tmp); \
-} while (0)
-
 #define EMIT_JUMP(check_eval_breaker) do { \
     if (check_eval_breaker) { \
         CHECK_EVAL_BREAKER(); \
@@ -565,13 +567,7 @@ EMITTER_FOR(NOP) {
     "local variable '%.200s' referenced before assignment"
 
 EMITTER_FOR(LOAD_FAST) {
-    JVALUE v = GETLOCAL(oparg);
-    IF_NOT(v, IR_UNLIKELY, {
-        CALL_format_exc_check_arg(PyExc_UnboundLocalError,
-                                  UNBOUNDLOCAL_ERROR_MSG,
-                                  PyTuple_GetItem(jd->co->co_varnames, oparg));
-        GOTO_ERROR();
-    });
+    JVALUE v = ir_getlocal(jd->func, oparg, 1, jd->exit);
     INCREF(v);
     PUSH(v);
 }
@@ -586,7 +582,9 @@ EMITTER_FOR(LOAD_CONST) {
 
 EMITTER_FOR(STORE_FAST) {
     JVALUE v = POP();
-    SETLOCAL(oparg, v);
+    JVALUE tmp = ir_getlocal(jd->func, oparg, 0, jd->exit);
+    ir_setlocal(jd->func, oparg, v);
+    XDECREF(tmp);
 }
 
 EMITTER_FOR(POP_TOP) {
@@ -1118,7 +1116,7 @@ EMITTER_FOR(ENTER_FINALLY) {
 
 EMITTER_FOR(END_FINALLY) {
     IR_LABEL_INIT(fallthrough);
-    ir_end_finally(jd->func, fallthrough);
+    ir_end_finally(jd->func, fallthrough, jd->unknown_handler);
     LABEL(fallthrough);
     CHECK_EVAL_BREAKER();
 }
@@ -1522,18 +1520,9 @@ EMITTER_FOR(LOAD_GLOBAL) {
 }
 
 EMITTER_FOR(DELETE_FAST) {
-    JLABEL no_error = JLABEL_INIT("no_error");
-    JVALUE v = GETLOCAL(oparg);
-    BRANCH_IF(v, no_error, IR_LIKELY);
-
-    /* Handle error (unbound) */
-    PyObject *varname = PyTuple_GetItem(jd->co->co_varnames, oparg);
-    assert(varname);
-    CALL_format_exc_check_arg(PyExc_UnboundLocalError, UNBOUNDLOCAL_ERROR_MSG, varname);
-    GOTO_ERROR();
-
-    LABEL(no_error);
-    SETLOCAL(oparg, CONSTANT_PYOBJ(NULL));
+    JVALUE tmp = ir_getlocal(jd->func, oparg, 1, jd->exit);
+    ir_dellocal(jd->func, oparg);
+    DECREF(tmp);
     CHECK_EVAL_BREAKER();
 }
 
@@ -2933,8 +2922,9 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     jd->update_blockstack = jd->is_gen;
     jd->use_patchpoint_error_handler = 0;
 
-    jd->error_exit = ir_label_new(jd->func, "error_exit");
+    jd->error_exit = NULL;
     jd->exit = ir_label_new(jd->func, "exit");
+    jd->unknown_handler = ir_label_new(jd->func, "unknown_handler");
     jd->body_start = ir_label_new(jd->func, "body_start");
 
     char namebuf[64];
@@ -2974,6 +2964,7 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     jd->sig_vp = CREATE_SIGNATURE(ir_type_void, ir_type_void_ptr);
     jd->sig_i = CREATE_SIGNATURE(ir_type_int);
     jd->sig_ifi = CREATE_SIGNATURE(ir_type_int, ir_type_pyframeobject_ptr, ir_type_int);
+    jd->sig_if = CREATE_SIGNATURE(ir_type_int, ir_type_pyframeobject_ptr);
     jd->sig_io = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr);
     jd->sig_ioo = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
     jd->sig_iooo = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
@@ -3074,14 +3065,6 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
        There are two entrypoints to each special section. One for instructions,
        and one for coming from another special section.
      */
-    LABEL(jd->error_exit);
-    IR_ASSERT(IR_PyErr_Occurred());
-    /* Insert the current frame into the traceback */
-    JTYPE sig = CREATE_SIGNATURE(ir_type_int, ir_type_pyframeobject_ptr);
-    CALL_NATIVE(sig, PyTraceBack_Here, jd->f);
-    SET_RETVAL(CONSTANT_PYOBJ(NULL));
-    BRANCH(jd->exit);
-
     LABEL(jd->exit);
     IR_Py_LeaveRecursiveCall();
     STORE_FIELD(jd->f, PyFrameObject, f_executing, ir_type_char, CONSTANT_CHAR(0));
@@ -3090,11 +3073,18 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     JVALUE ret = IR_Py_CheckFunctionResult(NULL, LOAD(jd->retval), "PyJIT_EvalFrame");
     ir_retval(jd->func, ret);
 
+    /* This is a placeholder used when pyblock-based control flow instructions are
+       created (goto_fbe, goto_error, end_finally, etc). It should be dead
+       after the pyblock analysis pass runs, because it replaces the placeholders
+       with the actual handlers. */
+    LABEL(jd->unknown_handler);
+    BRANCH(jd->unknown_handler);
+
     /* Close the cursor */
     ir_cursor_close(jd->func);
 }
 
-void ir_lower(JITData *jd);
+static void ir_lower(JITData *jd);
 
 int
 _PyJIT_CodeGen(PyCodeObject *co) {
@@ -3123,9 +3113,6 @@ _PyJIT_CodeGen(PyCodeObject *co) {
 
     /* Lower all Python-specific instructions */
     ir_lower(jd);
-
-    if (Py_JITDebugFlag > 0)
-        ir_func_verify(jd->func);
 
     PyJIT_Handle *handle = PyMem_RawMalloc(sizeof(PyJIT_Handle));
     ir_object object;
@@ -3234,7 +3221,12 @@ void _emit_end_finally(JITData *jd, ir_instr_end_finally instr) {
     IR_LABEL_INIT(normal_exit);
     ir_pyblock pb = instr->pb;
     int estack = instr->entry_stack_level;
-    ir_label fallthrough = IR_INSTR_OPERAND((ir_instr)instr, 0);
+    ir_instr _instr = (ir_instr)instr;
+    ir_label fallthrough = IR_INSTR_OPERAND(_instr, 0);
+    ir_label b_handler_exception = IR_INSTR_OPERAND(_instr, 1);
+    ir_label b_handler_return = IR_INSTR_OPERAND(_instr, 2);
+    ir_label b_handler_break = IR_INSTR_OPERAND(_instr, 3);
+    ir_label b_handler_continue = IR_INSTR_OPERAND(_instr, 4);
 
     _pop_pyblock_from_blockstack(jd, pb);
 
@@ -3248,25 +3240,32 @@ void _emit_end_finally(JITData *jd, ir_instr_end_finally instr) {
     IF(CMP_EQ(why, CONSTANT_INT(WHY_RETURN)), IR_SEMILIKELY, {
         STORE(jd->retval, POP());
         UNWIND_BLOCK_NEW(estack-2, pb);
-        GOTO_FAST_BLOCK_END_EX(RETURN, estack-6, pb->prev);
+        GOTO_FAST_BLOCK_END_EX(RETURN, b_handler_return, estack-6, pb->prev);
     });
 
     /* Only emit WHY_CONTINUE if there's a loop with a continue target above us */
-    ir_pyblock cur = pb;
-    while (cur && cur->b_type != IR_PYBLOCK_LOOP) cur = cur->prev;
-    if (cur && cur->b_type == IR_PYBLOCK_LOOP && cur->b_continue != NULL) {
+    if (b_handler_continue != jd->unknown_handler) {
+        ir_pyblock cur = pb;
+        while (cur && cur->b_type != IR_PYBLOCK_LOOP) cur = cur->prev;
+        assert(cur && cur->b_type == IR_PYBLOCK_LOOP && cur->b_continue != NULL);
         IF(CMP_EQ(why, CONSTANT_INT(WHY_CONTINUE)), IR_SEMILIKELY, {
             UNWIND_BLOCK_NEW(estack-1, pb);
-            GOTO_FAST_BLOCK_END_EX(CONTINUE, estack-6, pb->prev);
+            GOTO_FAST_BLOCK_END_CONTINUE_EX(b_handler_continue, cur->b_continue, estack-6, pb->prev);
         });
     } else {
         IR_ASSERT(CMP_NE(why, CONSTANT_INT(WHY_CONTINUE)));
     }
 
-    IF(CMP_EQ(why, CONSTANT_INT(WHY_BREAK)), IR_SEMILIKELY, {
-        UNWIND_BLOCK_NEW(estack-1, pb);
-        GOTO_FAST_BLOCK_END_EX(BREAK, estack-6, pb->prev);
-    });
+    /* Only emit WHY_BREAK if there's a loop above us */
+    if (b_handler_break != jd->unknown_handler) {
+        IF(CMP_EQ(why, CONSTANT_INT(WHY_BREAK)), IR_SEMILIKELY, {
+            UNWIND_BLOCK_NEW(estack-1, pb);
+            GOTO_FAST_BLOCK_END_EX(BREAK, b_handler_break, estack-6, pb->prev);
+        });
+    } else {
+        IR_ASSERT(CMP_NE(why, CONSTANT_INT(WHY_BREAK)));
+    }
+
     IF(CMP_EQ(why, CONSTANT_INT(WHY_SILENCED)), IR_SEMILIKELY, {
         /* An exception was silenced by 'with', we must
         manually unwind the EXCEPT_HANDLER block which was
@@ -3285,17 +3284,14 @@ void _emit_end_finally(JITData *jd, ir_instr_end_finally instr) {
         JTYPE sig2 = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
         CALL_NATIVE(sig2, PyErr_Restore, status, exc, tb);
         UNWIND_EXCEPT_ONLY_NEW(estack-3, pb);
-        GOTO_FAST_BLOCK_END_EX(EXCEPTION, estack-6, pb->prev);
+        GOTO_FAST_BLOCK_END_EX(EXCEPTION, b_handler_exception, estack-6, pb->prev);
     }
 
     LABEL(try_case_3);
     BRANCH_IF(CMP_EQ(status, CONSTANT_PYOBJ(Py_None)), normal_exit, IR_LIKELY);
     {
-        CALL_PyErr_SetString(PyExc_SystemError,
-                    "'finally' pops bad exception");
-        UNWIND_BLOCK_NEW(estack-1, pb);
-        DECREF(status);
-        GOTO_ERROR_EX(estack-6, pb->prev);
+        CALL_Py_FatalError("'finally' pops bad exception");
+        CRASH();
     }
 
     LABEL(normal_exit);
@@ -3318,7 +3314,7 @@ int _ir_why_to_why(ir_why why) {
 }
 
 static inline
-void _emit_resume_stub(JITData *jd, ir_label resume_label, int stack_level, ir_pyblock pb, int target_inst_index, ir_label target_inst_label) {
+void _emit_resume_stub(JITData *jd, ir_label resume_label, ir_label b_handler_exception, int stack_level, ir_pyblock pb, int target_inst_index, ir_label target_inst_label) {
     LABEL(resume_label);
     JVALUE f_valuestack = LOAD_FIELD(jd->f, PyFrameObject, f_valuestack, ir_type_pyobject_ptr_ptr);
 #ifndef NDEBUG
@@ -3335,7 +3331,7 @@ void _emit_resume_stub(JITData *jd, ir_label resume_label, int stack_level, ir_p
         PUT(stack_level - i, obj);
     }
 
-    GOTO_ERROR_IF_EX(jd->throwflag, stack_level, pb);
+    GOTO_ERROR_IF_EX(jd->throwflag, b_handler_exception, stack_level, pb);
     IR_ASSERT(NOTBOOL(IR_PyErr_Occurred()));
     ir_cursor_set_pyblock(jd->func, stack_level, pb);
     CHECK_EVAL_BREAKER_EX(target_inst_index);
@@ -3345,6 +3341,23 @@ void _emit_resume_stub(JITData *jd, ir_label resume_label, int stack_level, ir_p
 
 static
 void _emit_patchpoint_error_handler(JITData *jd, ir_pyblock pb, int entry_stack_level);
+
+/* The error exit is where we jump when an error occurs, and after the stack has
+   been unwound. It is similar to the precursor, except instead of pushing the
+   exception onto the stack, it just exits the function. */
+void _emit_error_exit(JITData *jd) {
+    if (jd->error_exit != NULL) {
+        BRANCH(jd->error_exit);
+    } else {
+        jd->error_exit = ir_label_new(jd->func, "error_exit");
+        LABEL(jd->error_exit);
+        IR_ASSERT(IR_PyErr_Occurred());
+        /* Insert the current frame into the traceback */
+        CALL_NATIVE(jd->sig_if, PyTraceBack_Here, jd->f);
+        SET_RETVAL(CONSTANT_PYOBJ(NULL));
+        BRANCH(jd->exit);
+    }
+}
 
 /* A precursor is the code that executes when an exception occurs,
    after the stack has unwound, and when the exception is going to be
@@ -3356,8 +3369,7 @@ void _emit_precursor(JITData *jd, ir_pyblock pb) {
     IR_ASSERT(IR_PyErr_Occurred());
 
     /* Insert the current frame into the traceback */
-    JTYPE sig = CREATE_SIGNATURE(ir_type_int, ir_type_pyframeobject_ptr);
-    CALL_NATIVE(sig, PyTraceBack_Here, jd->f);
+    CALL_NATIVE(jd->sig_if, PyTraceBack_Here, jd->f);
 
     /* The except handler has the same stack level as the EXCEPT
        or TRY_FINALLY block which caused it. */
@@ -3483,7 +3495,7 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr) {
             BRANCH(cur->b_handler_precursor);
         } else {
             UNWIND_TO_NEW(curlevel, 0);
-            BRANCH(jd->error_exit);
+            _emit_error_exit(jd);
         }
         return 1;
     }
@@ -3493,11 +3505,13 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr) {
         ir_why why = instr->why;
         ir_pyblock cur = instr->pb;
         int curlevel = instr->entry_stack_level;
+        ir_label expected_handler = IR_INSTR_OPERAND(_instr, 0);
         while (why != IR_WHY_NOT && cur) {
             if (cur->b_type == IR_PYBLOCK_LOOP && why == IR_WHY_CONTINUE) {
                 /* Unwind stack without popping block. 'iter' remains on TOS */
                 UNWIND_TO_NEW(curlevel, cur->b_level + 1);
                 //CHECK_EVAL_BREAKER?
+                assert(expected_handler == cur->b_continue);
                 BRANCH(cur->b_continue);
                 why = IR_WHY_NOT;
                 break;
@@ -3517,6 +3531,7 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr) {
 
             if (cur->b_type == IR_PYBLOCK_LOOP && why == IR_WHY_BREAK) {
                 //CHECK_EVAL_BREAKER?
+                assert(expected_handler == cur->b_handler);
                 BRANCH(cur->b_handler);
                 why = IR_WHY_NOT;
                 break;
@@ -3527,6 +3542,7 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr) {
                 if (cur->b_handler_precursor == NULL) {
                    cur->b_handler_precursor = ir_label_new(jd->func, "precursor");
                 }
+                assert(expected_handler == cur->b_handler);
                 BRANCH(cur->b_handler_precursor);
                 why = IR_WHY_NOT;
                 break;
@@ -3547,6 +3563,7 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr) {
                 }
                 PUSH(CALL_PyLong_FromLong(CONSTANT_LONG((long)_ir_why_to_why(why))));
                 //CHECK_EVAL_BREAKER?
+                assert(expected_handler == cur->b_handler);
                 BRANCH(cur->b_handler);
                 why = IR_WHY_NOT;
                 break;
@@ -3560,6 +3577,7 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr) {
             if (why != IR_WHY_RETURN) {
                 SET_RETVAL(CONSTANT_PYOBJ(NULL));
             }
+            assert(expected_handler == jd->exit);
             BRANCH(jd->exit);
         }
         /* We should have branched before this point. Unreachable. */
@@ -3575,7 +3593,11 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr) {
         int yield_f_lasti = sizeof(_Py_CODEUNIT) * (resume_instr_index - 1);
         assert(yield_f_lasti >= 0);
 
-        SET_RETVAL(IR_INSTR_OPERAND(_instr, 0));
+        ir_value yieldval = IR_INSTR_OPERAND(_instr, 0);
+        ir_label b_handler_exception = IR_INSTR_OPERAND(_instr, 1);
+        ir_label resume_inst_label = IR_INSTR_OPERAND(_instr, 2);
+
+        SET_RETVAL(yieldval);
         JVALUE f_valuestack = LOAD_FIELD(jd->f, PyFrameObject, f_valuestack, ir_type_pyobject_ptr_ptr);
         JVALUE stack_pointer = ir_get_index_ptr(jd->func, f_valuestack, CONSTANT_INT(instr->entry_stack_level));
         STORE_FIELD(jd->f, PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr, stack_pointer);
@@ -3589,9 +3611,8 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr) {
         BRANCH(jd->exit);
 
         /* ~~~ Magic happens ~~~ */
-        ir_label resume_inst_label = IR_INSTR_OPERAND(_instr, 2);
         ADD_RESUME_ENTRY(yield_f_lasti, resume);
-        _emit_resume_stub(jd, resume, instr->entry_stack_level + 1, instr->pb, resume_instr_index, resume_inst_label);
+        _emit_resume_stub(jd, resume, b_handler_exception, instr->entry_stack_level + 1, instr->pb, resume_instr_index, resume_inst_label);
 
         if (IR_INSTR_NUM_OPERANDS(_instr) > 3) {
             /* There is terrible code in genobject.c which increments f_lasti
@@ -3599,7 +3620,7 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr) {
             ir_label throw_inst_label = IR_INSTR_OPERAND(_instr, 3);
             IR_LABEL_INIT(resume_extra);
             ADD_RESUME_ENTRY(yield_f_lasti + sizeof(_Py_CODEUNIT), resume_extra);
-            _emit_resume_stub(jd, resume_extra, instr->entry_stack_level, instr->pb, resume_instr_index + 1, throw_inst_label);
+            _emit_resume_stub(jd, resume_extra, b_handler_exception, instr->entry_stack_level, instr->pb, resume_instr_index + 1, throw_inst_label);
         }
         return 1;
     }
@@ -3702,23 +3723,36 @@ int _ir_lower_stack_ops(JITData *jd, ir_instr _instr) {
 }
 
 static inline
-int _ir_lower_remaining(JITData *jd, ir_instr _instr) {
+int _ir_lower_local_ops(JITData *jd, ir_instr _instr) {
     switch (IR_INSTR_OPCODE(_instr)) {
     case ir_opcode_getlocal: {
         IR_INSTR_AS(getlocal)
-        ir_value addr = ir_get_index_ptr(jd->func, jd->fastlocals, ir_constant_int(jd->func, instr->index, NULL));
+        ir_label fallthrough = IR_INSTR_OPERAND(_instr, 0);
+        ir_label b_handler = IR_INSTR_OPERAND(_instr, 1);
+        ir_value addr = ir_get_index_ptr(jd->func, jd->fastlocals, CONSTANT_INT(instr->index));
         ir_value tmp = LOAD(addr);
         ir_replace_all_uses(jd->func, IR_INSTR_DEST(_instr), tmp);
+        if (instr->undef_check && !instr->known_defined) {
+            IF_NOT(tmp, IR_UNLIKELY, {
+                CALL_format_exc_check_arg(PyExc_UnboundLocalError,
+                                          UNBOUNDLOCAL_ERROR_MSG,
+                                          PyTuple_GetItem(jd->co->co_varnames, instr->index));
+                GOTO_ERROR_EX(b_handler, instr->entry_stack_level, instr->pb);
+            });
+        }
+        BRANCH(fallthrough);
         return 1;
     }
     case ir_opcode_setlocal: {
         IR_INSTR_AS(setlocal)
-        ir_value addr = ir_get_index_ptr(jd->func, jd->fastlocals, ir_constant_int(jd->func, instr->index, NULL));
+        ir_value addr = ir_get_index_ptr(jd->func, jd->fastlocals, CONSTANT_INT(instr->index));
         STORE(addr, IR_INSTR_OPERAND(_instr, 0));
         return 1;
     }
-    case ir_opcode_check_eval_breaker: {
-        assert(0); /* Not yet impemented */
+    case ir_opcode_dellocal: {
+        IR_INSTR_AS(dellocal)
+        ir_value addr = ir_get_index_ptr(jd->func, jd->fastlocals, CONSTANT_INT(instr->index));
+        STORE(addr, CONSTANT_PYOBJ(NULL));
         return 1;
     }
     default: break;
@@ -3756,7 +3790,7 @@ int _ir_lower_yield_dispatch(JITData *jd, ir_instr _instr) {
 typedef int (*lowerfunc_t)(JITData*, ir_instr);
 
 static inline
-void _lower_pass(JITData *jd, lowerfunc_t lowerfunc, const char *filename) {
+void _lower_pass(JITData *jd, lowerfunc_t lowerfunc) {
     ir_func func = jd->func;
     ir_block b;
     ir_instr _instr;
@@ -3791,51 +3825,79 @@ void _lower_pass(JITData *jd, lowerfunc_t lowerfunc, const char *filename) {
             ir_cursor_close(func);
         }
     }
-    IR_DEBUG_DUMP(filename);
 }
 
-void ir_lower(JITData *jd) {
-    /* 01: Remove dead blocks */
+static void compute_pyblock_pass(JITData *jd) {
+    ir_compute_pyblock_info(jd->func, jd->unknown_handler, jd->exit);
+}
+
+static void remove_dead_blocks_pass(JITData *jd) {
     ir_remove_dead_blocks(jd->func);
-    IR_DEBUG_DUMP("/tmp/01-remove_dead_blocks.ir");
+}
 
-    /* 02: Compute pyblock map */
-    ir_label ignored[] = { jd->exit, jd->error_exit, NULL };
-    ir_pyblock_map map = ir_compute_pyblock_map(jd->func, ignored);
-    if (Py_JITDebugFlag > 1) {
-        ir_dump_pyblock_map(map, "/tmp/02-pyblock_map.ir");
-    }
+static void mark_defined_locals_pass(JITData *jd) {
+    ir_mark_defined_locals(jd->func, jd->co->co_nlocals);
+}
 
-    /* 03: Lower pyblock control flow */
-    _lower_pass(jd, _ir_lower_control_flow, "/tmp/03-control_flow.ir");
-    ir_free_pyblock_map(map);
+static void lower_local_ops_pass(JITData *jd) {
+    _lower_pass(jd, _ir_lower_local_ops);
+}
 
-    /* 04: Lower yield dispatch */
+static void lower_control_flow_pass(JITData *jd) {
+    _lower_pass(jd, _ir_lower_control_flow);
+}
+
+static void lower_yield_dispatch(JITData *jd) {
     if (jd->is_gen) {
-        _lower_pass(jd, _ir_lower_yield_dispatch, "/tmp/04-yield_dispatch.ir");
+        _lower_pass(jd, _ir_lower_yield_dispatch);
     }
+}
 
-    /* 05: Remove dead blocks again */
-    ir_remove_dead_blocks(jd->func);
-    IR_DEBUG_DUMP("/tmp/05-remove_dead_blocks.ir");
-
-    /* 06: Compute stack positions */
+static void lower_stack_ops_pass(JITData *jd) {
     jd->stack_size = ir_compute_stack_positions(jd->func);
     assert(jd->stack_size <= jd->co->co_stacksize); /* TODO: Why aren't these always equal? */
     jd->stack_values = (ir_value*)malloc(sizeof(ir_value) * jd->stack_size);
     for (int i = 0; i < jd->stack_size; i++) {
         jd->stack_values[i] = ALLOCA(ir_type_pyobject_ptr);
     }
-
-    /* 07: Lower stack operations */
-    _lower_pass(jd, _ir_lower_stack_ops, "/tmp/07-stack_ops.ir");
+    _lower_pass(jd, _ir_lower_stack_ops);
     free(jd->stack_values);
+}
 
-    /* 08: Lower incref/decref */
-    _lower_pass(jd, _ir_lower_refcounting, "/tmp/08-refcount_ops.ir");
+static void lower_refcount_ops_pass(JITData *jd) {
+    _lower_pass(jd, _ir_lower_refcounting);
+}
 
-    /* 09: Lower everything else */
-    _lower_pass(jd, _ir_lower_remaining, "/tmp/09-after_all_lowering.ir");
+typedef void (*passfunc)(JITData*);
+
+typedef struct {
+  const char *name;
+  passfunc run;
+} _pass_info;
+
+static _pass_info lower_passes[] = {
+  { "compute_pyblock_info", compute_pyblock_pass },
+  { "remove_dead_blocks", remove_dead_blocks_pass },
+  { "mark_defined_locals", mark_defined_locals_pass },
+  { "lower_local_ops", lower_local_ops_pass },
+  { "lower_control_flow", lower_control_flow_pass },
+  { "yield_dispatch", lower_yield_dispatch },
+  { "remove_dead_blocks", remove_dead_blocks_pass },
+  { "lower_stack_ops", lower_stack_ops_pass },
+  { "lower_refcount_ops", lower_refcount_ops_pass },
+  { NULL, NULL },
+};
+
+static void ir_lower(JITData *jd) {
+    char filename[128];
+    for (size_t i = 0; lower_passes[i].name != NULL; i++) {
+        _pass_info *pass = &lower_passes[i];
+        pass->run(jd);
+        sprintf(filename, "/tmp/%02zu-%s.ir", i+1, pass->name);
+        IR_DEBUG_DUMP(filename);
+    }
+    if (Py_JITDebugFlag > 0)
+        ir_func_verify(jd->func);
 }
 
 /* Stack Record flags */
@@ -3990,6 +4052,6 @@ void _emit_patchpoint_error_handler(JITData *jd, ir_pyblock pb, int entry_stack_
             cur->b_handler_precursor = ir_label_new(jd->func, "precursor");
         BRANCH(cur->b_handler_precursor);
     } else {
-        BRANCH(jd->error_exit);
+        _emit_error_exit(jd);
     }
 }

@@ -64,11 +64,11 @@ typedef enum {
     ir_opcode_retval,      // return value;
 
     /* Python-specific */
-    ir_opcode_getlocal,
-    ir_opcode_setlocal,
     ir_opcode_incref,
     ir_opcode_decref,
     ir_opcode_stackadj,
+    ir_opcode_setlocal,
+    ir_opcode_dellocal,
     ir_opcode_stack_peek,
     ir_opcode_stack_put,
     ir_opcode_check_eval_breaker,
@@ -76,11 +76,12 @@ typedef enum {
     ir_opcode_pop_block,
 
     /* Python-specific control flow */
-    ir_opcode_goto_error,   // error (i.e. raise exception)
-    ir_opcode_goto_fbe,     // fast_block_end
-    ir_opcode_yield,        // fast_yield
+    ir_opcode_goto_error,     // error (i.e. raise exception)
+    ir_opcode_getlocal,       // get local (this is control flow because it may raise an exception)
+    ir_opcode_goto_fbe,       // fast_block_end
+    ir_opcode_yield,          // fast_yield
     ir_opcode_yield_dispatch, // yield dispatch table
-    ir_opcode_end_finally,  // END_FINALLY opcode
+    ir_opcode_end_finally,    // END_FINALLY opcode
 } ir_opcode;
 
 #define IR_INSTR_AS(kind) \
@@ -102,7 +103,7 @@ int ir_opcode_needs_to_be_at_front(ir_opcode opcode) {
 
 static inline
 int ir_opcode_is_python_specific(ir_opcode opcode) {
-    return opcode >= ir_opcode_getlocal &&
+    return opcode >= ir_opcode_incref &&
            opcode <= ir_opcode_end_finally;
 }
 
@@ -155,6 +156,9 @@ static inline ir_use _ir_instr_operand(ir_instr _instr, size_t i) {
 /* This initializes the operand, and should not be used to override an existing entry. */
 #define IR_SET_OPERAND(use_index, val) _ir_set_operand((ir_instr)instr, (use_index), (val))
 
+/* Replace existing operand with a new value */
+#define IR_REPLACE_OPERAND(_instr, use_index, val) _ir_replace_operand((_instr), (use_index), (val))
+
 static inline void
 _ir_set_operand(ir_instr _instr, size_t use_index, ir_value value) {
     ir_use use = &IR_INSTR_USE(_instr, use_index);
@@ -184,6 +188,13 @@ _ir_clear_use(ir_use use) {
     use->prev = NULL;
     use->next = NULL;
     use->value = NULL;
+}
+
+static inline void
+_ir_replace_operand(ir_instr _instr, size_t use_index, ir_value newval) {
+    ir_use use = &IR_INSTR_USE(_instr, use_index);
+    _ir_clear_use(use);
+    _ir_set_operand(_instr, use_index, newval);
 }
 
 /* Get the values that are used as operands by '_instr'.
@@ -235,6 +246,10 @@ ir_list_outgoing_labels(ir_block b, size_t *count) {
         *count = 1;
         return &IR_INSTR_USE(_instr, 0);
     }
+    case ir_opcode_getlocal: {
+        *count = 2;
+        return &IR_INSTR_USE(_instr, 0);
+    }
     case ir_opcode_goto_fbe: {
         *count = IR_INSTR_NUM_OPERANDS(_instr);
         return &IR_INSTR_USE(_instr, 0);
@@ -248,7 +263,7 @@ ir_list_outgoing_labels(ir_block b, size_t *count) {
         return &IR_INSTR_USE(_instr, 0);
     }
     case ir_opcode_end_finally: {
-        *count = 1;
+        *count = 5;
         return &IR_INSTR_USE(_instr, 0);
     }
     default: {
@@ -935,14 +950,30 @@ void ir_ret(ir_func func) {
 IR_PROTOTYPE(ir_instr_getlocal)
 struct ir_instr_getlocal_t {
     IR_INSTR_HEADER
+    /* operands: fallthrough, b_handler_exception */
     size_t index;
+    char undef_check;
+    char known_defined;
+
+    ir_pyblock pb; /* pyblock that is setup by this instruction */
+    int entry_stack_level; /* stack level when this instruction is entered */
 };
 
 static inline
-ir_value ir_getlocal(ir_func func, size_t index) {
-    IR_INSTR_ALLOC(ir_instr_getlocal, ir_opcode_getlocal, ir_type_pyobject_ptr, 0, 0)
+ir_value ir_getlocal(ir_func func, size_t index, int undef_check, ir_label b_handler) {
+    IR_INSTR_ALLOC(ir_instr_getlocal, ir_opcode_getlocal, ir_type_pyobject_ptr, 2, 0)
     instr->index = index;
-    return IR_INSTR_INSERT();
+    instr->undef_check = undef_check;
+    instr->known_defined = 0;
+    instr->pb = func->current_pyblock;
+    instr->entry_stack_level = func->current_stack_level;
+
+    ir_label fallthrough = ir_label_new(func, "getlocal_fallthrough");
+    IR_SET_OPERAND(0, fallthrough);
+    IR_SET_OPERAND(1, b_handler);
+    ir_value ret = IR_INSTR_INSERT();
+    ir_label_here(func, fallthrough);
+    return ret;
 }
 
 /*****************************************************************************/
@@ -959,6 +990,21 @@ void ir_setlocal(ir_func func, size_t index, ir_value value) {
     IR_INSTR_ALLOC(ir_instr_setlocal, ir_opcode_setlocal, ir_type_void, 1, 0)
     instr->index = index;
     IR_SET_OPERAND(0, value);
+    IR_INSTR_INSERT();
+}
+
+/*****************************************************************************/
+
+IR_PROTOTYPE(ir_instr_dellocal)
+struct ir_instr_dellocal_t {
+    IR_INSTR_HEADER
+    size_t index;
+};
+
+static inline
+void ir_dellocal(ir_func func, size_t index) {
+    IR_INSTR_ALLOC(ir_instr_dellocal, ir_opcode_dellocal, ir_type_void, 0, 0)
+    instr->index = index;
     IR_INSTR_INSERT();
 }
 
@@ -1098,7 +1144,7 @@ struct ir_pyblock_t {
 IR_PROTOTYPE(ir_instr_setup_block)
 struct ir_instr_setup_block_t {
     IR_INSTR_HEADER
-    /* operands: [b_handler_label] */
+    /* operands: [b_handler] */
     ir_pyblock_type b_type;
     ir_pyblock pb; /* pyblock that is setup by this instruction */
     int entry_stack_level; /* stack level when this instruction is entered */
@@ -1143,16 +1189,16 @@ void ir_pop_block(ir_func func, ir_pyblock_type b_type) {
 IR_PROTOTYPE(ir_instr_goto_error)
 struct ir_instr_goto_error_t {
     IR_INSTR_HEADER
-    /* operands: error_exit */
+    /* operands: b_handler */
     ir_pyblock pb; /* topmost pyblock at execution time */
     int entry_stack_level; /* stack level when this instruction is entered */
 };
 
 static inline
-void ir_goto_error(ir_func func, ir_label error_exit) {
+void ir_goto_error(ir_func func, ir_label b_handler) {
     IR_INSTR_ALLOC(ir_instr_goto_error, ir_opcode_goto_error, ir_type_void, 1, 0)
-    assert(ir_type_is_label(ir_typeof(error_exit)));
-    IR_SET_OPERAND(0, error_exit);
+    assert(ir_type_is_label(ir_typeof(b_handler)));
+    IR_SET_OPERAND(0, b_handler);
     instr->pb = func->current_pyblock;
     instr->entry_stack_level = func->current_stack_level;
     IR_INSTR_INSERT();
@@ -1185,20 +1231,32 @@ ir_why_repr(ir_why why) {
 IR_PROTOTYPE(ir_instr_goto_fbe)
 struct ir_instr_goto_fbe_t {
     IR_INSTR_HEADER
-    /* operands: exit_label[, continue_target] */
+    /* operands: b_handler[, continue_target] */
+
+    /* b_handler is the place where execution will resume after stack unwind.
+       This may be the handler for a pyblock which does not match the 'why'.
+       For example, a goto_fbe with why = IR_WHY_CONTINUE, may branch to
+       the start of a finally: block (instead of directly to the continue
+       target) */
+
     ir_why why;
     ir_pyblock pb; /* topmost pyblock at execution time */
     int entry_stack_level; /* stack level when this instruction is entered */
 };
 
 static inline
-void ir_goto_fbe(ir_func func, ir_why why, ir_label exit, ir_label continue_target) {
-    assert(ir_type_is_label(ir_typeof(exit)));
-    assert(continue_target == NULL || ir_type_is_label(ir_typeof(continue_target)));
+void ir_goto_fbe(ir_func func, ir_why why, ir_label b_handler, ir_label continue_target) {
+    assert(ir_type_is_label(ir_typeof(b_handler)));
+    if (why == IR_WHY_CONTINUE) {
+        assert(continue_target != NULL);
+        assert(ir_type_is_label(ir_typeof(continue_target)));
+    } else {
+        assert(continue_target == NULL);
+    }
     size_t num_operands = continue_target ? 2 : 1;
     IR_INSTR_ALLOC(ir_instr_goto_fbe, ir_opcode_goto_fbe, ir_type_void, num_operands, 0)
     instr->why = why;
-    IR_SET_OPERAND(0, exit);
+    IR_SET_OPERAND(0, b_handler);
     if (continue_target) {
         IR_SET_OPERAND(1, continue_target);
     }
@@ -1212,11 +1270,10 @@ void ir_goto_fbe(ir_func func, ir_why why, ir_label exit, ir_label continue_targ
 IR_PROTOTYPE(ir_instr_yield)
 struct ir_instr_yield_t {
     IR_INSTR_HEADER
-    /* operands: value to yield, exit_label, resume_inst_label[, throw_inst_label] */
+    /* operands: value to yield, b_handler_exception, resume_inst_label[, throw_inst_label] */
     int resume_instr_index;
     ir_pyblock pb; /* topmost pyblock at execution time */
     int entry_stack_level; /* stack level when this instruction is entered */
-
 };
 
 static inline
@@ -1224,18 +1281,18 @@ void ir_yield(
         ir_func func,
         int resume_instr_index,
         ir_value value,
-        ir_label exit,
+        ir_label b_handler,
         ir_label resume_inst_label,
         ir_label throw_inst_label) {
     size_t num_operands = 3 + (throw_inst_label ? 1 : 0);
     IR_INSTR_ALLOC(ir_instr_yield, ir_opcode_yield, ir_type_void, num_operands, 0)
     assert(ir_type_equal(ir_typeof(value), ir_type_pyobject_ptr));
-    assert(ir_type_is_label(ir_typeof(exit)));
+    assert(ir_type_is_label(ir_typeof(b_handler)));
     assert(ir_type_is_label(ir_typeof(resume_inst_label)));
     assert(throw_inst_label == NULL || ir_type_is_label(ir_typeof(throw_inst_label)));
     instr->resume_instr_index = resume_instr_index;
     IR_SET_OPERAND(0, value);
-    IR_SET_OPERAND(1, exit);
+    IR_SET_OPERAND(1, b_handler);
     IR_SET_OPERAND(2, resume_inst_label);
     if (throw_inst_label) {
         IR_SET_OPERAND(3, throw_inst_label);
@@ -1265,16 +1322,21 @@ void ir_yield_dispatch(ir_func func, ir_label body_start) {
 IR_PROTOTYPE(ir_instr_end_finally)
 struct ir_instr_end_finally_t {
     IR_INSTR_HEADER
-    /* operands: fallthrough */
+    /* operands: fallthrough, b_handler_exception, b_handler_return, b_handler_break, b_handler_continue */
     ir_pyblock pb; /* topmost pyblock at execution time */
     int entry_stack_level; /* stack level when this instruction is entered */
 };
 
 static inline
-void ir_end_finally(ir_func func, ir_label fallthrough) {
+void ir_end_finally(ir_func func, ir_label fallthrough, ir_label unknown_handler) {
     assert(ir_type_is_label(ir_typeof(fallthrough)));
-    IR_INSTR_ALLOC(ir_instr_end_finally, ir_opcode_end_finally, ir_type_void, 1, 0)
+    assert(ir_type_is_label(ir_typeof(unknown_handler)));
+    IR_INSTR_ALLOC(ir_instr_end_finally, ir_opcode_end_finally, ir_type_void, 5, 0)
     IR_SET_OPERAND(0, fallthrough);
+    IR_SET_OPERAND(1, unknown_handler);
+    IR_SET_OPERAND(2, unknown_handler);
+    IR_SET_OPERAND(3, unknown_handler);
+    IR_SET_OPERAND(4, unknown_handler);
     instr->pb = func->current_pyblock;
     instr->entry_stack_level = func->current_stack_level;
     IR_INSTR_INSERT();
@@ -1476,11 +1538,12 @@ static inline void ir_cursor_close(ir_func func) {
     if (terminates_block) {
         /* If there is an instruction after a block terminator, it cannot be
            a label, so the code is dead. TODO: Make this an assert. */
-        if (_instr->next != NULL) {
-            _instr->next = NULL;
-            b->last_instr = _instr;
+        while (_instr->next != NULL) {
+            _ir_remove_instr(b, _instr->next);
         }
-    } else if (_instr->next != NULL &&
+        assert(b->last_instr = _instr);
+    } else if (IR_INSTR_OPCODE(_instr) != ir_opcode_label_here &&
+               _instr->next != NULL &&
                ir_opcode_needs_to_be_at_front(IR_INSTR_OPCODE(_instr->next))) {
         ir_label needs_to_be_at_front = ir_label_new(func, "needs_to_be_at_front");
         ir_branch(func, needs_to_be_at_front);

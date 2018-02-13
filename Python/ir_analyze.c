@@ -1,5 +1,6 @@
 #include "Python.h"
 #include "ir.h"
+#include "adt_bitset.h"
 
 /***********************************************************/
 /*                  Helper functions                       */
@@ -95,9 +96,6 @@ void ir_remove_dead_blocks(ir_func func) {
 
 //#define ANALYZE_PYBLOCKS_DEBUG
 
-/* Marks a block that is being ignored in pyblock analysis */
-#define IGNORE_PYBLOCK    ((ir_pyblock)(~1))
-
 char* ir_pyblock_repr(char *p, ir_pyblock pb) {
     if (pb == NULL) {
         p += sprintf(p, "NULL");
@@ -114,9 +112,10 @@ char* ir_pyblock_repr(char *p, ir_pyblock pb) {
 }
 
 typedef struct {
+    ir_func func;
+    ir_label unknown_handler;
+    ir_label exit_label;
     size_t num_blocks;
-    ir_pyblock mem;
-    size_t memi;
     ir_pyblock *incoming;
     int *incoming_stack_level;
     ir_pyblock *at;
@@ -130,8 +129,7 @@ ir_pyblock _new_pyblock(
         ir_label b_handler,
         int b_level,
         ir_pyblock prev) {
-    ir_pyblock ret = &state->mem[state->memi++];
-    assert(state->memi <= state->num_blocks);
+    ir_pyblock ret = (ir_pyblock)_ir_alloc(state->func->context, sizeof(ir_pyblock_t), _alignof(ir_pyblock_t));
     ret->b_type = b_type;
     ret->b_handler = b_handler;
     ret->b_handler_precursor = NULL;
@@ -168,9 +166,7 @@ void _transfer_pyblock(compute_pyblock_state *state, ir_label label, ir_pyblock 
                 index, pb_repr, except_handler ? " (+ except handler)" : "");
     }
 #endif
-    if (existing == IGNORE_PYBLOCK) {
-        /* Ignored */
-    } else if (existing == INVALID_PYBLOCK) {
+    if (existing == INVALID_PYBLOCK) {
         assert(!except_handler || pb != NULL);
         state->incoming[index] = except_handler ?
                                  _new_pyblock(state, IR_PYBLOCK_EXCEPT_HANDLER, NULL, pb->b_level, pb->prev) :
@@ -197,13 +193,55 @@ void _transfer_pyblock(compute_pyblock_state *state, ir_label label, ir_pyblock 
     }
 }
 
+static
+ir_label _compute_handler(compute_pyblock_state *state, ir_pyblock pb, ir_why why) {
+    ir_pyblock cur = pb;
+    while (cur) {
+        if (cur->b_type == IR_PYBLOCK_LOOP && why == IR_WHY_CONTINUE) {
+            assert(cur->b_continue != NULL);
+            return cur->b_continue;
+        }
+        if (cur->b_type == IR_PYBLOCK_LOOP && why == IR_WHY_BREAK) {
+            assert(cur->b_handler != NULL);
+            return cur->b_handler;
+        }
+        if (why == IR_WHY_EXCEPTION && (cur->b_type == IR_PYBLOCK_EXCEPT ||
+                                        cur->b_type == IR_PYBLOCK_FINALLY_TRY)) {
+            assert(cur->b_handler != NULL);
+            return cur->b_handler;
+        }
+        if (cur->b_type == IR_PYBLOCK_FINALLY_TRY) {
+            assert(cur->b_handler != NULL);
+            return cur->b_handler;
+        }
+        cur = cur->prev;
+    }
+    assert(why == IR_WHY_RETURN || why == IR_WHY_EXCEPTION);
+    assert(state->exit_label != NULL);
+    return state->exit_label;
+}
+
+/* Return the pyblock for the closest loop relative to 'pb'.
+   This is the one that CONTINUE and BREAK operate relative to. */
+static
+ir_pyblock _bound_loop(ir_pyblock pb) {
+    ir_pyblock cur = pb;
+    while (cur) {
+        if (cur->b_type == IR_PYBLOCK_LOOP) return cur;
+        cur = cur->prev;
+    }
+    return NULL;
+}
+
 /* Statically determine the PyTryBlock stack at eack block of 'func' */
-ir_pyblock_map
-ir_compute_pyblock_map(ir_func func, ir_label *ignored) {
+void
+ir_compute_pyblock_info(ir_func func, ir_label unknown_handler, ir_label exit_label) {
+    size_t num_blocks = ir_func_next_block_index(func);
     compute_pyblock_state state;
-    size_t num_blocks = state.num_blocks = ir_func_next_block_index(func);
-    state.memi = 0;
-    state.mem = (ir_pyblock)malloc(sizeof(ir_pyblock_t) * num_blocks);
+    state.func = func;
+    state.unknown_handler = unknown_handler;
+    state.exit_label = exit_label;
+    state.num_blocks = num_blocks;
     state.incoming = (ir_pyblock*)malloc(sizeof(ir_pyblock) * num_blocks);
     state.incoming_stack_level = (int*)malloc(sizeof(int) * num_blocks);
     state.at = (ir_pyblock*)malloc(sizeof(ir_pyblock) * num_blocks);
@@ -219,11 +257,6 @@ ir_compute_pyblock_map(ir_func func, ir_label *ignored) {
     state.incoming[func->entry_block->index] = NULL;
     state.incoming_stack_level[func->entry_block->index] = 0;
 
-    /* Jumps to special sections should be be ignored */
-    for (size_t i = 0; ignored[i]; i++) {
-        state.incoming[IR_LABEL_BLOCK(ignored[i])->index] = IGNORE_PYBLOCK;
-    }
-
     /* For each block, determine the incoming block stack from all
        branches into the block. Make sure they are identical.
        And then compute the outgoing block stack, and propagate
@@ -235,7 +268,7 @@ ir_compute_pyblock_map(ir_func func, ir_label *ignored) {
             ir_pyblock in = state.incoming[b->index];
             ir_pyblock at = state.at[b->index];
 
-            if (in == INVALID_PYBLOCK || in == IGNORE_PYBLOCK || at != NULL)
+            if (in == INVALID_PYBLOCK || at != NULL)
                 continue;
 
 #ifdef ANALYZE_PYBLOCKS_DEBUG
@@ -299,25 +332,28 @@ ir_compute_pyblock_map(ir_func func, ir_label *ignored) {
                 instr->entry_stack_level = out_stack_level;
                 break;
             }
+            case ir_opcode_getlocal: {
+                IR_INSTR_AS(getlocal)
+                instr->pb = at;
+                instr->entry_stack_level = out_stack_level;
+                ir_label fallthrough = IR_INSTR_OPERAND(_instr, 0);
+                _transfer_pyblock(&state, fallthrough, at, 0);
+                _transfer_stack_level(&state, fallthrough, out_stack_level);
+                break;
+            }
             case ir_opcode_goto_fbe: {
                 IR_INSTR_AS(goto_fbe)
                 instr->pb = at;
                 instr->entry_stack_level = out_stack_level;
-                ir_label continue_target = NULL;
-                if (IR_INSTR_NUM_OPERANDS(_instr) > 1) {
-                    continue_target = IR_INSTR_OPERAND(_instr, 1);
-                }
                 if (instr->why == IR_WHY_CONTINUE) {
-                    assert(continue_target != NULL);
-                    /* This continue binds to the nearest loop in the blockstack */
-                    ir_pyblock cur = at;
-                    while (cur && cur->b_type != IR_PYBLOCK_LOOP) {
-                        cur = cur->prev;
-                    }
-                    assert(cur->b_type == IR_PYBLOCK_LOOP);
-                    if (cur->b_continue == NULL) {
-                        cur->b_continue = continue_target;
-                    } else if (IR_LABEL_BLOCK(cur->b_continue) != IR_LABEL_BLOCK(continue_target)) {
+                    ir_label continue_target = IR_INSTR_OPERAND(_instr, 1);
+
+                    /* This continue belongs to the nearest loop in the blockstack */
+                    ir_pyblock loop = _bound_loop(at);
+                    assert(loop);
+                    if (loop->b_continue == NULL) {
+                        loop->b_continue = continue_target;
+                    } else if (IR_LABEL_BLOCK(loop->b_continue) != IR_LABEL_BLOCK(continue_target)) {
                         Py_FatalError("'continue' target mismatch inside loop");
                     }
                 }
@@ -348,6 +384,7 @@ ir_compute_pyblock_map(ir_func func, ir_label *ignored) {
                 instr->pb = at;
                 instr->entry_stack_level = out_stack_level;
                 ir_label fallthrough = IR_INSTR_OPERAND(_instr, 0);
+
                 /* end_finally pops an EXCEPT_HANDLER block before branching */
                 assert(at->b_type == IR_PYBLOCK_EXCEPT_HANDLER);
                 assert(out_stack_level >= 6);
@@ -369,48 +406,60 @@ ir_compute_pyblock_map(ir_func func, ir_label *ignored) {
         }
     } while (state.rerun);
 
-    ir_pyblock_map map = (ir_pyblock_map)malloc(sizeof(ir_pyblock_map_t));
-    map->num_blocks = num_blocks;
-    map->_mem = state.mem;
-    map->at = state.at;
-    map->stack_level = state.incoming_stack_level;
-    free(state.incoming);
-    return map;
-}
-
-void ir_dump_pyblock_map(ir_pyblock_map map, const char *filename) {
-    FILE *fp = fopen(filename, "w");
-    assert(fp);
-    for (int i = 0; i < map->num_blocks; i++) {
-        fprintf(fp, "block %d: stack_level=%d   block_stack=", i, map->stack_level[i]);
-
-        ir_pyblock last = NULL;
-        while (last != map->at[i]) {
-            /* List in reverse order. This is O(n^2), but n is at most 10 */
-            ir_pyblock cur = map->at[i];
-            while (cur->prev != last) cur = cur->prev;
-            last = cur;
-
-            char handler[64];
-            if (cur->b_handler) {
-                sprintf(handler, "block_%zu", IR_LABEL_BLOCK(cur->b_handler)->index);
-            } else {
-                sprintf(handler, "NULL");
-            }
-            fprintf(fp, " %s(%s)", ir_pyblock_type_repr(cur->b_type), handler);
+    /* Go through and assign the handlers to the instruction operations.
+       This is deferred because of continue targets, which may not be assigned
+       at the time these instructions are seen above. */
+    for (ir_block b = func->first_block; b != NULL; b = b->next) {
+        ir_instr _instr = b->last_instr;
+        ir_opcode opcode = IR_INSTR_OPCODE(_instr);
+        switch (opcode) {
+        case ir_opcode_goto_error: {
+            IR_INSTR_AS(goto_error)
+            if (instr->pb == INVALID_PYBLOCK) continue;
+            IR_REPLACE_OPERAND(_instr, 0, _compute_handler(&state, instr->pb, IR_WHY_EXCEPTION));
+            break;
         }
-        fprintf(fp, "\n");
+        case ir_opcode_getlocal: {
+            IR_INSTR_AS(getlocal)
+            if (instr->pb == INVALID_PYBLOCK) continue;
+            IR_REPLACE_OPERAND(_instr, 1, _compute_handler(&state, instr->pb, IR_WHY_EXCEPTION));
+            break;
+        }
+        case ir_opcode_goto_fbe: {
+            IR_INSTR_AS(goto_fbe)
+            if (instr->pb == INVALID_PYBLOCK) continue;
+            IR_REPLACE_OPERAND(_instr, 0, _compute_handler(&state, instr->pb, instr->why));
+            break;
+        }
+        case ir_opcode_end_finally: {
+            IR_INSTR_AS(end_finally)
+            if (instr->pb == INVALID_PYBLOCK) continue;
+            IR_REPLACE_OPERAND(_instr, 1, _compute_handler(&state, instr->pb, IR_WHY_EXCEPTION));
+            IR_REPLACE_OPERAND(_instr, 2, _compute_handler(&state, instr->pb, IR_WHY_RETURN));
+            ir_pyblock loop = _bound_loop(instr->pb);
+            if (loop) {
+                IR_REPLACE_OPERAND(_instr, 3, _compute_handler(&state, instr->pb, IR_WHY_BREAK));
+                if (loop->b_continue) {
+                    IR_REPLACE_OPERAND(_instr, 4, _compute_handler(&state, instr->pb, IR_WHY_CONTINUE));
+                }
+            }
+            break;
+        }
+        case ir_opcode_yield: {
+            IR_INSTR_AS(yield)
+            if (instr->pb == INVALID_PYBLOCK) continue;
+            IR_REPLACE_OPERAND(_instr, 1, _compute_handler(&state, instr->pb, IR_WHY_EXCEPTION));
+            break;
+        }
+        default:
+            break; {
+        }
+        } //switch
     }
-    fclose(fp);
-    fprintf(stderr, "Dumped pyblock map to %s\n", filename);
-}
 
-/* Free pyblocks map */
-void ir_free_pyblock_map(ir_pyblock_map map) {
-    free(map->_mem);
-    free(map->at);
-    free(map->stack_level);
-    free(map);
+    free(state.incoming);
+    free(state.incoming_stack_level);
+    free(state.at);
 }
 
 /***********************************************************/
@@ -496,4 +545,88 @@ ir_compute_stack_positions(ir_func func) {
     free(block_done);
     free(incoming_stack_level);
     return max_index + 1;
+}
+
+/***********************************************************/
+/*                    Mark defined locals                  */
+/***********************************************************/
+
+typedef struct {
+    adt_bitset in;
+} _defined_locals_block_info;
+
+void ir_mark_defined_locals(ir_func func, size_t nlocals) {
+    // This is a forward data-flow analysis. The goal is to compute,
+    // for each basic block, which locals are guaranteed to be defined at
+    // entry (and exit) of the block. This data is tracked using a bitset
+    // where the i'th bit corresponds to the i'th local.
+    if (nlocals == 0)
+        return;
+
+    size_t num_blocks = ir_func_next_block_index(func);
+    _defined_locals_block_info *info_for_block = (_defined_locals_block_info*)malloc(sizeof(_defined_locals_block_info) * num_blocks);
+    for (size_t i = 0; i < num_blocks; i++) {
+       info_for_block[i].in = adt_bitset_alloc(nlocals);
+       adt_bitset_setall(info_for_block[i].in, 1);
+    }
+
+    /* All locals are unset on entry */
+    adt_bitset_setall(info_for_block[func->entry_block->index].in, 0);
+
+    adt_bitset out = adt_bitset_alloc(nlocals);
+    adt_bitset tmp = adt_bitset_alloc(nlocals);
+
+    /* Track which blocks have had their 'in' bitset change */
+    adt_bitset dirty = adt_bitset_alloc(num_blocks);
+    adt_bitset_setall(dirty, 1);
+    int rerun;
+    do {
+        rerun = 0;
+        for (ir_block b = func->first_block; b != NULL; b = b->next) {
+            if (!adt_bitset_getbit(dirty, b->index)) continue;
+            adt_bitset_setbit(dirty, b->index, 0);
+
+            /* Compute outgoing bitset for this block */
+            adt_bitset_copy(out, info_for_block[b->index].in);
+            for (ir_instr _instr = b->first_instr; _instr != NULL; _instr = _instr->next) {
+                ir_opcode opcode = IR_INSTR_OPCODE(_instr);
+                if (opcode == ir_opcode_getlocal) {
+                    IR_INSTR_AS(getlocal)
+                    instr->known_defined = adt_bitset_getbit(out, instr->index);
+                } else if (opcode == ir_opcode_setlocal) {
+                    IR_INSTR_AS(setlocal)
+                    adt_bitset_setbit(out, instr->index, 1);
+                } else if (opcode == ir_opcode_dellocal) {
+                    IR_INSTR_AS(dellocal)
+                    adt_bitset_setbit(out, instr->index, 0);
+                }
+            }
+
+            /* AND into the in bitsets of branch targets */
+            /* TODO: Optimistically assume that getlocal exception branches don't occur
+                     when the is_defined bit is still true in this pass. This can
+                     increase the opportunities for optimization in some cases. */
+            size_t labels_count;
+            ir_use labels = ir_list_outgoing_labels(b, &labels_count);
+            for (size_t i = 0; i < labels_count; i++) {
+                ir_label label = IR_USE_VALUE(labels[i]);
+                size_t label_index = IR_LABEL_BLOCK(label)->index;
+                adt_bitset existing_in = info_for_block[label_index].in;
+                adt_bitset_and(tmp, out, existing_in);
+                /* If tmp != existing_in, mark the block as dirty */
+                if (!adt_bitset_eq(tmp, existing_in)) {
+                    adt_bitset_copy(existing_in, tmp);
+                    adt_bitset_setbit(dirty, label_index, 1);
+                    rerun = 1;
+                }
+            }
+        }
+    } while (rerun);
+    adt_bitset_free(dirty);
+    adt_bitset_free(tmp);
+    adt_bitset_free(out);
+    for (size_t i = 0; i < num_blocks; i++) {
+       adt_bitset_free(info_for_block[i].in);
+    }
+    free(info_for_block);
 }
