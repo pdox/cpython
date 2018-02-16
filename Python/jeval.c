@@ -12,6 +12,8 @@
 
 #include "Include/jit_macros.h"
 #include "Include/jit.h"
+#include "Include/jit_eval_entrypoint.h"
+#include "Include/jit_locals_hack.h"
 
 /* JIT data attached to a PyCodeObject */
 struct _JITData;
@@ -59,8 +61,18 @@ typedef struct _JITData {
     ir_type blockpop_sig;
     ir_type exc_triple_sig;
 
+    /* CONSTANT_PYOBJ(NULL) */
+    ir_value null;
+
     Py_ssize_t inst_count;
     int is_gen;
+    int use_virtual_locals;
+    Py_ssize_t total_pyargs;
+    Py_ssize_t total_direct_args;
+    int has_vararg;
+    int has_kwdict;
+    int has_closure;
+
     int update_blockstack; /* Keep f_blockstack in the state ceval expects.
                               Needed for generators, where execution can switch between
                               the JIT and the interpreter (e.g. if tracing is enabled
@@ -95,6 +107,10 @@ typedef struct _JITData {
     /* Used during stack lowering pass */
     int stack_size;
     ir_value *stack_values;
+
+    /* Virtual locals allocations */
+    size_t fastlocals_size;
+    ir_value *fastlocals_values;
 
     ir_label jmptab[1];
 } JITData;
@@ -223,7 +239,9 @@ int _label_to_instr_index(JITData *jd, ir_label target) {
 
 #define GETNAME(i)   PyTuple_GET_ITEM(jd->co->co_names, (i));
 #define LOAD_FREEVAR(i) \
-    LOAD_AT_INDEX(jd->fastlocals, CONSTANT_INT(jd->co->co_nlocals + (i)))
+    (jd->use_virtual_locals ? \
+        LOAD(jd->fastlocals_values[jd->co->co_nlocals + (i)]) \
+        : LOAD_AT_INDEX(jd->fastlocals, CONSTANT_INT(jd->co->co_nlocals + (i))))
 
 // TODO: This needs to be adjusted depending on the configuration of _Py_atomic_int
 #define LOAD_EVAL_BREAKER() \
@@ -567,7 +585,7 @@ EMITTER_FOR(NOP) {
     "local variable '%.200s' referenced before assignment"
 
 EMITTER_FOR(LOAD_FAST) {
-    JVALUE v = ir_getlocal(jd->func, oparg, 1, jd->exit);
+    JVALUE v = ir_getlocal(jd->func, oparg, 1, jd->unknown_handler);
     INCREF(v);
     PUSH(v);
 }
@@ -582,7 +600,7 @@ EMITTER_FOR(LOAD_CONST) {
 
 EMITTER_FOR(STORE_FAST) {
     JVALUE v = POP();
-    JVALUE tmp = ir_getlocal(jd->func, oparg, 0, jd->exit);
+    JVALUE tmp = ir_getlocal(jd->func, oparg, 0, jd->unknown_handler);
     ir_setlocal(jd->func, oparg, v);
     XDECREF(tmp);
 }
@@ -835,7 +853,7 @@ EMITTER_FOR(PRINT_EXPR) {
         DECREF(value);
         GOTO_ERROR();
     });
-    JVALUE res = CALL_NATIVE(jd->sig_oooo, PyObject_CallFunctionObjArgs, hook, value, CONSTANT_PYOBJ(NULL));
+    JVALUE res = CALL_NATIVE(jd->sig_oooo, PyObject_CallFunctionObjArgs, hook, value, jd->null);
     DECREF(value);
     GOTO_ERROR_IF_NOT(res);
     DECREF(res);
@@ -1520,7 +1538,7 @@ EMITTER_FOR(LOAD_GLOBAL) {
 }
 
 EMITTER_FOR(DELETE_FAST) {
-    JVALUE tmp = ir_getlocal(jd->func, oparg, 1, jd->exit);
+    JVALUE tmp = ir_getlocal(jd->func, oparg, 1, jd->unknown_handler);
     ir_dellocal(jd->func, oparg);
     DECREF(tmp);
     CHECK_EVAL_BREAKER();
@@ -2905,6 +2923,94 @@ EMITTER_FOR(EXTENDED_ARG) {
     } \
 } while (0)
 
+static void
+_initialize_virtual_locals(JITData *jd)
+{
+    assert(!jd->is_gen);
+    PyCodeObject *co = jd->co;
+
+    /* Precompute which slots are copied from args, which are copied into cells,
+       and which are initialized as empty cells */
+    int ncellvars = PyTuple_GET_SIZE(co->co_cellvars);
+    int nfreevars = PyTuple_GET_SIZE(co->co_freevars);
+    int *slotmap = (int*)malloc((co->co_nlocals + ncellvars) * sizeof(int));
+    int i;
+    /* Arguments are copied by default */
+    for (i = 0; i < jd->total_pyargs; i++) {
+        slotmap[i] = i;
+    }
+    /* Remaining locals are initialized to NULL */
+    while (i < co->co_nlocals) {
+        slotmap[i++] = -1;
+    }
+    assert(i == co->co_nlocals);
+
+    /* Initialize cell vars. Some are initialized from arguments,
+       all others are initialized to NULL. */
+    for (int j = 0; j < ncellvars; j++, i++) {
+        Py_ssize_t arg;
+        if (co->co_cell2arg != NULL &&
+            (arg = co->co_cell2arg[j]) != CO_CELL_NOT_AN_ARG) {
+            slotmap[i] = arg;
+            /* Clear the local copy */
+            assert(arg >= 0 && arg < jd->total_pyargs);
+            slotmap[arg] = -1;
+        } else {
+            slotmap[i] = -1;
+        }
+    }
+    assert(i == co->co_nlocals + ncellvars);
+
+    /* Now actually initialize the locals */
+    for (i = 0; i < co->co_nlocals; i++) {
+        if (slotmap[i] == -1) {
+            ir_dellocal(jd->func, i);
+        } else {
+            ir_value value = ir_func_get_argument(jd->func, slotmap[i]);
+            INCREF(value);
+            ir_setlocal(jd->func, i, value);
+        }
+    }
+
+    /* Initialize cells */
+    i = co->co_nlocals;
+    for (int j = 0; j < ncellvars; j++, i++) {
+        int src = slotmap[i];
+        ir_value value;
+        if (src == -1) {
+            value = jd->null;
+        } else {
+            value = ir_func_get_argument(jd->func, slotmap[i]);
+        }
+        ir_value cell = CALL_PyCell_New(value);
+        STORE(jd->fastlocals_values[i], cell);
+    }
+    assert(i == co->co_nlocals + ncellvars);
+
+    /* Copy closure cells */
+    if (jd->has_closure) {
+        ir_value closure = ir_func_get_argument(jd->func, jd->total_pyargs);
+        ir_value ob_item = IR_PyTuple_OB_ITEM(closure);
+        i = co->co_nlocals + ncellvars;
+        for (int j = 0; j < nfreevars; j++, i++) {
+            ir_value value = LOAD_AT_INDEX(ob_item, CONSTANT_INT(j));
+            INCREF(value);
+            STORE(jd->fastlocals_values[i], value);
+        }
+    }
+    assert(i == co->co_nlocals + ncellvars + nfreevars);
+    assert(i == (int)jd->fastlocals_size);
+    free(slotmap);
+}
+
+static void
+_clear_virtual_locals(JITData *jd) {
+    assert(!jd->is_gen);
+    for (size_t i = 0; i < jd->fastlocals_size; i++) {
+        XDECREF(LOAD(jd->fastlocals_values[i]));
+    }
+}
+
 
 static void
 translate_bytecode(JITData *jd, PyCodeObject *co)
@@ -2918,7 +3024,6 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     Py_ssize_t inst_count = PyBytes_GET_SIZE(co->co_code)/sizeof(_Py_CODEUNIT);
 
     jd->inst_count = inst_count;
-    jd->is_gen = (co->co_flags & (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR));
     jd->update_blockstack = jd->is_gen;
     jd->use_patchpoint_error_handler = 0;
 
@@ -2973,23 +3078,49 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     jd->blocksetup_sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyframeobject_ptr, ir_type_int, ir_type_int, ir_type_int);
     jd->blockpop_sig = CREATE_SIGNATURE(ir_type_pytryblock_ptr, ir_type_pyframeobject_ptr);
     jd->exc_triple_sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr_ptr, ir_type_pyobject_ptr_ptr, ir_type_pyobject_ptr_ptr);
+    jd->null = CONSTANT_PYOBJ(NULL);
 
-    /* Arguments: f, throwflag */
-    jd->f = ir_func_get_argument(jd->func, 0);
-    jd->throwflag = ir_func_get_argument(jd->func, 1);
+    if (jd->is_gen) {
+        /* Arguments: f, throwflag */
+        jd->f = ir_func_get_argument(jd->func, 0);
+        jd->throwflag = ir_func_get_argument(jd->func, 1);
+    } else if (!jd->use_virtual_locals) {
+        /* Arguments: f */
+        jd->f = ir_func_get_argument(jd->func, 0);
+        jd->throwflag = NULL;
+    } else {
+        /* Arguments: ...pyargs..., closure?, f */
+        jd->f = ir_func_get_argument(jd->func, jd->total_direct_args - 1);
+        jd->throwflag = NULL;
+        STORE_FIELD(jd->f, PyFrameObject, f_virtual_locals, ir_type_char, CONSTANT_CHAR(1));
+    }
 
     jd->retval = ALLOCA(ir_type_pyobject_ptr);
     jd->next_instr_index = ALLOCA(ir_type_int);
 
     /* Initialization sequence */
     jd->tstate = IR_PyThreadState_GET();
-    jd->fastlocals = ir_get_element_ptr(jd->func, jd->f, offsetof(PyFrameObject, f_localsplus), ir_type_pyobject_ptr, "f_localsplus");
 
     /* push frame */
     IF(IR_Py_EnterRecursiveCall(""), IR_UNLIKELY, {
         ir_retval(jd->func, CONSTANT_PYOBJ(NULL));
     });
     STORE_FIELD(jd->tstate, PyThreadState, frame, ir_type_pyframeobject_ptr, jd->f);
+
+    /* Initialize arguments */
+    if (jd->use_virtual_locals) {
+        jd->fastlocals = NULL;
+        jd->fastlocals_size = co->co_nlocals + PyTuple_GET_SIZE(co->co_cellvars) + PyTuple_GET_SIZE(co->co_freevars);
+        jd->fastlocals_values = (ir_value*)malloc(sizeof(ir_value) * jd->fastlocals_size);
+        for (int i = 0; i < (int)jd->fastlocals_size; i++) {
+            jd->fastlocals_values[i] = ALLOCA(ir_type_pyobject_ptr);
+        }
+        _initialize_virtual_locals(jd);
+    } else {
+        jd->fastlocals = ir_get_element_ptr(jd->func, jd->f, offsetof(PyFrameObject, f_localsplus), ir_type_pyobject_ptr, "f_localsplus");
+        jd->fastlocals_size = 0;
+        jd->fastlocals_values = NULL;
+    }
 
     /* Setup retval and why */
     SET_RETVAL(CONSTANT_PYOBJ(NULL));
@@ -3066,10 +3197,15 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
        and one for coming from another special section.
      */
     LABEL(jd->exit);
+    if (jd->use_virtual_locals) {
+        _clear_virtual_locals(jd);
+    }
     IR_Py_LeaveRecursiveCall();
     STORE_FIELD(jd->f, PyFrameObject, f_executing, ir_type_char, CONSTANT_CHAR(0));
     JVALUE f_back = LOAD_FIELD(jd->f, PyFrameObject, f_back, ir_type_pyframeobject_ptr);
     STORE_FIELD(jd->tstate, PyThreadState, frame, ir_type_pyframeobject_ptr, f_back);
+
+    /* Check return result */
     JVALUE ret = IR_Py_CheckFunctionResult(NULL, LOAD(jd->retval), "PyJIT_EvalFrame");
     ir_retval(jd->func, ret);
 
@@ -3086,9 +3222,40 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
 
 static void ir_lower(JITData *jd);
 
+static int _uint64_cmp(const void *ap, const void *bp) {
+    uint64_t a = *((const uint64_t*)ap);
+    uint64_t b = *((const uint64_t*)bp);
+    if (a < b) return -1;
+    if (a > b) return 1;
+    return 0;
+}
+
+uint64_t djb2_hash(const unsigned char *in, Py_ssize_t inlen) {
+    uint64_t hash = 5381;
+    for (Py_ssize_t i = 0; i < inlen; i++) {
+        hash = ((hash << 5) + hash) + in[i];
+    }
+    return hash;
+}
+
+int _should_force_real_locals(PyCodeObject *co) {
+    /* IMPORT_STAR uses PyFrame_FastToLocals */
+    Py_ssize_t inst_count = PyBytes_GET_SIZE(co->co_code)/sizeof(_Py_CODEUNIT);
+    _Py_CODEUNIT *code = (_Py_CODEUNIT*)PyBytes_AS_STRING(co->co_code);
+    for (Py_ssize_t i = 0; i < inst_count; i++) {
+        if (_Py_OPCODE(code[i]) == IMPORT_STAR) return 1;
+    }
+
+    /* If the function's hash is in jit_locals_hack, force real locals. */
+    uint64_t hash = djb2_hash((unsigned char*)code, inst_count * sizeof(_Py_CODEUNIT));
+    void *match = bsearch(&hash, jit_locals_hack, sizeof(jit_locals_hack)/sizeof(uint64_t), sizeof(uint64_t), _uint64_cmp);
+    if (match)
+        return 1;
+    return 0;
+}
+
 int
 _PyJIT_CodeGen(PyCodeObject *co) {
-    ir_type sig;
     Py_ssize_t inst_count = PyBytes_GET_SIZE(co->co_code)/sizeof(_Py_CODEUNIT);
     size_t total_size = sizeof(JITData) + inst_count * sizeof(ir_label);
     JITData *jd = PyMem_RawMalloc(total_size);
@@ -3099,10 +3266,35 @@ _PyJIT_CodeGen(PyCodeObject *co) {
     memset(jd, 0, total_size);
     jd->co = co;
     jd->context = ir_context_new();
+    jd->is_gen = (co->co_flags & (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR));
+    jd->use_virtual_locals = !jd->is_gen && !_should_force_real_locals(co);
+    jd->has_vararg = (co->co_flags & CO_VARARGS) ? 1 : 0;
+    jd->has_kwdict = (co->co_flags & CO_VARKEYWORDS) ? 1 : 0;
+    jd->total_pyargs = co->co_argcount + co->co_kwonlyargcount + jd->has_vararg + jd->has_kwdict;
+    jd->has_closure = (PyTuple_GET_SIZE(co->co_freevars) > 0) ? 1 : 0;
 
-    /* func(f, throwflag); */
-    ir_type argtypes[] = { ir_type_pyframeobject_ptr, ir_type_int };
-    sig = ir_create_function_type(jd->context, ir_type_pyobject_ptr, sizeof(argtypes)/sizeof(argtypes[0]), argtypes);
+    ir_type sig;
+    if (jd->is_gen) {
+        /* Signature: func(f, throwflag); */
+        jd->total_direct_args = 0;
+        ir_type argtypes[] = { ir_type_pyframeobject_ptr, ir_type_int };
+        sig = ir_create_function_type(jd->context, ir_type_pyobject_ptr, sizeof(argtypes)/sizeof(argtypes[0]), argtypes);
+    } else if (!jd->use_virtual_locals) {
+        /* Signature: func(f); */
+        jd->total_direct_args = 0;
+        ir_type argtypes[] = { ir_type_pyframeobject_ptr };
+        sig = ir_create_function_type(jd->context, ir_type_pyobject_ptr, sizeof(argtypes)/sizeof(argtypes[0]), argtypes);
+    } else {
+        /* Signature: func(...pyargs..., closure?, f); */
+        jd->total_direct_args = jd->total_pyargs + jd->has_closure + 1;
+        ir_type *argtypes = (ir_type*)malloc(jd->total_direct_args * sizeof(ir_type));
+        for (Py_ssize_t i = 0; i < jd->total_direct_args - 1; i++) {
+            argtypes[i] = ir_type_pyobject_ptr;
+        }
+        argtypes[jd->total_direct_args - 1] = ir_type_pyframeobject_ptr;
+        sig = ir_create_function_type(jd->context, ir_type_pyobject_ptr, jd->total_direct_args, argtypes);
+        free(argtypes);
+    }
     jd->func = ir_func_new(jd->context, PyUnicode_AsUTF8(co->co_name), sig);
 
     translate_bytecode(jd, co);
@@ -3115,6 +3307,7 @@ _PyJIT_CodeGen(PyCodeObject *co) {
     ir_lower(jd);
 
     PyJIT_Handle *handle = PyMem_RawMalloc(sizeof(PyJIT_Handle));
+    memset(handle, 0, sizeof(PyJIT_Handle));
     ir_object object;
     if (Py_JITFlag == 1) {
         object = ir_libjit_compile(jd->func);
@@ -3125,8 +3318,21 @@ _PyJIT_CodeGen(PyCodeObject *co) {
         Py_UNREACHABLE();
     }
     handle->object = object;
-    handle->entry = (PyJIT_EntryPoint)object->entrypoint;
+    if (jd->is_gen) {
+        handle->gen_entrypoint = (PyJIT_GenEntryPoint)object->entrypoint;
+    } else if (!jd->use_virtual_locals) {
+        handle->eval_entrypoint = (PyJIT_EvalEntryPoint)object->entrypoint;
+    } else {
+        handle->direct_entrypoint = (PyJIT_DirectEntryPoint)object->entrypoint;
+
+        ir_object eval_entrypoint_object = PyJIT_MakeEvalEntrypoint(co, object->entrypoint);
+        handle->eval_entrypoint_object = eval_entrypoint_object;
+        handle->eval_entrypoint = (PyJIT_EvalEntryPoint)eval_entrypoint_object->entrypoint;
+    }
     ir_context_destroy(jd->context);
+    if (jd->fastlocals_values) {
+        free(jd->fastlocals_values);
+    }
     PyMem_RawFree(jd);
     co->co_jit_handle = handle;
     return 0;
@@ -3729,11 +3935,17 @@ int _ir_lower_local_ops(JITData *jd, ir_instr _instr) {
         IR_INSTR_AS(getlocal)
         ir_label fallthrough = IR_INSTR_OPERAND(_instr, 0);
         ir_label b_handler = IR_INSTR_OPERAND(_instr, 1);
-        ir_value addr = ir_get_index_ptr(jd->func, jd->fastlocals, CONSTANT_INT(instr->index));
-        ir_value tmp = LOAD(addr);
-        ir_replace_all_uses(jd->func, IR_INSTR_DEST(_instr), tmp);
+        ir_value addr;
+        if (jd->use_virtual_locals) {
+            assert(instr->index < jd->fastlocals_size);
+            addr = jd->fastlocals_values[instr->index];
+        } else {
+            addr = ir_get_index_ptr(jd->func, jd->fastlocals, CONSTANT_INT(instr->index));
+        }
+        ir_value val = LOAD(addr);
+        ir_replace_all_uses(jd->func, IR_INSTR_DEST(_instr), val);
         if (instr->undef_check && !instr->known_defined) {
-            IF_NOT(tmp, IR_UNLIKELY, {
+            IF_NOT(val, IR_UNLIKELY, {
                 CALL_format_exc_check_arg(PyExc_UnboundLocalError,
                                           UNBOUNDLOCAL_ERROR_MSG,
                                           PyTuple_GetItem(jd->co->co_varnames, instr->index));
@@ -3745,14 +3957,26 @@ int _ir_lower_local_ops(JITData *jd, ir_instr _instr) {
     }
     case ir_opcode_setlocal: {
         IR_INSTR_AS(setlocal)
-        ir_value addr = ir_get_index_ptr(jd->func, jd->fastlocals, CONSTANT_INT(instr->index));
+        ir_value addr;
+        if (jd->use_virtual_locals) {
+            assert(instr->index < jd->fastlocals_size);
+            addr = jd->fastlocals_values[instr->index];
+        } else {
+            addr = ir_get_index_ptr(jd->func, jd->fastlocals, CONSTANT_INT(instr->index));
+        }
         STORE(addr, IR_INSTR_OPERAND(_instr, 0));
         return 1;
     }
     case ir_opcode_dellocal: {
         IR_INSTR_AS(dellocal)
-        ir_value addr = ir_get_index_ptr(jd->func, jd->fastlocals, CONSTANT_INT(instr->index));
-        STORE(addr, CONSTANT_PYOBJ(NULL));
+        ir_value addr;
+        if (jd->use_virtual_locals) {
+            assert(instr->index < jd->fastlocals_size);
+            addr = jd->fastlocals_values[instr->index];
+        } else {
+            addr = ir_get_index_ptr(jd->func, jd->fastlocals, CONSTANT_INT(instr->index));
+        }
+        STORE(addr, jd->null);
         return 1;
     }
     default: break;

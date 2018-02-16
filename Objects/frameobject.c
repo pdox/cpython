@@ -494,6 +494,7 @@ frame_tp_clear(PyFrameObject *f)
     oldtop = f->f_stacktop;
     f->f_stacktop = NULL;
     f->f_executing = 0;
+    f->f_virtual_locals = 0;
 
     Py_CLEAR(f->f_trace);
 
@@ -719,6 +720,7 @@ _PyFrame_New_NoTrack(PyThreadState *tstate, PyCodeObject *code,
     f->f_lineno = code->co_firstlineno;
     f->f_iblock = 0;
     f->f_executing = 0;
+    f->f_virtual_locals = 0;
     f->f_gen = NULL;
     f->f_trace_opcodes = 0;
     f->f_trace_lines = 1;
@@ -862,6 +864,7 @@ dict_to_map(PyObject *map, Py_ssize_t nmap, PyObject *dict, PyObject **values,
 int
 PyFrame_FastToLocalsWithError(PyFrameObject *f)
 {
+    assert(!f->f_virtual_locals);
     /* Merge fast locals into f->f_locals */
     PyObject *locals, *map;
     PyObject **fast;
@@ -934,6 +937,7 @@ PyFrame_FastToLocals(PyFrameObject *f)
 void
 PyFrame_LocalsToFast(PyFrameObject *f, int clear)
 {
+    assert(!f->f_virtual_locals);
     /* Merge f->f_locals into fast locals */
     PyObject *locals, *map;
     PyObject **fast;

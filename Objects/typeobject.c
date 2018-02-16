@@ -7620,6 +7620,7 @@ super_init(PyObject *self, PyObject *args, PyObject *kwds)
                             "super(): no current frame");
             return -1;
         }
+        assert(!f->f_virtual_locals);
         co = f->f_code;
         if (co == NULL) {
             PyErr_SetString(PyExc_RuntimeError,

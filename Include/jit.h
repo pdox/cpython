@@ -10,11 +10,17 @@ extern int Py_JITDebugFlag;
 extern char *Py_JITDebugFunc;
 extern char *Py_JITDebugFile;
 
-typedef PyObject* (*PyJIT_EntryPoint)(PyFrameObject *f, int throwflag);
+typedef PyObject* (*PyJIT_EvalEntryPoint)(PyFrameObject *f);
+typedef PyObject* (*PyJIT_GenEntryPoint)(PyFrameObject *f, int throwflag);
+typedef PyObject* (*PyJIT_DirectEntryPoint)(PyFrameObject *f, ...);
 
 typedef struct {
     void *object; /* ir_object */
-    PyJIT_EntryPoint entry;
+    void *eval_entrypoint_object;
+
+    PyJIT_EvalEntryPoint eval_entrypoint;
+    PyJIT_GenEntryPoint gen_entrypoint;
+    PyJIT_DirectEntryPoint direct_entrypoint;
 } PyJIT_Handle;
 
 extern int _PyJIT_CodeGen(PyCodeObject *co);
@@ -40,7 +46,13 @@ PyJIT_Execute(PyFrameObject *f, int throwflag) {
             PyUnicode_AsUTF8(co->co_filename),
             co);
     }
-    return ((PyJIT_Handle*)co->co_jit_handle)->entry(f, throwflag);
+    PyJIT_Handle *handle = co->co_jit_handle;
+    if (handle->gen_entrypoint) {
+        return handle->gen_entrypoint(f, throwflag);
+    } else {
+        assert(!throwflag);
+        return handle->eval_entrypoint(f);
+    }
 }
 
 #ifdef __cplusplus

@@ -159,15 +159,14 @@
 } while (0)
 
 #ifdef Py_DEBUG
-static void _do_assert(int expr, const char *expr_str) {
-    if (!expr) {
-        Py_FatalError(expr_str);
-    }
-}
+
+void _jit_macros_assert(int expr, const char *expr_str);
+
 #  define IR_ASSERT(expr) do { \
     JTYPE _sig = CREATE_SIGNATURE(ir_type_void, ir_type_int, ir_type_char_ptr); \
-    CALL_NATIVE(_sig, _do_assert, BOOL(expr), CONSTANT_CHAR_PTR(#expr)); \
+    CALL_NATIVE(_sig, _jit_macros_assert, BOOL(expr), CONSTANT_CHAR_PTR(#expr)); \
 } while (0)
+
 #else
 #  define IR_ASSERT(expr)
 #endif
@@ -256,6 +255,19 @@ static void _do_assert(int expr, const char *expr_str) {
     JTYPE _sig = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr); \
     CALL_NATIVE(_sig, _PyObject_RealIsSubclass, (derivedval), (clsval)); \
 })
+
+void _jit_macros_decref_helper(PyObject *obj);
+void _jit_macros_xdecref_helper(PyObject *obj);
+
+#define CALL_Py_DECREF(objval) do { \
+    JTYPE _sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr); \
+    CALL_NATIVE(_sig, _jit_macros_decref_helper, (objval)); \
+} while (0)
+
+#define CALL_Py_XDECREF(objval) do { \
+    JTYPE _sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr); \
+    CALL_NATIVE(_sig, _jit_macros_xdecref_helper, (objval)); \
+} while (0)
 
 #define CALL_PyErr_SetString(exc, msg) do { \
     JTYPE sig = CREATE_SIGNATURE(ir_type_void, ir_type_void_ptr, ir_type_void_ptr); \
@@ -390,3 +402,8 @@ static void _do_assert(int expr, const char *expr_str) {
     STORE_FIELD(tstate, PyThreadState, overflowed, ir_type_char, CONSTANT_CHAR(0)); \
     LABEL(skip_overflowed_clear); \
 } while (0)
+
+#define CALL_PyCell_New(objval) ({ \
+    JTYPE _sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr); \
+    CALL_NATIVE(_sig, PyCell_New, (objval)); \
+})
