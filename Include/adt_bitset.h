@@ -20,14 +20,14 @@ static inline adt_bitset_word _adt_bitset_end_mask(size_t nbits) {
     return ~(adt_bitset_word)0;
 }
 
-static inline adt_bitset adt_bitset_alloc(size_t nbits) {
+static inline adt_bitset adt_bitset_new(size_t nbits) {
     size_t nwords = ADT_NWORDS(nbits);
     adt_bitset ret = (adt_bitset)malloc(sizeof(adt_bitset_t) + nwords * sizeof(adt_bitset_word));
     ret->nbits = nbits;
     return ret;
 }
 
-static inline void adt_bitset_free(adt_bitset bs) {
+static inline void adt_bitset_delete(adt_bitset bs) {
     free(bs);
 }
 

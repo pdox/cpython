@@ -566,18 +566,18 @@ void ir_mark_defined_locals(ir_func func, size_t nlocals) {
     size_t num_blocks = ir_func_next_block_index(func);
     _defined_locals_block_info *info_for_block = (_defined_locals_block_info*)malloc(sizeof(_defined_locals_block_info) * num_blocks);
     for (size_t i = 0; i < num_blocks; i++) {
-       info_for_block[i].in = adt_bitset_alloc(nlocals);
+       info_for_block[i].in = adt_bitset_new(nlocals);
        adt_bitset_setall(info_for_block[i].in, 1);
     }
 
     /* All locals are unset on entry */
     adt_bitset_setall(info_for_block[func->entry_block->index].in, 0);
 
-    adt_bitset out = adt_bitset_alloc(nlocals);
-    adt_bitset tmp = adt_bitset_alloc(nlocals);
+    adt_bitset out = adt_bitset_new(nlocals);
+    adt_bitset tmp = adt_bitset_new(nlocals);
 
     /* Track which blocks have had their 'in' bitset change */
-    adt_bitset dirty = adt_bitset_alloc(num_blocks);
+    adt_bitset dirty = adt_bitset_new(num_blocks);
     adt_bitset_setall(dirty, 1);
     int rerun;
     do {
@@ -622,11 +622,11 @@ void ir_mark_defined_locals(ir_func func, size_t nlocals) {
             }
         }
     } while (rerun);
-    adt_bitset_free(dirty);
-    adt_bitset_free(tmp);
-    adt_bitset_free(out);
+    adt_bitset_delete(dirty);
+    adt_bitset_delete(tmp);
+    adt_bitset_delete(out);
     for (size_t i = 0; i < num_blocks; i++) {
-       adt_bitset_free(info_for_block[i].in);
+       adt_bitset_delete(info_for_block[i].in);
     }
     free(info_for_block);
 }

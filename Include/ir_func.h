@@ -27,6 +27,7 @@ struct ir_use_t {
 };
 
 #define IR_USE_VALUE(use)   ((use).value)
+#define IR_USE_INSTR(use)   _ir_use_instr(&(use))
 
 struct ir_block_t {
     ir_block prev;

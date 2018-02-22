@@ -140,6 +140,9 @@ static inline ir_instr _ir_value_def(ir_value value) {
  */
 #define IR_INSTR_DEST(_instr)       (&(_instr)->dest)
 
+/* Parent block for an instruction */
+#define IR_INSTR_PARENT(_instr)     ((_instr)->parent)
+
 /* Get the opcode for instruction */
 #define IR_INSTR_OPCODE(_instr)     ((ir_opcode)((_instr)->opcode))
 
@@ -211,6 +214,28 @@ static inline ir_use ir_get_uses(ir_instr _instr, size_t *countp) {
     } else {
         return &IR_INSTR_USE(_instr, 0);
     }
+}
+
+/* The block that a 'use' is contained in */
+#define IR_USE_PARENT(use)   IR_INSTR_PARENT(IR_USE_INSTR(use))
+
+static inline ir_instr _ir_use_instr(ir_use use) {
+    while (use->value != IR_INSTR_MAGIC) {
+        use++;
+    }
+    return (ir_instr)use;
+}
+
+/* Get the first incoming label (use) to a block.
+   Use IR_USE_PARENT() to get the incoming block.
+   Subsequent label uses can be retrieved by accessing ->next
+   on the use until NULL. (i.e., they are in a linked list) */
+static inline ir_use
+ir_get_incoming_blocks(ir_block b) {
+    ir_instr _instr = b->first_instr;
+    assert(IR_INSTR_OPCODE(_instr) == ir_opcode_label_here);
+    ir_label label = IR_INSTR_DEST(_instr);
+    return label->use_list;
 }
 
 /* Get all outgoing labels for a block.

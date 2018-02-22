@@ -328,6 +328,9 @@ PYTHON_OBJS=	\
                 Python/ir_func.o \
                 Python/ir_type_system.o \
                 Python/ir_instructions.o \
+                Python/ir_domtree_semi_nca.o \
+                Python/ir_domtree_dataflow.o \
+                Python/ir_domtree_verify.o \
                 Python/ir_analyze.o \
                 Python/ir_libjit.o \
                 Python/ir_llvm.o \
@@ -1032,6 +1035,7 @@ PYTHON_HEADERS= \
 		$(srcdir)/Include/warnings.h \
 		$(srcdir)/Include/weakrefobject.h \
                 $(srcdir)/Include/ir_all_types.def \
+                $(srcdir)/Include/ir_domtree.h \
                 $(srcdir)/Include/ir_analyze.h \
                 $(srcdir)/Include/ir_context.h \
                 $(srcdir)/Include/ir_func.h \
@@ -1049,6 +1053,9 @@ PYTHON_HEADERS= \
                 $(srcdir)/Include/jit_locals_hack.h \
                 $(srcdir)/Include/jit_macros.h \
                 $(srcdir)/Include/SimpleOrcJit.h \
+                $(srcdir)/Include/adt.h \
+                $(srcdir)/Include/adt_vector.h \
+                $(srcdir)/Include/adt_bitset.h \
 		pyconfig.h \
 		$(PARSER_HEADERS) \
 		$(srcdir)/Include/Python-ast.h \

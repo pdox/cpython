@@ -34,6 +34,7 @@ IR_PROTOTYPE(ir_func)
 #include "ir_type_system.h"
 #include "ir_func.h"
 #include "ir_instructions.h"
+#include "ir_domtree.h"
 #include "ir_analyze.h"
 #include "ir_stackmaps.h"
 #include "ir_object.h"

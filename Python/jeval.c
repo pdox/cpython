@@ -4092,6 +4092,14 @@ static void lower_refcount_ops_pass(JITData *jd) {
     _lower_pass(jd, _ir_lower_refcounting);
 }
 
+static void lower_into_ssa_form(JITData *jd) {
+    if (Py_JITDebugFlag > 1) {
+        ir_domtree_verify(jd->func);
+    }
+    ir_domtree dt = ir_compute_domtree_semi_nca(jd->func);
+    ir_domtree_delete(dt);
+}
+
 typedef void (*passfunc)(JITData*);
 
 typedef struct {
@@ -4108,6 +4116,8 @@ static _pass_info lower_passes[] = {
   { "yield_dispatch", lower_yield_dispatch },
   { "remove_dead_blocks", remove_dead_blocks_pass },
   { "lower_stack_ops", lower_stack_ops_pass },
+  { "remove_dead_blocks", remove_dead_blocks_pass },
+  { "ssa_form", lower_into_ssa_form },
   { "lower_refcount_ops", lower_refcount_ops_pass },
   { NULL, NULL },
 };
