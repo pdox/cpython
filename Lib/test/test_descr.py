@@ -1264,7 +1264,8 @@ order (MRO) for bases """
             for i in range(10):
                 g==g
             new_objects = len(gc.get_objects())
-            self.assertEqual(orig_objects, new_objects)
+            extra = 1 if sys.flags.jit else 0  # PyJITFunction for __eq__
+            self.assertEqual(orig_objects + extra, new_objects)
 
         class H(object):
             __slots__ = ['a', 'b']

@@ -17,6 +17,10 @@ typedef uint16_t _Py_CODEUNIT;
 #  define _Py_OPARG(word) ((word) >> 8)
 #endif
 
+/* Forward declaration */
+struct _PyJITFunctionObject;
+typedef struct _PyJITFunctionObject PyJITFunctionObject;
+
 /* Bytecode object */
 typedef struct {
     PyObject_HEAD
@@ -45,7 +49,29 @@ typedef struct {
     void *co_zombieframe;     /* for optimization only (see frameobject.c) */
     PyObject *co_weakreflist;   /* to support weakrefs to code objects */
 
-    void *co_jit_handle;        /* PyJIT handle, if compiled */
+    /* Generic JIT function -
+
+       Most code is only ever run with a single (globals, builtins) pair.
+       For that case, we generate a single PyJITFunction, but we cannot
+       keep a reference to that in the code object, since it holds a reference
+       to the globals/builtins dictionaries, which would expose code objects
+       to becoming involved in a circular reference (code objects are non-GC).
+
+       So, normally, a reference to the PyJITFunction is stored by the PyFunction
+       object. For nested functions (where there may not be a stable PyFunction
+       object), the enclosing function's PyJITFunction keeps a linked list of
+       child PyJITFunctions, in order to avoid creating/destroying a PyJITFunction
+       for every instantiation.
+
+       In the case where a code object is being used with different globals
+       or builtins, we build a generic version which allows globals/builtins
+       to be specified at runtime, rather than compile-time. A reference to this
+       generic PyJITFunction is stored here, in the code object. This is safe,
+       because this PyJITFunction will not keep any references to a globals/builtins
+       dict.
+     */
+    PyJITFunctionObject *co_jit_function_generic;
+
     /* Scratch space for extra data relating to the code object.
        Type is a void* to keep the format private in codeobject.c to force
        people to go through the proper APIs. */

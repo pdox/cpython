@@ -435,6 +435,7 @@ frame_dealloc(PyFrameObject *f)
     Py_XDECREF(f->f_back);
     Py_DECREF(f->f_builtins);
     Py_DECREF(f->f_globals);
+    Py_CLEAR(f->f_jit_function);
     Py_CLEAR(f->f_locals);
     Py_CLEAR(f->f_trace);
 
@@ -465,6 +466,7 @@ frame_traverse(PyFrameObject *f, visitproc visit, void *arg)
     Py_VISIT(f->f_globals);
     Py_VISIT(f->f_locals);
     Py_VISIT(f->f_trace);
+    Py_VISIT(f->f_jit_function);
 
     /* locals */
     slots = f->f_code->co_nlocals + PyTuple_GET_SIZE(f->f_code->co_cellvars) + PyTuple_GET_SIZE(f->f_code->co_freevars);
@@ -494,7 +496,6 @@ frame_tp_clear(PyFrameObject *f)
     oldtop = f->f_stacktop;
     f->f_stacktop = NULL;
     f->f_executing = 0;
-    f->f_virtual_locals = 0;
 
     Py_CLEAR(f->f_trace);
 
@@ -636,7 +637,6 @@ _PyFrame_New_NoTrack(PyThreadState *tstate, PyCodeObject *code,
         }
         else
             Py_INCREF(builtins);
-
     }
     else {
         /* If we share the globals, we share the builtins.
@@ -715,12 +715,12 @@ _PyFrame_New_NoTrack(PyThreadState *tstate, PyCodeObject *code,
         Py_INCREF(locals);
         f->f_locals = locals;
     }
+    f->f_jit_function = NULL;
 
     f->f_lasti = -1;
     f->f_lineno = code->co_firstlineno;
     f->f_iblock = 0;
     f->f_executing = 0;
-    f->f_virtual_locals = 0;
     f->f_gen = NULL;
     f->f_trace_opcodes = 0;
     f->f_trace_lines = 1;
@@ -861,10 +861,18 @@ dict_to_map(PyObject *map, Py_ssize_t nmap, PyObject *dict, PyObject **values,
     }
 }
 
+int PyFrame_HasVirtualLocals(PyFrameObject *f)
+{
+    if (f->f_jit_function) {
+        return PyJITFunction_HasVirtualLocals(f->f_jit_function);
+    }
+    return 0;
+}
+
 int
 PyFrame_FastToLocalsWithError(PyFrameObject *f)
 {
-    assert(!f->f_virtual_locals);
+    assert(!PyFrame_HasVirtualLocals(f));
     /* Merge fast locals into f->f_locals */
     PyObject *locals, *map;
     PyObject **fast;
@@ -937,7 +945,7 @@ PyFrame_FastToLocals(PyFrameObject *f)
 void
 PyFrame_LocalsToFast(PyFrameObject *f, int clear)
 {
-    assert(!f->f_virtual_locals);
+    assert(!PyFrame_HasVirtualLocals(f));
     /* Merge f->f_locals into fast locals */
     PyObject *locals, *map;
     PyObject **fast;

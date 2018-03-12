@@ -1406,14 +1406,14 @@ void _ir_func_new_block(ir_func func) {
     block->last_instr = NULL;
     block->index = (func->next_block_index)++;
     ir_block after = func->current_block ? func->current_block : func->last_block;
-    IR_LL_INSERT_AFTER(func->first_block, func->last_block, after, block);
+    ADT_LL_INSERT_AFTER(func->first_block, func->last_block, after, block);
 
     ir_block cur = func->current_block;
     if (cur != NULL && cur->current_instr != cur->last_instr) {
         /* Detach all instructions after the current one */
         ir_instr from_instr = cur->current_instr ? cur->current_instr->next : cur->first_instr;
         ir_instr to_instr = cur->last_instr;
-        IR_LL_DETACH_CHAIN(cur->first_instr, cur->last_instr, from_instr, to_instr);
+        ADT_LL_DETACH_CHAIN(cur->first_instr, cur->last_instr, from_instr, to_instr);
 
         /* Attach into new block */
         block->first_instr = from_instr;
@@ -1434,7 +1434,7 @@ void _ir_func_new_block(ir_func func) {
 /* Remove an instruction from a block */
 static inline
 void _ir_remove_instr(ir_block b, ir_instr _instr) {
-    IR_LL_REMOVE(b->first_instr, b->last_instr, _instr);
+    ADT_LL_REMOVE(b->first_instr, b->last_instr, _instr);
     _instr->parent = NULL;
     _instr->prev = _instr->next = NULL;
 
@@ -1480,7 +1480,7 @@ void ir_cursor_insert(ir_func func, ir_instr _instr) {
         ir_instr after = b->first_instr;
         while (after->next != NULL && IR_INSTR_OPCODE(after->next) == ir_opcode_alloca)
             after = after->next;
-        IR_LL_INSERT_AFTER(b->first_instr, b->last_instr, after, _instr);
+        ADT_LL_INSERT_AFTER(b->first_instr, b->last_instr, after, _instr);
         _instr->parent = b;
         /* Make sure the cursor stays after the alloca instructions, or else the
            alloca's could get pushed out of position. */
@@ -1528,7 +1528,7 @@ void ir_cursor_insert(ir_func func, ir_instr _instr) {
 
     /* Do actual insert */
     assert(b == func->current_block);
-    IR_LL_INSERT_AFTER(b->first_instr, b->last_instr, b->current_instr, _instr);
+    ADT_LL_INSERT_AFTER(b->first_instr, b->last_instr, b->current_instr, _instr);
     _instr->parent = b;
     b->current_instr = _instr;
 

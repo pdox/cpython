@@ -335,6 +335,7 @@ PYTHON_OBJS=	\
                 Python/ir_libjit.o \
                 Python/ir_llvm.o \
 		Python/jeval.o \
+		Python/jit.o \
 		Python/jit_eval_entrypoint.o \
 		Python/jit_macros.o \
 		Python/jeval_error_handler_trampoline.o \
@@ -1054,6 +1055,7 @@ PYTHON_HEADERS= \
                 $(srcdir)/Include/jit_macros.h \
                 $(srcdir)/Include/SimpleOrcJit.h \
                 $(srcdir)/Include/adt.h \
+                $(srcdir)/Include/adt_macros.h \
                 $(srcdir)/Include/adt_vector.h \
                 $(srcdir)/Include/adt_bitset.h \
 		pyconfig.h \

@@ -24,6 +24,8 @@ PyFunction_NewWithQualName(PyObject *code, PyObject *globals, PyObject *qualname
     if (op == NULL)
         return NULL;
 
+    op->func_jit_function = NULL;
+    op->func_jit_parent = NULL;
     op->func_weakreflist = NULL;
     Py_INCREF(code);
     op->func_code = code;
@@ -271,6 +273,11 @@ func_set_code(PyFunctionObject *op, PyObject *value)
                      nclosure, nfree);
         return -1;
     }
+
+    /* Clear cached JIT info */
+    Py_CLEAR(op->func_jit_function);
+    Py_CLEAR(op->func_jit_parent);
+
     Py_INCREF(value);
     Py_XSETREF(op->func_code, value);
     return 0;
@@ -529,6 +536,8 @@ func_dealloc(PyFunctionObject *op)
     _PyObject_GC_UNTRACK(op);
     if (op->func_weakreflist != NULL)
         PyObject_ClearWeakRefs((PyObject *) op);
+    Py_XDECREF(op->func_jit_function);
+    Py_XDECREF(op->func_jit_parent);
     Py_DECREF(op->func_code);
     Py_DECREF(op->func_globals);
     Py_XDECREF(op->func_module);
@@ -553,6 +562,8 @@ func_repr(PyFunctionObject *op)
 static int
 func_traverse(PyFunctionObject *f, visitproc visit, void *arg)
 {
+    Py_VISIT(f->func_jit_function);
+    Py_VISIT(f->func_jit_parent);
     Py_VISIT(f->func_code);
     Py_VISIT(f->func_globals);
     Py_VISIT(f->func_module);

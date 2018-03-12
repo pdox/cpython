@@ -255,7 +255,7 @@ PyObject_Call(PyObject *callable, PyObject *args, PyObject *kwargs)
 
 static PyObject* _Py_HOT_FUNCTION
 function_code_fastcall(PyCodeObject *co, PyObject **args, Py_ssize_t nargs,
-                       PyObject *globals)
+                       PyObject *globals, PyObject *jit_hint)
 {
     PyFrameObject *f;
     PyThreadState *tstate = PyThreadState_GET();
@@ -273,6 +273,7 @@ function_code_fastcall(PyCodeObject *co, PyObject **args, Py_ssize_t nargs,
     if (f == NULL) {
         return NULL;
     }
+    f->f_jit_function = PyJIT_ForFrame(jit_hint, co, globals, f->f_builtins);
 
     fastlocals = f->f_localsplus;
 
@@ -313,13 +314,15 @@ _PyFunction_FastCallDict(PyObject *func, PyObject **args, Py_ssize_t nargs,
     assert(nargs == 0 || args != NULL);
     assert(kwargs == NULL || PyDict_Check(kwargs));
 
+    PyObject *jit_hint = PyJIT_Prepare(func);
+
     if (co->co_kwonlyargcount == 0 &&
         (kwargs == NULL || PyDict_GET_SIZE(kwargs) == 0) &&
         (co->co_flags & ~PyCF_MASK) == (CO_OPTIMIZED | CO_NEWLOCALS | CO_NOFREE))
     {
         /* Fast paths */
         if (argdefs == NULL && co->co_argcount == nargs) {
-            return function_code_fastcall(co, args, nargs, globals);
+            return function_code_fastcall(co, args, nargs, globals, jit_hint);
         }
         else if (nargs == 0 && argdefs != NULL
                  && co->co_argcount == PyTuple_GET_SIZE(argdefs)) {
@@ -327,7 +330,7 @@ _PyFunction_FastCallDict(PyObject *func, PyObject **args, Py_ssize_t nargs,
                a default value: use default values as arguments .*/
             args = &PyTuple_GET_ITEM(argdefs, 0);
             return function_code_fastcall(co, args, PyTuple_GET_SIZE(argdefs),
-                                          globals);
+                                          globals, jit_hint);
         }
     }
 
@@ -377,7 +380,7 @@ _PyFunction_FastCallDict(PyObject *func, PyObject **args, Py_ssize_t nargs,
                                       args, nargs,
                                       k, k != NULL ? k + 1 : NULL, nk, 2,
                                       d, nd, kwdefs,
-                                      closure, name, qualname);
+                                      closure, name, qualname, jit_hint);
     Py_XDECREF(kwtuple);
     return result;
 }
@@ -398,6 +401,9 @@ _PyFunction_FastCallKeywords(PyObject *func, PyObject **stack,
     assert(nargs >= 0);
     assert(kwnames == NULL || PyTuple_CheckExact(kwnames));
     assert((nargs == 0 && nkwargs == 0) || stack != NULL);
+
+    PyObject *jit_hint = PyJIT_Prepare(func);
+
     /* kwnames must only contains str strings, no subclass, and all keys must
        be unique */
 
@@ -405,7 +411,7 @@ _PyFunction_FastCallKeywords(PyObject *func, PyObject **stack,
         (co->co_flags & ~PyCF_MASK) == (CO_OPTIMIZED | CO_NEWLOCALS | CO_NOFREE))
     {
         if (argdefs == NULL && co->co_argcount == nargs) {
-            return function_code_fastcall(co, stack, nargs, globals);
+            return function_code_fastcall(co, stack, nargs, globals, jit_hint);
         }
         else if (nargs == 0 && argdefs != NULL
                  && co->co_argcount == PyTuple_GET_SIZE(argdefs)) {
@@ -413,7 +419,7 @@ _PyFunction_FastCallKeywords(PyObject *func, PyObject **stack,
                a default value: use default values as arguments .*/
             stack = &PyTuple_GET_ITEM(argdefs, 0);
             return function_code_fastcall(co, stack, PyTuple_GET_SIZE(argdefs),
-                                          globals);
+                                          globals, jit_hint);
         }
     }
 
@@ -436,7 +442,7 @@ _PyFunction_FastCallKeywords(PyObject *func, PyObject **stack,
                                     stack + nargs,
                                     nkwargs, 1,
                                     d, (int)nd, kwdefs,
-                                    closure, name, qualname);
+                                    closure, name, qualname, jit_hint);
 }
 
 

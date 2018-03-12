@@ -4,8 +4,6 @@
 
 /* Compile an IR using libjit */
 
-jit_context_t gcontext = NULL;
-
 #define SET_DEST(v) do { \
     jit_value_t _v = (v); \
     ir_value dest = IR_INSTR_DEST(_instr); \
@@ -353,15 +351,17 @@ void _emit_instr(jit_function_t jit_func,
     } // end switch
 }
 
+static void _ir_libjit_destroy_context(void *context) {
+    jit_context_destroy((jit_context_t)context);
+}
+
 ir_object ir_libjit_compile(ir_func func) {
     unsigned int i;
-    if (gcontext == NULL) {
-        gcontext = jit_context_create();
-    }
+    jit_context_t context = jit_context_create();
 
-    jit_context_build_start(gcontext);
+    jit_context_build_start(context);
     jit_type_t jit_sig = JIT_TYPE(func->sig);
-    jit_function_t jit_func = jit_function_create(gcontext, jit_sig);
+    jit_function_t jit_func = jit_function_create(context, jit_sig);
 
     /* Index and count the values */
     size_t num_values = ir_func_next_value_index(func);
@@ -432,13 +432,11 @@ ir_object ir_libjit_compile(ir_func func) {
     }
     void *entrypoint = jit_function_to_closure(jit_func);
     assert(entrypoint);
-    jit_context_build_end(gcontext);
+    jit_context_build_end(context);
 
     ir_object ret = ir_object_new();
-    // TODO: Keep track of compiler data, so that when an ir_object is free'd,
-    //       the associated compiler module is also freed.
-    ret->compiler_data = NULL;
-    ret->compiler_free_callback = NULL;
+    ret->compiler_data = (void*)context;
+    ret->compiler_free_callback = _ir_libjit_destroy_context;
     ret->entrypoint = entrypoint;
     ret->stackmap_index = NULL;
     return ret;

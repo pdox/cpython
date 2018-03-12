@@ -20,6 +20,7 @@ extern "C" {
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include "adt.h"
 
 #define IR_PROTOTYPE(name) \
     struct name ## _t; \

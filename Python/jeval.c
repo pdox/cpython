@@ -29,6 +29,7 @@ typedef struct resume_entry {
 } resume_entry;
 
 typedef struct _JITData {
+    PyJITFunctionObject *jit_function;
     PyCodeObject *co; /* Borrowed reference */
     ir_context context;
     ir_func func;
@@ -2811,6 +2812,11 @@ EMITTER_FOR(MAKE_FUNCTION) {
     DECREF(qualname);
     GOTO_ERROR_IF_NOT(func);
 
+    /* Set func_jit_parent */
+    JVALUE parentjf = CONSTANT_PYOBJ((PyObject*)jd->jit_function);
+    INCREF(parentjf);
+    STORE_FIELD(func, PyFunctionObject, func_jit_parent, ir_type_pyobject_ptr, parentjf);
+
     if (oparg & 0x08) {
         JVALUE closure = POP();
         IR_ASSERT(IR_PyTuple_CheckExact(closure));
@@ -3092,7 +3098,6 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
         /* Arguments: ...pyargs..., closure?, f */
         jd->f = ir_func_get_argument(jd->func, jd->total_direct_args - 1);
         jd->throwflag = NULL;
-        STORE_FIELD(jd->f, PyFrameObject, f_virtual_locals, ir_type_char, CONSTANT_CHAR(1));
     }
 
     jd->retval = ALLOCA(ir_type_pyobject_ptr);
@@ -3254,16 +3259,32 @@ int _should_force_real_locals(PyCodeObject *co) {
     return 0;
 }
 
-int
-_PyJIT_CodeGen(PyCodeObject *co) {
+PyJITFunctionObject*
+_PyJIT_CodeGen(PyCodeObject *co, PyObject *globals, PyObject *builtins) {
+    assert(PyCode_Check(co));
+    if (globals == NULL || !PyDict_CheckExact(globals) ||
+        builtins == NULL || !PyDict_CheckExact(builtins)) {
+        /* Force generic code */
+        globals = NULL;
+        builtins = NULL;
+    }
+    if (Py_JITDebugFlag > 0) {
+        fprintf(stderr, "Entering CodeGen for %s from %s (code == %p, globals = %p, builtins = %p)\n",
+            PyUnicode_AsUTF8(co->co_name),
+            PyUnicode_AsUTF8(co->co_filename),
+            co,
+            globals,
+            builtins);
+    }
     Py_ssize_t inst_count = PyBytes_GET_SIZE(co->co_code)/sizeof(_Py_CODEUNIT);
     size_t total_size = sizeof(JITData) + inst_count * sizeof(ir_label);
     JITData *jd = PyMem_RawMalloc(total_size);
     if (jd == NULL) {
         PyErr_NoMemory();
-        return -1;
+        return NULL;
     }
     memset(jd, 0, total_size);
+    jd->jit_function = (PyJITFunctionObject*)PyJITFunction_New((PyObject*)co, globals, builtins);
     jd->co = co;
     jd->context = ir_context_new();
     jd->is_gen = (co->co_flags & (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR));
@@ -3306,8 +3327,7 @@ _PyJIT_CodeGen(PyCodeObject *co) {
     /* Lower all Python-specific instructions */
     ir_lower(jd);
 
-    PyJIT_Handle *handle = PyMem_RawMalloc(sizeof(PyJIT_Handle));
-    memset(handle, 0, sizeof(PyJIT_Handle));
+    /* Compile IR to machine code object */
     ir_object object;
     if (Py_JITFlag == 1) {
         object = ir_libjit_compile(jd->func);
@@ -3317,25 +3337,31 @@ _PyJIT_CodeGen(PyCodeObject *co) {
         Py_FatalError("invalid PYJIT value");
         Py_UNREACHABLE();
     }
-    handle->object = object;
-    if (jd->is_gen) {
-        handle->gen_entrypoint = (PyJIT_GenEntryPoint)object->entrypoint;
-    } else if (!jd->use_virtual_locals) {
-        handle->eval_entrypoint = (PyJIT_EvalEntryPoint)object->entrypoint;
-    } else {
-        handle->direct_entrypoint = (PyJIT_DirectEntryPoint)object->entrypoint;
 
+    /* Populate JIT object for return */
+    PyJITFunctionObject *jf = jd->jit_function;
+    jf->uses_virtual_locals = jd->use_virtual_locals;
+    jf->eval_entrypoint = NULL;
+    jf->gen_entrypoint = NULL;
+    jf->direct_entrypoint = NULL;
+    jf->object = object;
+    jf->eval_entrypoint_object = NULL;
+    if (jd->is_gen) {
+        jf->gen_entrypoint = (PyJIT_GenEntryPoint)object->entrypoint;
+    } else if (!jd->use_virtual_locals) {
+        jf->eval_entrypoint = (PyJIT_EvalEntryPoint)object->entrypoint;
+    } else {
+        jf->direct_entrypoint = (PyJIT_DirectEntryPoint)object->entrypoint;
         ir_object eval_entrypoint_object = PyJIT_MakeEvalEntrypoint(co, object->entrypoint);
-        handle->eval_entrypoint_object = eval_entrypoint_object;
-        handle->eval_entrypoint = (PyJIT_EvalEntryPoint)eval_entrypoint_object->entrypoint;
+        jf->eval_entrypoint_object = eval_entrypoint_object;
+        jf->eval_entrypoint = (PyJIT_EvalEntryPoint)eval_entrypoint_object->entrypoint;
     }
     ir_context_destroy(jd->context);
     if (jd->fastlocals_values) {
         free(jd->fastlocals_values);
     }
     PyMem_RawFree(jd);
-    co->co_jit_handle = handle;
-    return 0;
+    return jf;
 }
 
 static inline

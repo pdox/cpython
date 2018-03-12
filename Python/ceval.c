@@ -545,14 +545,8 @@ PyObject *
 PyEval_EvalFrameEx(PyFrameObject *f, int throwflag)
 {
     PyThreadState *tstate = PyThreadState_GET();
-    if (Py_JITFlag != 0) {
-        if (!Py_JITDebugFunc || strcmp(Py_JITDebugFunc, PyUnicode_AsUTF8(f->f_code->co_name)) == 0) {
-            if (!Py_JITDebugFile || strstr(PyUnicode_AsUTF8(f->f_code->co_filename), Py_JITDebugFile) != NULL) {
-                if (!tstate->use_tracing && !_Py_TracingPossible && !PyDTrace_LINE_ENABLED()) {
-                    return PyJIT_Execute(f, throwflag);
-                }
-            }
-        }
+    if (f->f_jit_function && !tstate->use_tracing && !_Py_TracingPossible && !PyDTrace_LINE_ENABLED()) {
+        return PyJIT_Execute(f, throwflag);
     }
     return tstate->interp->eval_frame(f, throwflag);
 }
@@ -3751,7 +3745,7 @@ _PyEval_EvalCodeWithName(PyObject *_co, PyObject *globals, PyObject *locals,
            Py_ssize_t kwcount, int kwstep,
            PyObject **defs, Py_ssize_t defcount,
            PyObject *kwdefs, PyObject *closure,
-           PyObject *name, PyObject *qualname)
+           PyObject *name, PyObject *qualname, PyObject *jit_hint)
 {
     PyCodeObject* co = (PyCodeObject*)_co;
     PyFrameObject *f;
@@ -3776,6 +3770,7 @@ _PyEval_EvalCodeWithName(PyObject *_co, PyObject *globals, PyObject *locals,
     if (f == NULL) {
         return NULL;
     }
+    f->f_jit_function = PyJIT_ForFrame(jit_hint, co, globals, f->f_builtins);
     fastlocals = f->f_localsplus;
     freevars = f->f_localsplus + co->co_nlocals;
 
@@ -4044,7 +4039,7 @@ PyEval_EvalCodeEx(PyObject *_co, PyObject *globals, PyObject *locals,
                                     kwcount, 2,
                                     defs, defcount,
                                     kwdefs, closure,
-                                    NULL, NULL);
+                                    NULL, NULL, NULL);
 }
 
 PyObject *

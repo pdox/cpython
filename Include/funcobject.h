@@ -20,6 +20,10 @@ extern "C" {
 
 typedef struct {
     PyObject_HEAD
+    PyObject *func_jit_function; /* Cached PyJITFunction */
+    PyObject *func_jit_parent;   /* If this function is a closure (created inside)
+                                    another function which has JIT code, this is a
+                                    reference to the enclosing function's PyJITFunction. */
     PyObject *func_code;	/* A code object, the __code__ attribute */
     PyObject *func_globals;	/* A dictionary (other mappings won't do) */
     PyObject *func_defaults;	/* NULL or a tuple */

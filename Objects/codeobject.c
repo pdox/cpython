@@ -197,7 +197,7 @@ PyCode_New(int argcount, int kwonlyargcount,
     co->co_lnotab = lnotab;
     co->co_zombieframe = NULL;
     co->co_weakreflist = NULL;
-    co->co_jit_handle = NULL;
+    co->co_jit_function_generic = NULL;
     co->co_extra = NULL;
     return co;
 }
@@ -423,6 +423,7 @@ code_dealloc(PyCodeObject *co)
         PyMem_Free(co_extra);
     }
 
+    Py_XDECREF(co->co_jit_function_generic);
     Py_XDECREF(co->co_code);
     Py_XDECREF(co->co_consts);
     Py_XDECREF(co->co_names);

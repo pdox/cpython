@@ -1,6 +1,5 @@
 #include "Python.h"
 #include "ir.h"
-#include "adt_bitset.h"
 
 /***********************************************************/
 /*                  Helper functions                       */
@@ -84,7 +83,7 @@ void ir_remove_dead_blocks(ir_func func) {
             while (b->last_instr != NULL) {
                 _ir_remove_instr(b, b->last_instr);
             }
-            IR_LL_REMOVE(func->first_block, func->last_block, b);
+            ADT_LL_REMOVE(func->first_block, func->last_block, b);
         }
     }
     func->current_block = NULL;

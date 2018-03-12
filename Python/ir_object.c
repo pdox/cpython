@@ -9,7 +9,7 @@ ir_object ir_object_new(void) {
 
 void ir_object_free(ir_object obj) {
     if (obj->compiler_free_callback) {
-        obj->compiler_free_callback(obj);
+        obj->compiler_free_callback(obj->compiler_data);
     }
     if (obj->stackmap_index) {
         ir_stackmap_index_free(obj->stackmap_index);

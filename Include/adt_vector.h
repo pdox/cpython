@@ -54,7 +54,7 @@ static inline int adt_vector_pop_back(adt_vector v, void *out) {
 static inline void adt_vector_push_back(adt_vector v, void *in) {
     if (v->count == v->alloc_count) {
         v->alloc_count *= 2;
-        v->data = realloc(v->data, v->alloc_count * v->element_width);
+        v->data = (char*)realloc(v->data, v->alloc_count * v->element_width);
         assert(v->data);
     }
     v->count++;

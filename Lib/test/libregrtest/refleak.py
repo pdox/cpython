@@ -46,6 +46,10 @@ def dash_R(the_module, test, indirect_test, huntrleaks):
     def get_pooled_int(value):
         return int_pool.setdefault(value, value)
 
+    # call get_pooled_int once to generate JIT function, or else it will
+    # appear to be a reference leak during the first tracked iteration
+    get_pooled_int(0)
+
     nwarmup, ntracked, fname = huntrleaks
     fname = os.path.join(support.SAVEDCWD, fname)
     repcount = nwarmup + ntracked

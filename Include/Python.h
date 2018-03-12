@@ -133,4 +133,6 @@
 #include "fileutils.h"
 #include "pyfpe.h"
 
+#include "jit.h"
+
 #endif /* !Py_PYTHON_H */
