@@ -557,6 +557,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
 #ifdef DXPAIRS
     int lastopcode = 0;
 #endif
+    PyRunFrame rf;
     PyObject **stack_pointer;  /* Next free slot in value stack */
     const _Py_CODEUNIT *next_instr;
     int opcode;        /* Current opcode */
@@ -877,7 +878,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
     if (Py_EnterRecursiveCall(""))
         return NULL;
 
-    tstate->frame = f;
+    PyRunFrame_Push(&rf, tstate, f);
 
     if (tstate->use_tracing) {
         if (tstate->c_tracefunc != NULL) {
@@ -3571,10 +3572,9 @@ fast_yield:
 exit_eval_frame:
     if (PyDTrace_FUNCTION_RETURN_ENABLED())
         dtrace_function_return(f);
+    PyRunFrame_Pop(&rf, tstate, f);
     Py_LeaveRecursiveCall();
     f->f_executing = 0;
-    tstate->frame = f->f_back;
-
     return _Py_CheckFunctionResult(NULL, retval, "PyEval_EvalFrameEx");
 }
 
@@ -4557,10 +4557,12 @@ PyEval_GetFuncDesc(PyObject *func)
         return " object";
 }
 
+#define TOPFRAME(tstate) PyRunFrame_TopFrame(tstate)
+
 #define C_TRACE(x, call) \
 if (tstate->use_tracing && tstate->c_profilefunc) { \
     if (call_trace(tstate->c_profilefunc, tstate->c_profileobj, \
-        tstate, tstate->frame, \
+        tstate, TOPFRAME(tstate), \
         PyTrace_C_CALL, func)) { \
         x = NULL; \
     } \
@@ -4570,13 +4572,13 @@ if (tstate->use_tracing && tstate->c_profilefunc) { \
             if (x == NULL) { \
                 call_trace_protected(tstate->c_profilefunc, \
                     tstate->c_profileobj, \
-                    tstate, tstate->frame, \
+                    tstate, TOPFRAME(tstate), \
                     PyTrace_C_EXCEPTION, func); \
                 /* XXX should pass (type, value, tb) */ \
             } else { \
                 if (call_trace(tstate->c_profilefunc, \
                     tstate->c_profileobj, \
-                    tstate, tstate->frame, \
+                    tstate, TOPFRAME(tstate), \
                     PyTrace_C_RETURN, func)) { \
                     Py_DECREF(x); \
                     x = NULL; \

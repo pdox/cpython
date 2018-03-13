@@ -207,9 +207,10 @@ gen_send_ex(PyGenObject *gen, PyObject *arg, int exc, int closing)
 
     /* Generators always return to their most recent caller, not
      * necessarily their creator. */
-    Py_XINCREF(tstate->frame);
+    PyFrameObject *tf = PyRunFrame_TopFrame(tstate);
+    Py_XINCREF(tf);
     assert(f->f_back == NULL);
-    f->f_back = tstate->frame;
+    f->f_back = tf;
 
     gen->gi_running = 1;
     gen->gi_exc_state.previous_item = tstate->exc_info;
@@ -222,7 +223,7 @@ gen_send_ex(PyGenObject *gen, PyObject *arg, int exc, int closing)
     /* Don't keep the reference to f_back any longer than necessary.  It
      * may keep a chain of frames alive or it could create a reference
      * cycle. */
-    assert(f->f_back == tstate->frame);
+    assert(f->f_back == PyRunFrame_TopFrame(tstate));
     Py_CLEAR(f->f_back);
 
     /* If the generator just returned (as opposed to yielding), signal

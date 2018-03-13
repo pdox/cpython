@@ -30,6 +30,8 @@ typedef struct resume_entry {
 
 typedef struct _JITData {
     PyJITFunctionObject *jit_function;
+    PyObject *globals;
+    PyObject *builtins;
     PyCodeObject *co; /* Borrowed reference */
     ir_context context;
     ir_func func;
@@ -49,6 +51,8 @@ typedef struct _JITData {
     ir_type sig_oo;
     ir_type sig_ooo;
     ir_type sig_oooo;
+    ir_type sig_ooooo;
+    ir_type sig_ooooooo;
     ir_type sig_vp;
     ir_type sig_i;
     ir_type sig_io;
@@ -96,6 +100,7 @@ typedef struct _JITData {
 
     ir_value tstate;
     ir_value f;
+    ir_value rf;
     ir_value throwflag;
     ir_value next_instr_index; /* only set during special control flow */
     ir_value fastlocals;
@@ -491,6 +496,16 @@ int do_raise(PyObject *, PyObject *);
 
 #define SET_RETVAL(val) \
     STORE(jd->retval, (val))
+
+#define LOAD_F_GLOBALS() \
+    (jd->globals ? \
+     CONSTANT_PYOBJ(jd->globals) : \
+     LOAD_FIELD(jd->f, PyFrameObject, f_globals, ir_type_pyobject_ptr))
+
+#define LOAD_F_BUILTINS() \
+    (jd->builtins ? \
+     CONSTANT_PYOBJ(jd->builtins) : \
+     LOAD_FIELD(jd->f, PyFrameObject, f_builtins, ir_type_pyobject_ptr))
 
 #define LOAD_F_LOCALS() \
     LOAD_FIELD(jd->f, PyFrameObject, f_locals, ir_type_pyobject_ptr)
@@ -1142,11 +1157,11 @@ EMITTER_FOR(END_FINALLY) {
 
 static
 PyObject *
-_load_build_class_helper(PyFrameObject *f) {
+_load_build_class_helper(PyObject *builtins) {
     _Py_IDENTIFIER(__build_class__);
     PyObject *bc;
-    if (PyDict_CheckExact(f->f_builtins)) {
-        bc = _PyDict_GetItemId(f->f_builtins, &PyId___build_class__);
+    if (PyDict_CheckExact(builtins)) {
+        bc = _PyDict_GetItemId(builtins, &PyId___build_class__);
         if (bc == NULL) {
             PyErr_SetString(PyExc_NameError,
                             "__build_class__ not found");
@@ -1158,7 +1173,7 @@ _load_build_class_helper(PyFrameObject *f) {
         PyObject *build_class_str = _PyUnicode_FromId(&PyId___build_class__);
         if (build_class_str == NULL)
             return NULL;
-        bc = PyObject_GetItem(f->f_builtins, build_class_str);
+        bc = PyObject_GetItem(builtins, build_class_str);
         if (bc == NULL) {
             if (PyErr_ExceptionMatches(PyExc_KeyError))
                 PyErr_SetString(PyExc_NameError,
@@ -1170,8 +1185,8 @@ _load_build_class_helper(PyFrameObject *f) {
 }
 
 EMITTER_FOR(LOAD_BUILD_CLASS) {
-    JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyframeobject_ptr);
-    JVALUE bc = CALL_NATIVE(sig, _load_build_class_helper, jd->f);
+    JVALUE builtins = LOAD_F_BUILTINS();
+    JVALUE bc = CALL_NATIVE(jd->sig_oo, _load_build_class_helper, builtins);
     GOTO_ERROR_IF_NOT(bc);
     PUSH(bc);
     CHECK_EVAL_BREAKER();
@@ -1409,7 +1424,7 @@ EMITTER_FOR(DELETE_ATTR) {
 EMITTER_FOR(STORE_GLOBAL) {
     PyObject *name = GETNAME(oparg);
     JVALUE v = POP();
-    JVALUE globals = LOAD_FIELD(jd->f, PyFrameObject, f_globals, ir_type_pyobject_ptr);
+    JVALUE globals = LOAD_F_GLOBALS();
     JVALUE err = CALL_NATIVE(jd->sig_iooo, PyDict_SetItem, globals, CONSTANT_PYOBJ(name), v);
     DECREF(v);
     GOTO_ERROR_IF(err);
@@ -1418,7 +1433,7 @@ EMITTER_FOR(STORE_GLOBAL) {
 
 EMITTER_FOR(DELETE_GLOBAL) {
     PyObject *name = GETNAME(oparg);
-    JVALUE globals = LOAD_FIELD(jd->f, PyFrameObject, f_globals, ir_type_pyobject_ptr);
+    JVALUE globals = LOAD_F_GLOBALS();
     JVALUE err = CALL_NATIVE(jd->sig_ioo, PyDict_DelItem, globals, CONSTANT_PYOBJ(name));
     IF(err, IR_UNLIKELY, {
         CALL_format_exc_check_arg(PyExc_NameError, NAME_ERROR_MSG, name);
@@ -1428,8 +1443,7 @@ EMITTER_FOR(DELETE_GLOBAL) {
 }
 
 static PyObject *
-_load_name_helper(PyObject *name, PyFrameObject *f) {
-    PyObject *locals = f->f_locals;
+_load_name_helper(PyObject *name, PyObject *globals, PyObject *builtins, PyObject *locals) {
     PyObject *v;
     if (locals == NULL) {
         PyErr_Format(PyExc_SystemError,
@@ -1449,11 +1463,11 @@ _load_name_helper(PyObject *name, PyFrameObject *f) {
         }
     }
     if (v == NULL) {
-        v = PyDict_GetItem(f->f_globals, name);
+        v = PyDict_GetItem(globals, name);
         Py_XINCREF(v);
         if (v == NULL) {
-            if (PyDict_CheckExact(f->f_builtins)) {
-                v = PyDict_GetItem(f->f_builtins, name);
+            if (PyDict_CheckExact(builtins)) {
+                v = PyDict_GetItem(builtins, name);
                 if (v == NULL) {
                     format_exc_check_arg(
                                 PyExc_NameError,
@@ -1463,7 +1477,7 @@ _load_name_helper(PyObject *name, PyFrameObject *f) {
                 Py_INCREF(v);
             }
             else {
-                v = PyObject_GetItem(f->f_builtins, name);
+                v = PyObject_GetItem(builtins, name);
                 if (v == NULL) {
                     if (PyErr_ExceptionMatches(PyExc_KeyError))
                         format_exc_check_arg(
@@ -1479,20 +1493,22 @@ _load_name_helper(PyObject *name, PyFrameObject *f) {
 
 EMITTER_FOR(LOAD_NAME) {
     PyObject *name = GETNAME(oparg);
-    JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyframeobject_ptr);
-    JVALUE v = CALL_NATIVE(sig, _load_name_helper, CONSTANT_PYOBJ(name), jd->f);
+    JVALUE globals = LOAD_F_GLOBALS();
+    JVALUE builtins = LOAD_F_BUILTINS();
+    JVALUE locals = LOAD_F_LOCALS();
+    JVALUE v = CALL_NATIVE(jd->sig_ooooo, _load_name_helper, CONSTANT_PYOBJ(name), globals, builtins, locals);
     GOTO_ERROR_IF_NOT(v);
     PUSH(v);
     CHECK_EVAL_BREAKER();
 }
 
-static PyObject* _load_global_helper(PyFrameObject *f, PyObject *name) {
+static PyObject* _load_global_helper(PyObject *globals, PyObject *builtins, PyObject *name) {
     PyObject *v;
-    if (PyDict_CheckExact(f->f_globals)
-        && PyDict_CheckExact(f->f_builtins))
+    if (PyDict_CheckExact(globals)
+        && PyDict_CheckExact(builtins))
     {
-        v = _PyDict_LoadGlobal((PyDictObject *)f->f_globals,
-                               (PyDictObject *)f->f_builtins,
+        v = _PyDict_LoadGlobal((PyDictObject *)globals,
+                               (PyDictObject *)builtins,
                                name);
         if (v == NULL) {
             if (!_PyErr_OCCURRED()) {
@@ -1509,14 +1525,14 @@ static PyObject* _load_global_helper(PyFrameObject *f, PyObject *name) {
         /* Slow-path if globals or builtins is not a dict */
 
         /* namespace 1: globals */
-        v = PyObject_GetItem(f->f_globals, name);
+        v = PyObject_GetItem(globals, name);
         if (v == NULL) {
             if (!PyErr_ExceptionMatches(PyExc_KeyError))
                 return NULL;
             PyErr_Clear();
 
             /* namespace 2: builtins */
-            v = PyObject_GetItem(f->f_builtins, name);
+            v = PyObject_GetItem(builtins, name);
             if (v == NULL) {
                 if (PyErr_ExceptionMatches(PyExc_KeyError))
                     format_exc_check_arg(
@@ -1531,8 +1547,9 @@ static PyObject* _load_global_helper(PyFrameObject *f, PyObject *name) {
 
 EMITTER_FOR(LOAD_GLOBAL) {
     PyObject *name = GETNAME(oparg);
-    JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyframeobject_ptr, ir_type_pyobject_ptr);
-    JVALUE v = CALL_NATIVE(sig, _load_global_helper, jd->f, CONSTANT_PYOBJ(name));
+    JVALUE globals = LOAD_F_GLOBALS();
+    JVALUE builtins = LOAD_F_BUILTINS();
+    JVALUE v = CALL_NATIVE(jd->sig_oooo, _load_global_helper, globals, builtins, CONSTANT_PYOBJ(name));
     GOTO_ERROR_IF_NOT(v);
     PUSH(v);
     CHECK_EVAL_BREAKER();
@@ -1895,18 +1912,18 @@ EMITTER_FOR(BUILD_MAP) {
 
 /* This is copied from ceval.c */
 int
-_setup_annotations_helper(PyFrameObject *f) {
+_setup_annotations_helper(PyObject *f_locals) {
     _Py_IDENTIFIER(__annotations__);
     int err;
     PyObject *ann_dict;
-    if (f->f_locals == NULL) {
+    if (f_locals == NULL) {
         PyErr_Format(PyExc_SystemError,
                      "no locals found when setting up annotations");
         return -1;
     }
     /* check if __annotations__ in locals()... */
-    if (PyDict_CheckExact(f->f_locals)) {
-        ann_dict = _PyDict_GetItemId(f->f_locals,
+    if (PyDict_CheckExact(f_locals)) {
+        ann_dict = _PyDict_GetItemId(f_locals,
                                      &PyId___annotations__);
         if (ann_dict == NULL) {
             /* ...if not, create a new one */
@@ -1914,7 +1931,7 @@ _setup_annotations_helper(PyFrameObject *f) {
             if (ann_dict == NULL) {
                 return -1;
             }
-            err = _PyDict_SetItemId(f->f_locals,
+            err = _PyDict_SetItemId(f_locals,
                                     &PyId___annotations__, ann_dict);
             Py_DECREF(ann_dict);
             if (err != 0) {
@@ -1928,7 +1945,7 @@ _setup_annotations_helper(PyFrameObject *f) {
         if (ann_str == NULL) {
             return -1;
         }
-        ann_dict = PyObject_GetItem(f->f_locals, ann_str);
+        ann_dict = PyObject_GetItem(f_locals, ann_str);
         if (ann_dict == NULL) {
             if (!PyErr_ExceptionMatches(PyExc_KeyError)) {
                 return -1;
@@ -1938,7 +1955,7 @@ _setup_annotations_helper(PyFrameObject *f) {
             if (ann_dict == NULL) {
                 return -1;
             }
-            err = PyObject_SetItem(f->f_locals, ann_str, ann_dict);
+            err = PyObject_SetItem(f_locals, ann_str, ann_dict);
             Py_DECREF(ann_dict);
             if (err != 0) {
                 return -1;
@@ -1952,8 +1969,7 @@ _setup_annotations_helper(PyFrameObject *f) {
 }
 
 EMITTER_FOR(SETUP_ANNOTATIONS) {
-    JTYPE sig = CREATE_SIGNATURE(ir_type_int, ir_type_pyframeobject_ptr);
-    JVALUE ret = CALL_NATIVE(sig, _setup_annotations_helper, jd->f);
+    JVALUE ret = CALL_NATIVE(jd->sig_io, _setup_annotations_helper, LOAD_F_LOCALS());
     GOTO_ERROR_IF(ret);
     CHECK_EVAL_BREAKER();
 }
@@ -2207,20 +2223,55 @@ EMITTER_FOR(COMPARE_OP) {
     CHECK_EVAL_BREAKER();
 }
 
-PyObject * import_name(PyFrameObject *, PyObject *, PyObject *,
-                       PyObject *);
+static PyObject *
+_import_name(PyObject *globals, PyObject *builtins, PyObject *locals,
+             PyObject *name, PyObject *fromlist, PyObject *level)
+{
+    _Py_IDENTIFIER(__import__);
+    PyObject *import_func, *res;
+    PyObject* stack[5];
+
+    import_func = _PyDict_GetItemId(builtins, &PyId___import__);
+    if (import_func == NULL) {
+        PyErr_SetString(PyExc_ImportError, "__import__ not found");
+        return NULL;
+    }
+
+    /* Fast path for not overloaded __import__. */
+    if (import_func == PyThreadState_GET()->interp->import_func) {
+        int ilevel = _PyLong_AsInt(level);
+        if (ilevel == -1 && PyErr_Occurred()) {
+            return NULL;
+        }
+        res = PyImport_ImportModuleLevelObject(
+                        name,
+                        globals,
+                        locals == NULL ? Py_None : locals,
+                        fromlist,
+                        ilevel);
+        return res;
+    }
+
+    Py_INCREF(import_func);
+
+    stack[0] = name;
+    stack[1] = globals;
+    stack[2] = locals == NULL ? Py_None : locals;
+    stack[3] = fromlist;
+    stack[4] = level;
+    res = _PyObject_FastCall(import_func, stack, 5);
+    Py_DECREF(import_func);
+    return res;
+}
 
 EMITTER_FOR(IMPORT_NAME) {
     PyObject *name = GETNAME(oparg);
     JVALUE fromlist = POP();
     JVALUE level = POP();
-    JTYPE sig = CREATE_SIGNATURE(
-        ir_type_pyobject_ptr,
-        ir_type_pyframeobject_ptr,
-        ir_type_pyobject_ptr,
-        ir_type_pyobject_ptr,
-        ir_type_pyobject_ptr);
-    JVALUE res = CALL_NATIVE(sig, import_name, jd->f, CONSTANT_PYOBJ(name), fromlist, level);
+    JVALUE globals = LOAD_F_GLOBALS();
+    JVALUE builtins = LOAD_F_BUILTINS();
+    JVALUE locals = LOAD_F_LOCALS();
+    JVALUE res = CALL_NATIVE(jd->sig_ooooooo, _import_name, globals, builtins, locals, CONSTANT_PYOBJ(name), fromlist, level);
     DECREF(level);
     DECREF(fromlist);
     GOTO_ERROR_IF_NOT(res);
@@ -2805,7 +2856,7 @@ EMITTER_FOR(CALL_FUNCTION_EX) {
 EMITTER_FOR(MAKE_FUNCTION) {
     JVALUE qualname = POP();
     JVALUE codeobj = POP();
-    JVALUE globals = LOAD_FIELD(jd->f, PyFrameObject, f_globals, ir_type_pyobject_ptr);
+    JVALUE globals = LOAD_F_GLOBALS();
     JTYPE sig = CREATE_SIGNATURE(ir_type_pyfunctionobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
     JVALUE func = CALL_NATIVE(sig, PyFunction_NewWithQualName, codeobj, globals, qualname);
     DECREF(codeobj);
@@ -3067,11 +3118,13 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
         jd->tmpstack = NULL;
     }
 
-    /* Common function signatures */
+    /* Common function signatures (TODO: make these shared and static) */
     jd->sig_o = CREATE_SIGNATURE(ir_type_pyobject_ptr);
     jd->sig_oo = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr);
     jd->sig_ooo = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
     jd->sig_oooo = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
+    jd->sig_ooooo = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
+    jd->sig_ooooooo = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
     jd->sig_vp = CREATE_SIGNATURE(ir_type_void, ir_type_void_ptr);
     jd->sig_i = CREATE_SIGNATURE(ir_type_int);
     jd->sig_ifi = CREATE_SIGNATURE(ir_type_int, ir_type_pyframeobject_ptr, ir_type_int);
@@ -3110,7 +3163,16 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     IF(IR_Py_EnterRecursiveCall(""), IR_UNLIKELY, {
         ir_retval(jd->func, CONSTANT_PYOBJ(NULL));
     });
-    STORE_FIELD(jd->tstate, PyThreadState, frame, ir_type_pyframeobject_ptr, jd->f);
+
+    /* Initialize and push PyRunFrame */
+    jd->rf = ir_alloca(jd->func, ir_type_pyrunframe, 1);
+    JVALUE rfprev = LOAD_FIELD(jd->tstate, PyThreadState, runframe, ir_type_pyrunframe_ptr);
+    STORE_FIELD(jd->rf, PyRunFrame, prev, ir_type_pyrunframe_ptr, rfprev);
+    INCREF(CAST(ir_type_pyobject_ptr, jd->f));
+    STORE_FIELD(jd->rf, PyRunFrame, ref, ir_type_uintptr, CAST(ir_type_uintptr, jd->f));
+    STORE_FIELD(jd->rf, PyRunFrame, f_locals, ir_type_pyobject_ptr, LOAD_F_LOCALS());
+    STORE_FIELD(jd->rf, PyRunFrame, f_lasti, ir_type_int, CONSTANT_INT(-1));
+    STORE_FIELD(jd->tstate, PyThreadState, runframe, ir_type_pyrunframe_ptr, jd->rf);
 
     /* Initialize arguments */
     if (jd->use_virtual_locals) {
@@ -3205,10 +3267,17 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     if (jd->use_virtual_locals) {
         _clear_virtual_locals(jd);
     }
+
+    /* Pop PyRunFrame */
+    IR_ASSERT(CMP_EQ(LOAD_FIELD(jd->tstate, PyThreadState, runframe, ir_type_pyrunframe_ptr),
+                     jd->rf));
+    rfprev = LOAD_FIELD(jd->rf, PyRunFrame, prev, ir_type_pyrunframe_ptr);
+    STORE_FIELD(jd->tstate, PyThreadState, runframe, ir_type_pyrunframe_ptr, rfprev);
+    DECREF(CAST(ir_type_pyobject_ptr, jd->f));
+
+    /* Leave call */
     IR_Py_LeaveRecursiveCall();
     STORE_FIELD(jd->f, PyFrameObject, f_executing, ir_type_char, CONSTANT_CHAR(0));
-    JVALUE f_back = LOAD_FIELD(jd->f, PyFrameObject, f_back, ir_type_pyframeobject_ptr);
-    STORE_FIELD(jd->tstate, PyThreadState, frame, ir_type_pyframeobject_ptr, f_back);
 
     /* Check return result */
     JVALUE ret = IR_Py_CheckFunctionResult(NULL, LOAD(jd->retval), "PyJIT_EvalFrame");
@@ -3285,6 +3354,8 @@ _PyJIT_CodeGen(PyCodeObject *co, PyObject *globals, PyObject *builtins) {
     }
     memset(jd, 0, total_size);
     jd->jit_function = (PyJITFunctionObject*)PyJITFunction_New((PyObject*)co, globals, builtins);
+    jd->globals = globals;
+    jd->builtins = builtins;
     jd->co = co;
     jd->context = ir_context_new();
     jd->is_gen = (co->co_flags & (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR));

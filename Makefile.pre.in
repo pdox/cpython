@@ -338,6 +338,7 @@ PYTHON_OBJS=	\
 		Python/jit.o \
 		Python/jit_eval_entrypoint.o \
 		Python/jit_macros.o \
+                Python/runframe.o \
 		Python/jeval_error_handler_trampoline.o \
 		Python/ir_stackmaps.o \
 		Python/ir_object.o \
@@ -1058,6 +1059,7 @@ PYTHON_HEADERS= \
                 $(srcdir)/Include/adt_macros.h \
                 $(srcdir)/Include/adt_vector.h \
                 $(srcdir)/Include/adt_bitset.h \
+		$(srcdir)/Include/runframe.h \
 		pyconfig.h \
 		$(PARSER_HEADERS) \
 		$(srcdir)/Include/Python-ast.h \

@@ -1273,21 +1273,22 @@ purposes only."
 static PyObject *
 sys_getframe(PyObject *self, PyObject *args)
 {
-    PyFrameObject *f = PyThreadState_GET()->frame;
+    PyRunFrame *rf = PyThreadState_GET()->runframe;
     int depth = -1;
 
     if (!PyArg_ParseTuple(args, "|i:_getframe", &depth))
         return NULL;
 
-    while (depth > 0 && f != NULL) {
-        f = f->f_back;
+    while (depth > 0 && rf != NULL) {
+        rf = rf->prev;
         --depth;
     }
-    if (f == NULL) {
+    if (rf == NULL) {
         PyErr_SetString(PyExc_ValueError,
                         "call stack is not deep enough");
         return NULL;
     }
+    PyFrameObject *f = PyRunFrame_ToFrame(rf);
     Py_INCREF(f);
     return (PyObject*)f;
 }

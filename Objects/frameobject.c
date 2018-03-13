@@ -15,7 +15,6 @@ static PyMemberDef frame_memberlist[] = {
     {"f_code",          T_OBJECT,       OFF(f_code),      READONLY},
     {"f_builtins",      T_OBJECT,       OFF(f_builtins),  READONLY},
     {"f_globals",       T_OBJECT,       OFF(f_globals),   READONLY},
-    {"f_lasti",         T_INT,          OFF(f_lasti),     READONLY},
     {"f_trace_lines",   T_BOOL,         OFF(f_trace_lines), 0},
     {"f_trace_opcodes", T_BOOL,         OFF(f_trace_opcodes), 0},
     {NULL}      /* Sentinel */
@@ -28,6 +27,13 @@ frame_getlocals(PyFrameObject *f, void *closure)
         return NULL;
     Py_INCREF(f->f_locals);
     return f->f_locals;
+}
+
+static PyObject *
+frame_getlasti(PyFrameObject *f, void *closure)
+{
+    /* TODO: Recompute f_lasti using the RunFrame */
+    return PyLong_FromLong(f->f_lasti);
 }
 
 int
@@ -357,6 +363,7 @@ frame_settrace(PyFrameObject *f, PyObject* v, void *closure)
 
 
 static PyGetSetDef frame_getsetlist[] = {
+    {"f_lasti",         (getter)frame_getlasti, NULL, NULL},
     {"f_locals",        (getter)frame_getlocals, NULL, NULL},
     {"f_lineno",        (getter)frame_getlineno,
                     (setter)frame_setlineno, NULL},
@@ -606,7 +613,14 @@ PyFrameObject* _Py_HOT_FUNCTION
 _PyFrame_New_NoTrack(PyThreadState *tstate, PyCodeObject *code,
                      PyObject *globals, PyObject *locals)
 {
-    PyFrameObject *back = tstate->frame;
+    PyFrameObject *back = PyRunFrame_ToFrame(tstate->runframe);
+    return _PyFrame_New_Raw(back, code, globals, locals);
+}
+
+PyFrameObject* _Py_HOT_FUNCTION
+_PyFrame_New_Raw(PyFrameObject *back, PyCodeObject *code,
+                 PyObject *globals, PyObject *locals)
+{
     PyFrameObject *f;
     PyObject *builtins;
     Py_ssize_t i;

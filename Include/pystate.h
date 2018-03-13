@@ -145,7 +145,9 @@ typedef struct _ts {
     struct _ts *next;
     PyInterpreterState *interp;
 
-    struct _frame *frame;
+    /* Top-most frame */
+    struct _runframe *runframe;
+
     int recursion_depth;
     char overflowed; /* The stack has overflowed. Allow 50 more calls
                         to handle the runtime error. */

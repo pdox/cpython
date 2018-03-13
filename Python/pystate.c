@@ -227,7 +227,7 @@ PyInterpreterState_GetID(PyInterpreterState *interp)
 static struct _frame *
 threadstate_getframe(PyThreadState *self)
 {
-    return self->frame;
+    return PyRunFrame_ToFrame(self->runframe);
 }
 
 static PyThreadState *
@@ -241,7 +241,7 @@ new_threadstate(PyInterpreterState *interp, int init)
     if (tstate != NULL) {
         tstate->interp = interp;
 
-        tstate->frame = NULL;
+        tstate->runframe = NULL;
         tstate->recursion_depth = 0;
         tstate->overflowed = 0;
         tstate->recursion_critical = 0;
@@ -434,11 +434,12 @@ _PyState_ClearModules(void)
 void
 PyThreadState_Clear(PyThreadState *tstate)
 {
-    if (Py_VerboseFlag && tstate->frame != NULL)
+    if (Py_VerboseFlag && tstate->runframe != NULL)
         fprintf(stderr,
           "PyThreadState_Clear: warning: thread still has a frame\n");
 
-    Py_CLEAR(tstate->frame);
+    PyRunFrame_WipeThread(tstate);
+    assert(tstate->runframe == NULL);
 
     Py_CLEAR(tstate->dict);
     Py_CLEAR(tstate->async_exc);
@@ -730,7 +731,7 @@ _PyThread_CurrentFrames(void)
         for (t = i->tstate_head; t != NULL; t = t->next) {
             PyObject *id;
             int stat;
-            struct _frame *frame = t->frame;
+            struct _frame *frame = PyRunFrame_TopFrame(t);
             if (frame == NULL)
                 continue;
             id = PyLong_FromUnsignedLong(t->thread_id);

@@ -7614,7 +7614,12 @@ super_init(PyObject *self, PyObject *args, PyObject *kwds)
         PyFrameObject *f;
         PyCodeObject *co;
         Py_ssize_t i, n;
-        f = PyThreadState_GET()->frame;
+
+        /* TODO: Deal with super() by inspecting the JIT stack frames directly */
+        PyRunFrame *rf = PyThreadState_GET()->runframe;
+        assert(PyRunFrame_IsMaterialized(rf));
+        f = PyRunFrame_FrameRef(rf);
+
         if (f == NULL) {
             PyErr_SetString(PyExc_RuntimeError,
                             "super(): no current frame");

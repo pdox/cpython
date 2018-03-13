@@ -134,5 +134,6 @@
 #include "pyfpe.h"
 
 #include "jit.h"
+#include "runframe.h"
 
 #endif /* !Py_PYTHON_H */

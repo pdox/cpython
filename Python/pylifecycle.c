@@ -1328,7 +1328,7 @@ Py_EndInterpreter(PyThreadState *tstate)
 
     if (tstate != PyThreadState_GET())
         Py_FatalError("Py_EndInterpreter: thread is not current");
-    if (tstate->frame != NULL)
+    if (tstate->runframe != NULL)
         Py_FatalError("Py_EndInterpreter: thread still has a frame");
 
     wait_for_thread_shutdown();

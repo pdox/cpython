@@ -455,7 +455,7 @@ traceback_get_frames(traceback_t *traceback)
         return;
     }
 
-    for (pyframe = tstate->frame; pyframe != NULL; pyframe = pyframe->f_back) {
+    for (pyframe = PyRunFrame_TopFrame(tstate); pyframe != NULL; pyframe = pyframe->f_back) {
         tracemalloc_get_frame(pyframe, &traceback->frames[traceback->nframe]);
         assert(traceback->frames[traceback->nframe].filename != NULL);
         traceback->nframe++;
