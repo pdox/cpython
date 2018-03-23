@@ -14,11 +14,16 @@ typedef struct {
     int b_level;                /* value stack level to pop to */
 } PyTryBlock;
 
+/* Forward reference */
+struct _runframe;
+
 typedef struct _frame {
     PyObject_VAR_HEAD
     struct _frame *f_back;      /* previous frame, or NULL */
     PyCodeObject *f_code;       /* code segment */
     PyObject *f_jit_function;   /* jit function */
+    struct _runframe *f_runframe; /* if this frame is executing, this will point
+                                     to the PyRunFrame */
     PyObject *f_builtins;       /* builtin symbol table (PyDictObject) */
     PyObject *f_globals;        /* global symbol table (PyDictObject) */
     PyObject *f_locals;         /* local symbol table (any mapping) */
@@ -34,7 +39,10 @@ typedef struct _frame {
     /* Borrowed reference to a generator, or NULL */
     PyObject *f_gen;
 
-    int f_lasti;                /* Last instruction if called */
+    /* For PYJIT, this has been renamed, because it is not the source of
+       truth for f_lasti for jeval frames. All fetches should use the helper
+       function, PyFrame_GetLasti. */
+    int f_lasti_ceval;           /* Last instruction if called */
     /* Call PyFrame_GetLineNumber() instead of reading this field
        directly.  As of 2.3 f_lineno is only valid when tracing is
        active (i.e. when f_trace is set).  At other times we use
@@ -43,10 +51,22 @@ typedef struct _frame {
     int f_lineno;               /* Current line number */
     int f_iblock;               /* index in f_blockstack */
     char f_executing;           /* whether the frame is still executing */
-    PyTryBlock f_blockstack[CO_MAXBLOCKS]; /* for try and loop blocks */
-    PyObject *f_localsplus[1];  /* locals+stack, dynamically sized */
+    char f_partial;             /* whether this is a partial frame. A partial
+                                   frame ends here, and does not have space
+                                   allocated for f_blockstack and f_localsplus
+                                   below. */
+
+    /* ----------------------------------------------------------------
+       Always use macros to access fields below this point, since they are
+       conditionally allocated
+       --------------------------------------------------------------- */
+
+    PyTryBlock f_blockstack_[CO_MAXBLOCKS]; /* for try and loop blocks */
+    PyObject *f_localsplus_[1];  /* locals+stack, dynamically sized */
 } PyFrameObject;
 
+#define PyFrame_GET_BLOCKSTACK(f)  (assert(!(f)->f_partial), (f)->f_blockstack_)
+#define PyFrame_GET_LOCALSPLUS(f)  (assert(!(f)->f_partial), (f)->f_localsplus_)
 
 /* Standard object interface */
 
@@ -58,8 +78,7 @@ PyAPI_FUNC(PyFrameObject *) PyFrame_New(PyThreadState *, PyCodeObject *,
                                         PyObject *, PyObject *);
 
 /* only internal use */
-PyFrameObject* _PyFrame_New_Raw(PyFrameObject *, PyCodeObject *,
-                                PyObject *, PyObject *);
+PyFrameObject* _PyFrame_New_Partial(PyCodeObject *, PyObject *, PyObject *, PyObject *);
 
 /* only internal use */
 PyFrameObject* _PyFrame_New_NoTrack(PyThreadState *, PyCodeObject *,
@@ -91,7 +110,7 @@ PyAPI_FUNC(void) _PyFrame_DebugMallocStats(FILE *out);
 /* Return the line of code the frame is currently executing. */
 PyAPI_FUNC(int) PyFrame_GetLineNumber(PyFrameObject *);
 
-int PyFrame_HasVirtualLocals(PyFrameObject *f);
+PyAPI_FUNC(int) PyFrame_GetLasti(PyFrameObject *);
 
 #ifdef __cplusplus
 }

@@ -129,6 +129,7 @@
 #define CONSTANT_INT_PTR(p)      ir_constant_int_ptr(jd->func, (p), #p)
 
 #define CAST(fieldtype, val) ir_cast(jd->func, (fieldtype), (val))
+#define CAST_PYOBJ(val)      CAST(ir_type_pyobject_ptr, (val))
 
 #define LOAD_FIELD(ptrval, structname, fieldname, fieldtype) \
     IR_LOAD_FIELD(jd->func, (ptrval), structname, fieldname, (fieldtype))
@@ -407,3 +408,132 @@ void _jit_macros_xdecref_helper(PyObject *obj);
     JTYPE _sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr); \
     CALL_NATIVE(_sig, PyCell_New, (objval)); \
 })
+
+/* PyThreadState getters/setters */
+
+#define IR_PyThreadState_GET_RUNFRAME(tstate) \
+    LOAD_FIELD((tstate), PyThreadState, runframe, ir_type_pyrunframe_ptr)
+
+#define IR_PyThreadState_SET_RUNFRAME(tstate, rf) \
+    STORE_FIELD((tstate), PyThreadState, runframe, ir_type_pyrunframe_ptr, (rf))
+
+/* PyFrameObject getters/setters */
+
+#define IR_PyFrameObject_GET_RUNFRAME(f) \
+    LOAD_FIELD((f), PyFrameObject, f_runframe, ir_type_pyrunframe_ptr)
+
+#define IR_PyFrameObject_SET_RUNFRAME(f, rf) \
+    STORE_FIELD((f), PyFrameObject, f_runframe, ir_type_pyrunframe_ptr, (rf))
+
+#define IR_PyFrameObject_GET_JIT_FUNCTION(f) \
+    LOAD_FIELD((f), PyFrameObject, f_jit_function, ir_type_pyjitfunctionobject_ptr)
+
+#define IR_PyFrameObject_SET_JIT_FUNCTION(f, jf) \
+    STORE_FIELD((f), PyFrameObject, f_jit_function, ir_type_pyjitfunctionobject_ptr, (jf))
+
+#define IR_PyFrameObject_SET_EXECUTING(f, newval) \
+    STORE_FIELD((f), PyFrameObject, f_executing, ir_type_char, (newval))
+
+#define IR_PyFrameObject_SET_LASTI_CEVAL(f, newval) \
+    STORE_FIELD((f), PyFrameObject, f_lasti_ceval, ir_type_int, (newval))
+
+/* PyRunFrame getters/setters */
+
+#define IR_PyRunFrame_GET_PREV(rf) \
+    LOAD_FIELD((rf), PyRunFrame, prev, ir_type_pyrunframe_ptr)
+
+#define IR_PyRunFrame_SET_PREV(rf, new_prev) \
+    STORE_FIELD((rf), PyRunFrame, prev, ir_type_pyrunframe_ptr, (new_prev))
+
+#define IR_PyRunFrame_GET_REF(rf) \
+    LOAD_FIELD((rf), PyRunFrame, ref, ir_type_uintptr)
+
+#define IR_PyRunFrame_SET_REF_FRAME(rf, f) \
+    STORE_FIELD((rf), PyRunFrame, ref, ir_type_uintptr, CAST(ir_type_uintptr, (f)))
+
+#define IR_PyRunFrame_SET_REF_JIT(rf, jit_function) \
+    STORE_FIELD((rf), PyRunFrame, ref, ir_type_uintptr, \
+        BITWISE_OR(CAST(ir_type_uintptr, (jit_function)), \
+                   CONSTANT_UINTPTR(PY_RUNFRAME_TAG_JIT_FUNCTION)))
+
+#define IR_PyRunFrame_REF_TAG(ref) \
+    BITWISE_AND(ref, CONSTANT_UINTPTR(PY_RUNFRAME_TAG_MASK))
+
+#define IR_PyRunFrame_REF_IS_FRAME(ref) \
+    CMP_EQ(IR_PyRunFrame_REF_TAG(ref), CONSTANT_UINTPTR(PY_RUNFRAME_TAG_FRAME))
+
+#define IR_PyRunFrame_GET_LOCALS(rf) \
+    LOAD_FIELD((rf), PyRunFrame, f_locals, ir_type_pyobject_ptr)
+
+#define IR_PyRunFrame_SET_LOCALS(rf, locals) \
+    STORE_FIELD((rf), PyRunFrame, f_locals, ir_type_pyobject_ptr, (locals))
+
+#define IR_PyRunFrame_GET_LASTI(rf) \
+    LOAD_FIELD((rf), PyRunFrame, f_lasti, ir_type_int)
+
+#define IR_PyRunFrame_SET_LASTI(rf, lasti) \
+    STORE_FIELD((rf), PyRunFrame, f_lasti, ir_type_int, (lasti))
+
+#define IR_PyRunFrame_REF_AS_FRAME(ref) \
+    CAST(ir_type_pyframeobject_ptr, ref)
+
+#define IR_PyRunFrame_REF_AS_JIT_FUNCTION(ref) \
+    CAST(ir_type_pyjitfunctionobject_ptr, \
+         BITWISE_AND(ref, CONSTANT_UINTPTR(~(uintptr_t)PY_RUNFRAME_TAG_MASK)))
+
+/* Push PyRunFrame with pre-materialized frame f.
+   This is the jeval equivalent of PyRunFrame_Push.
+ */
+#define IR_PyRunFrame_Push(rf, tstate, f) do { \
+    IR_ASSERT(NOTBOOL(IR_PyFrameObject_GET_RUNFRAME(f))); \
+    IR_ASSERT(IR_PyFrameObject_GET_JIT_FUNCTION(f)); \
+    IR_PyFrameObject_SET_RUNFRAME(f, rf); \
+    IR_PyFrameObject_SET_EXECUTING(f, CONSTANT_CHAR(1)); \
+    IR_PyRunFrame_SET_PREV(rf, IR_PyThreadState_GET_RUNFRAME(tstate)); \
+    INCREF(CAST_PYOBJ(f)); \
+    IR_PyRunFrame_SET_REF_FRAME(rf, f); \
+    IR_PyRunFrame_SET_LOCALS(rf, CONSTANT_PYOBJ(NULL)); \
+    IR_PyRunFrame_SET_LASTI(rf, CONSTANT_INT(-1)); \
+    IR_PyThreadState_SET_RUNFRAME(tstate, rf); \
+} while (0)
+
+/* Push PyRunFrame without frame (steals reference to 'locals') */
+#define IR_PyRunFrame_PushNoFrame(rf, tstate, jit_function, locals) do { \
+    IR_PyRunFrame_SET_PREV(rf, IR_PyThreadState_GET_RUNFRAME(tstate)); \
+    INCREF(CAST_PYOBJ(jit_function)); \
+    IR_PyRunFrame_SET_REF_JIT(rf, jit_function); \
+    IR_PyRunFrame_SET_LOCALS(rf, locals); \
+    IR_PyRunFrame_SET_LASTI(rf, CONSTANT_INT(-1)); \
+    IR_PyThreadState_SET_RUNFRAME(tstate, rf); \
+} while (0)
+
+/* Unlink the PyRunFrame from the thread state.
+   This clears all references held by the PyRunFrame.
+
+   If the PyRunFrame was materialized, this also modifies the PyFrameObject by:
+     * Clearing f_runframe
+     * Setting f_executing to 0
+     * Copying f_lasti from the PyRunFrame (if the PyRunFrame was the source of truth)
+ */
+#define IR_PyRunFrame_Pop(rf, tstate, jit_uses_frame_object) do { \
+    /* Unlink PyRunFrame */ \
+    IR_ASSERT(CMP_EQ(IR_PyThreadState_GET_RUNFRAME(tstate), (rf))); \
+    IR_PyThreadState_SET_RUNFRAME(tstate, IR_PyRunFrame_GET_PREV(rf)); \
+    /* If materialized, clear f_runframe and f_executing, and decref f */ \
+    JVALUE ref = IR_PyRunFrame_GET_REF(rf); \
+    IF_ELSE(IR_PyRunFrame_REF_IS_FRAME(ref), \
+            (jit_uses_frame_object) ? IR_LIKELY : IR_UNLIKELY, \
+    { \
+        JVALUE f = IR_PyRunFrame_REF_AS_FRAME(ref); \
+        IR_PyFrameObject_SET_RUNFRAME(f, CONSTANT_PTR(ir_type_pyrunframe_ptr, NULL)); \
+        IR_PyFrameObject_SET_EXECUTING(f, CONSTANT_CHAR(0)); \
+        if (!(jit_uses_frame_object)) { \
+            IR_PyFrameObject_SET_LASTI_CEVAL(f, IR_PyRunFrame_GET_LASTI(rf)); \
+        } \
+        DECREF(CAST_PYOBJ(f)); \
+    }, { \
+        JVALUE jit_function = IR_PyRunFrame_REF_AS_JIT_FUNCTION(ref); \
+        DECREF(CAST_PYOBJ(jit_function)); \
+        XDECREF(IR_PyRunFrame_GET_LOCALS(rf)); \
+    }); \
+} while (0)

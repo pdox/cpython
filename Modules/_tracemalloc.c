@@ -345,7 +345,7 @@ hashtable_compare_traceback(_Py_hashtable_t *ht, const void *pkey,
 
 
 static void
-tracemalloc_get_frame(PyFrameObject *pyframe, frame_t *frame)
+tracemalloc_get_frame(PyRunFrame *pyframe, frame_t *frame)
 {
     PyCodeObject *code;
     PyObject *filename;
@@ -353,12 +353,12 @@ tracemalloc_get_frame(PyFrameObject *pyframe, frame_t *frame)
     int lineno;
 
     frame->filename = unknown_filename;
-    lineno = PyFrame_GetLineNumber(pyframe);
+    lineno = PyRunFrame_GetLineNumber(pyframe);
     if (lineno < 0)
         lineno = 0;
     frame->lineno = (unsigned int)lineno;
 
-    code = pyframe->f_code;
+    code = PyRunFrame_GetCode(pyframe);
     if (code == NULL) {
 #ifdef TRACE_DEBUG
         tracemalloc_error("failed to get the code object of the frame");
@@ -445,7 +445,7 @@ static void
 traceback_get_frames(traceback_t *traceback)
 {
     PyThreadState *tstate;
-    PyFrameObject *pyframe;
+    PyRunFrame *pyframe;
 
     tstate = PyGILState_GetThisThreadState();
     if (tstate == NULL) {
@@ -455,7 +455,7 @@ traceback_get_frames(traceback_t *traceback)
         return;
     }
 
-    for (pyframe = PyRunFrame_TopFrame(tstate); pyframe != NULL; pyframe = pyframe->f_back) {
+    for (pyframe = tstate->runframe; pyframe != NULL; pyframe = pyframe->prev) {
         tracemalloc_get_frame(pyframe, &traceback->frames[traceback->nframe]);
         assert(traceback->frames[traceback->nframe].filename != NULL);
         traceback->nframe++;

@@ -123,7 +123,7 @@ newtracebackobject(PyTracebackObject *next, PyFrameObject *frame)
         tb->tb_next = next;
         Py_XINCREF(frame);
         tb->tb_frame = frame;
-        tb->tb_lasti = frame->f_lasti;
+        tb->tb_lasti = PyFrame_GetLasti(frame);
         tb->tb_lineno = PyFrame_GetLineNumber(frame);
         PyObject_GC_Track(tb);
     }
@@ -641,12 +641,12 @@ _Py_DumpASCII(int fd, PyObject *text)
    This function is signal safe. */
 
 static void
-dump_frame(int fd, PyFrameObject *frame)
+dump_frame(int fd, PyRunFrame *frame)
 {
     PyCodeObject *code;
     int lineno;
 
-    code = frame->f_code;
+    code = PyRunFrame_GetCode(frame);
     PUTS(fd, "  File ");
     if (code != NULL && code->co_filename != NULL
         && PyUnicode_Check(code->co_filename))
@@ -659,7 +659,7 @@ dump_frame(int fd, PyFrameObject *frame)
     }
 
     /* PyFrame_GetLineNumber() was introduced in Python 2.7.0 and 3.2.0 */
-    lineno = PyCode_Addr2Line(code, frame->f_lasti);
+    lineno = PyCode_Addr2Line(code, PyRunFrame_GetLasti(frame));
     PUTS(fd, ", line ");
     if (lineno >= 0) {
         _Py_DumpDecimal(fd, (unsigned long)lineno);
@@ -683,13 +683,13 @@ dump_frame(int fd, PyFrameObject *frame)
 static void
 dump_traceback(int fd, PyThreadState *tstate, int write_header)
 {
-    PyFrameObject *frame;
+    PyRunFrame *frame;
     unsigned int depth;
 
     if (write_header)
         PUTS(fd, "Stack (most recent call first):\n");
 
-    frame = _PyThreadState_GetFrame(tstate);
+    frame = tstate->runframe;
     if (frame == NULL)
         return;
 
@@ -699,10 +699,8 @@ dump_traceback(int fd, PyThreadState *tstate, int write_header)
             PUTS(fd, "  ...\n");
             break;
         }
-        if (!PyFrame_Check(frame))
-            break;
         dump_frame(fd, frame);
-        frame = frame->f_back;
+        frame = frame->prev;
         depth++;
     }
 }

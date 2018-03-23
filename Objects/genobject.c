@@ -73,7 +73,7 @@ _PyGen_Finalize(PyObject *self)
        issue a RuntimeWarning. */
     if (gen->gi_code != NULL &&
         ((PyCodeObject *)gen->gi_code)->co_flags & CO_COROUTINE &&
-        gen->gi_frame->f_lasti == -1) {
+        PyFrame_GetLasti(gen->gi_frame) == -1) {
         if (!error_value) {
             PyErr_WarnFormat(PyExc_RuntimeWarning, 1,
                              "coroutine '%.50S' was never awaited",
@@ -184,7 +184,7 @@ gen_send_ex(PyGenObject *gen, PyObject *arg, int exc, int closing)
         return NULL;
     }
 
-    if (f->f_lasti == -1) {
+    if (PyFrame_GetLasti(f) == -1) {
         if (arg && arg != Py_None) {
             char *msg = "can't send non-None value to a "
                         "just-started generator";
@@ -377,7 +377,7 @@ _PyGen_yf(PyGenObject *gen)
         PyObject *bytecode = f->f_code->co_code;
         unsigned char *code = (unsigned char *)PyBytes_AS_STRING(bytecode);
 
-        if (f->f_lasti < 0) {
+        if (PyFrame_GetLasti(f) < 0) {
             /* Return immediately if the frame didn't start yet. YIELD_FROM
                always come after LOAD_CONST: a code object should not start
                with YIELD_FROM */
@@ -385,7 +385,7 @@ _PyGen_yf(PyGenObject *gen)
             return NULL;
         }
 
-        if (code[f->f_lasti + sizeof(_Py_CODEUNIT)] != YIELD_FROM)
+        if (code[PyFrame_GetLasti(f) + sizeof(_Py_CODEUNIT)] != YIELD_FROM)
             return NULL;
         yf = f->f_stacktop[-1];
         Py_INCREF(yf);
@@ -492,8 +492,8 @@ _gen_throw(PyGenObject *gen, int close_on_genexit,
             assert(ret == yf);
             Py_DECREF(ret);
             /* Termination repetition of YIELD_FROM */
-            assert(gen->gi_frame->f_lasti >= 0);
-            gen->gi_frame->f_lasti += sizeof(_Py_CODEUNIT);
+            assert(PyFrame_GetLasti(gen->gi_frame) >= 0);
+            gen->gi_frame->f_lasti_ceval += sizeof(_Py_CODEUNIT);
             if (_PyGen_FetchStopIterationValue(&val) == 0) {
                 ret = gen_send_ex(gen, val, 0, 0);
                 Py_DECREF(val);
@@ -871,8 +871,9 @@ PyGen_NeedsFinalizing(PyGenObject *gen)
         return 0; /* no frame or empty blockstack == no finalization */
 
     /* Any block type besides a loop requires cleanup. */
+    PyTryBlock *blockstack = PyFrame_GET_BLOCKSTACK(f);
     for (i = 0; i < f->f_iblock; i++)
-        if (f->f_blockstack[i].b_type != SETUP_LOOP)
+        if (blockstack[i].b_type != SETUP_LOOP)
             return 1;
 
     /* No blocks except loops, it's safe to skip finalization. */

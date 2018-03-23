@@ -58,7 +58,7 @@ typedef struct _JITData {
     ir_type sig_io;
     ir_type sig_ioo;
     ir_type sig_iooo;
-    ir_type sig_ifi; /* for _do_eval_breaker() helper */
+    ir_type sig_ioi; /* for _do_eval_breaker() helper */
     ir_type sig_if;  /* for PyTraceBack_Here */
     ir_type sig_ol;  /* for PyLong_FromLong */
     ir_type dealloc_sig;
@@ -72,11 +72,13 @@ typedef struct _JITData {
     Py_ssize_t inst_count;
     int is_gen;
     int use_virtual_locals;
+    int use_frame_object;
     Py_ssize_t total_pyargs;
     Py_ssize_t total_direct_args;
     int has_vararg;
     int has_kwdict;
     int has_closure;
+    int has_locals;
 
     int update_blockstack; /* Keep f_blockstack in the state ceval expects.
                               Needed for generators, where execution can switch between
@@ -102,7 +104,6 @@ typedef struct _JITData {
     ir_value f;
     ir_value rf;
     ir_value throwflag;
-    ir_value next_instr_index; /* only set during special control flow */
     ir_value fastlocals;
     ir_value retval;
 
@@ -216,7 +217,15 @@ int _label_to_instr_index(JITData *jd, ir_label target) {
 
 /* Stack operations */
 
-#define FRAMEPTR()    (jd->f)
+#define FRAMEPTR()    (assert(jd->use_frame_object), jd->f)
+#define FRAMEMAT()    (jd->use_frame_object ? jd->f : _materialize_frame(jd))
+
+static inline JVALUE _materialize_frame(JITData *jd) {
+    JTYPE sig = CREATE_SIGNATURE(ir_type_pyframeobject_ptr, ir_type_pyrunframe_ptr);
+    return CALL_NATIVE(sig, PyRunFrame_ToFrame, jd->rf);
+}
+
+#define RUNFRAMEPTR() (jd->rf)
 
 #define STACKADJ(n)   ir_stackadj(jd->func, (n))
 
@@ -241,8 +250,6 @@ int _label_to_instr_index(JITData *jd, ir_label target) {
 /* Warning: Swapping stackadj/peek here may break ir_yield value substitution */
 #define POP()          (STACKADJ(-1), PEEK(0))
 
-#define LOAD_VALUE_STACK()  LOAD_FIELD(FRAMEPTR(), PyFrameObject, f_valuestack, ir_type_pyobject_ptr_ptr)
-
 #define GETNAME(i)   PyTuple_GET_ITEM(jd->co->co_names, (i));
 #define LOAD_FREEVAR(i) \
     (jd->use_virtual_locals ? \
@@ -258,7 +265,6 @@ int _label_to_instr_index(JITData *jd, ir_label target) {
    is computed using f_lasti.
  */
 #define CHECK_EVAL_BREAKER()         _emit_check_eval_breaker(jd, CONSTANT_INT(next_instr_index))
-#define CHECK_EVAL_BREAKER_SPECIAL() _emit_check_eval_breaker(jd, LOAD(jd->next_instr_index))
 #define CHECK_EVAL_BREAKER_EX(_next_instr_index) \
     _emit_check_eval_breaker(jd, CONSTANT_INT(_next_instr_index))
 
@@ -323,7 +329,7 @@ int _label_to_instr_index(JITData *jd, ir_label target) {
 void *dummy2[] = {_gil_initialize, gil_created, destroy_gil, recreate_gil};
 
 /* Do eval break. Return 0 on success, -1 on exception. */
-static int _do_eval_breaker(PyFrameObject *f, int next_instr_index) {
+static int _do_eval_breaker(PyCodeObject *co, int next_instr_index) {
     PyThreadState *tstate = PyThreadState_GET();
     assert(!PyErr_Occurred());
 
@@ -339,9 +345,9 @@ static int _do_eval_breaker(PyFrameObject *f, int next_instr_index) {
          running the signal handler and raising KeyboardInterrupt
          (see bpo-30039).
     */
-    _Py_CODEUNIT *code = (_Py_CODEUNIT*)PyBytes_AS_STRING(f->f_code->co_code);
+    _Py_CODEUNIT *code = (_Py_CODEUNIT*)PyBytes_AS_STRING(co->co_code);
     assert(next_instr_index >= 0);
-    assert((size_t)next_instr_index < PyBytes_GET_SIZE(f->f_code->co_code) / sizeof(_Py_CODEUNIT));
+    assert((size_t)next_instr_index < PyBytes_GET_SIZE(co->co_code) / sizeof(_Py_CODEUNIT));
     if (_Py_OPCODE(code[next_instr_index]) == SETUP_FINALLY ||
         _Py_OPCODE(code[next_instr_index]) == YIELD_FROM) {
         return 0;
@@ -397,7 +403,7 @@ static int _do_eval_breaker(PyFrameObject *f, int next_instr_index) {
 
 static inline void _emit_check_eval_breaker(JITData *jd, ir_value next_instr_index) {
     IF(LOAD_EVAL_BREAKER(), IR_UNLIKELY, {
-        JVALUE res = CALL_NATIVE(jd->sig_ifi, _do_eval_breaker, jd->f, next_instr_index);
+        JVALUE res = CALL_NATIVE(jd->sig_ioi, _do_eval_breaker, CONSTANT_PYOBJ((PyObject*)jd->co), next_instr_index);
         GOTO_ERROR_IF(res);
     });
 }
@@ -409,6 +415,8 @@ static inline void _emit_check_eval_breaker(JITData *jd, ir_value next_instr_ind
     BRANCH_IF(CMP_NE((typeval), CONSTANT_PTR(ir_type_pytypeobject_ptr, &(expected_type))), (branch_if_not), (likelyhood))
 
 void format_exc_check_arg(PyObject *, const char *, PyObject *);
+
+#define CALL_PyDict_New()  CALL_NATIVE(jd->sig_o, PyDict_New)
 
 #define CALL_format_exc_check_arg(exc, msg, name) do { \
     JTYPE _sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr, ir_type_char_ptr, ir_type_pyobject_ptr); \
@@ -464,15 +472,6 @@ int do_raise(PyObject *, PyObject *);
 #define EMITTER_FOR_BASE(op) \
     void _PyJIT_EMIT_TARGET##op (JITData *jd, int next_instr_index, int opcode, int oparg)
 
-/* Set next_instr_index based on the current f_lasti. This must be done
-   when a regular instruction jumps to a special handler. */
-#define COMPUTE_NEXT_INSTR_INDEX() do { \
-        /* next_instr_index = (f->f_lasti / 2) + 1 */ \
-        JVALUE f_lasti_val = LOAD_FIELD(jd->f, PyFrameObject, f_lasti, ir_type_int); \
-        JVALUE computed_next_instr_index = ADD(SHIFT_RIGHT(f_lasti_val, CONSTANT_INT(1)), CONSTANT_INT(1)); \
-        STORE(jd->next_instr_index, computed_next_instr_index); \
-} while (0)
-
 #define EMIT_JUMP(check_eval_breaker) do { \
     if (check_eval_breaker) { \
         CHECK_EVAL_BREAKER(); \
@@ -498,17 +497,40 @@ int do_raise(PyObject *, PyObject *);
     STORE(jd->retval, (val))
 
 #define LOAD_F_GLOBALS() \
-    (jd->globals ? \
-     CONSTANT_PYOBJ(jd->globals) : \
-     LOAD_FIELD(jd->f, PyFrameObject, f_globals, ir_type_pyobject_ptr))
+    (jd->use_frame_object ? \
+     LOAD_FIELD(FRAMEPTR(), PyFrameObject, f_globals, ir_type_pyobject_ptr) : \
+     CONSTANT_PYOBJ(jd->globals))
 
 #define LOAD_F_BUILTINS() \
-    (jd->builtins ? \
-     CONSTANT_PYOBJ(jd->builtins) : \
-     LOAD_FIELD(jd->f, PyFrameObject, f_builtins, ir_type_pyobject_ptr))
+    (jd->use_frame_object ? \
+     LOAD_FIELD(FRAMEPTR(), PyFrameObject, f_builtins, ir_type_pyobject_ptr) : \
+     CONSTANT_PYOBJ(jd->builtins))
 
 #define LOAD_F_LOCALS() \
-    LOAD_FIELD(jd->f, PyFrameObject, f_locals, ir_type_pyobject_ptr)
+    (jd->use_frame_object ? \
+     LOAD_FIELD(FRAMEPTR(), PyFrameObject, f_locals, ir_type_pyobject_ptr) : \
+     LOAD_FIELD(RUNFRAMEPTR(), PyRunFrame, f_locals, ir_type_pyobject_ptr))
+
+#define LOAD_F_LASTI() \
+    (jd->use_frame_object ? \
+     LOAD_FIELD(FRAMEPTR(), PyFrameObject, f_lasti_ceval, ir_type_int) : \
+     LOAD_FIELD(RUNFRAMEPTR(), PyRunFrame, f_lasti, ir_type_int))
+
+#define STORE_F_LASTI(val) do { \
+    JVALUE _val = (val); \
+    if (jd->use_frame_object) { \
+        STORE_FIELD(FRAMEPTR(), PyFrameObject, f_lasti_ceval, ir_type_int, _val); \
+    } else { \
+        STORE_FIELD(RUNFRAMEPTR(), PyRunFrame, f_lasti, ir_type_int, _val); \
+    } \
+} while (0)
+
+#define LOAD_F_PARTIAL()  LOAD_FIELD(FRAMEPTR(), PyFrameObject, f_partial, ir_type_char)
+
+#define LOAD_F_LOCALSPLUS() ({ \
+    IR_ASSERT(CMP_EQ(LOAD_F_PARTIAL(), CONSTANT_CHAR(0))); \
+    ir_get_element_ptr(jd->func, FRAMEPTR(), offsetof(PyFrameObject, f_localsplus_), ir_type_pyobject_ptr, "f_localsplus_"); \
+})
 
 /* Status code for main loop (reason for stack unwind) */
 enum why_code {
@@ -789,18 +811,18 @@ EMITTER_FOR(STORE_SUBSCR) {
    i) returns 1 on error, 0 on success
    ii) doesn't decref "ann".
    */
-int _store_annotation_helper(PyFrameObject *f, PyObject *name, PyObject *ann) {
+int _store_annotation_helper(PyObject *locals, PyObject *name, PyObject *ann) {
     _Py_IDENTIFIER(__annotations__);
     PyObject *ann_dict;
     int err;
-    if (f->f_locals == NULL) {
+    if (locals == NULL) {
         PyErr_Format(PyExc_SystemError,
                      "no locals found when storing annotation");
         return 1;
     }
     /* first try to get __annotations__ from locals... */
-    if (PyDict_CheckExact(f->f_locals)) {
-        ann_dict = _PyDict_GetItemId(f->f_locals,
+    if (PyDict_CheckExact(locals)) {
+        ann_dict = _PyDict_GetItemId(locals,
                                      &PyId___annotations__);
         if (ann_dict == NULL) {
             PyErr_SetString(PyExc_NameError,
@@ -814,7 +836,7 @@ int _store_annotation_helper(PyFrameObject *f, PyObject *name, PyObject *ann) {
         if (ann_str == NULL) {
             return 1;
         }
-        ann_dict = PyObject_GetItem(f->f_locals, ann_str);
+        ann_dict = PyObject_GetItem(locals, ann_str);
         if (ann_dict == NULL) {
             if (PyErr_ExceptionMatches(PyExc_KeyError)) {
                 PyErr_SetString(PyExc_NameError,
@@ -840,8 +862,8 @@ int _store_annotation_helper(PyFrameObject *f, PyObject *name, PyObject *ann) {
 EMITTER_FOR(STORE_ANNOTATION) {
     PyObject *name = GETNAME(oparg);
     JVALUE ann = POP();
-    JTYPE sig = CREATE_SIGNATURE(ir_type_int, ir_type_pyframeobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
-    JVALUE err = CALL_NATIVE(sig, _store_annotation_helper, jd->f, CONSTANT_PYOBJ(name), ann);
+    JVALUE locals = LOAD_F_LOCALS();
+    JVALUE err = CALL_NATIVE(jd->sig_iooo, _store_annotation_helper, locals, CONSTANT_PYOBJ(name), ann);
     DECREF(ann);
     GOTO_ERROR_IF(err);
     CHECK_EVAL_BREAKER();
@@ -2077,7 +2099,7 @@ void _build_map_unpack_with_call_format_error(PyObject *func, PyObject *arg) {
 
 EMITTER_FOR(BUILD_MAP_UNPACK_WITH_CALL) {
     IR_LABEL_INIT(handle_error);
-    JVALUE sum = CALL_NATIVE(jd->sig_o, PyDict_New);
+    JVALUE sum = CALL_PyDict_New();
     GOTO_ERROR_IF_NOT(sum);
 
     JTYPE sig = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_int);
@@ -2287,7 +2309,7 @@ EMITTER_FOR(IMPORT_STAR) {
     JTYPE sig1 = CREATE_SIGNATURE(ir_type_int, ir_type_pyframeobject_ptr);
     IF(
         CMP_LT(
-            CALL_NATIVE(sig1, PyFrame_FastToLocalsWithError, jd->f),
+            CALL_NATIVE(sig1, PyFrame_FastToLocalsWithError, FRAMEPTR()),
             CONSTANT_INT(0)),
         IR_UNLIKELY,
         {
@@ -2305,7 +2327,7 @@ EMITTER_FOR(IMPORT_STAR) {
     });
     JVALUE err = CALL_NATIVE(jd->sig_ioo, import_all_from, locals, from);
     JTYPE sig2 = CREATE_SIGNATURE(ir_type_void, ir_type_pyframeobject_ptr, ir_type_int);
-    CALL_NATIVE(sig2, PyFrame_LocalsToFast, jd->f, CONSTANT_INT(0));
+    CALL_NATIVE(sig2, PyFrame_LocalsToFast, FRAMEPTR(), CONSTANT_INT(0));
     DECREF(from);
     GOTO_ERROR_IF(err);
     CHECK_EVAL_BREAKER();
@@ -3068,7 +3090,6 @@ _clear_virtual_locals(JITData *jd) {
     }
 }
 
-
 static void
 translate_bytecode(JITData *jd, PyCodeObject *co)
 {
@@ -3081,7 +3102,6 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     Py_ssize_t inst_count = PyBytes_GET_SIZE(co->co_code)/sizeof(_Py_CODEUNIT);
 
     jd->inst_count = inst_count;
-    jd->update_blockstack = jd->is_gen;
     jd->use_patchpoint_error_handler = 0;
 
     jd->error_exit = NULL;
@@ -3127,7 +3147,7 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     jd->sig_ooooooo = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
     jd->sig_vp = CREATE_SIGNATURE(ir_type_void, ir_type_void_ptr);
     jd->sig_i = CREATE_SIGNATURE(ir_type_int);
-    jd->sig_ifi = CREATE_SIGNATURE(ir_type_int, ir_type_pyframeobject_ptr, ir_type_int);
+    jd->sig_ioi = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr, ir_type_int);
     jd->sig_if = CREATE_SIGNATURE(ir_type_int, ir_type_pyframeobject_ptr);
     jd->sig_io = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr);
     jd->sig_ioo = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
@@ -3139,22 +3159,17 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     jd->exc_triple_sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr_ptr, ir_type_pyobject_ptr_ptr, ir_type_pyobject_ptr_ptr);
     jd->null = CONSTANT_PYOBJ(NULL);
 
-    if (jd->is_gen) {
+    if (jd->use_frame_object) {
         /* Arguments: f, throwflag */
         jd->f = ir_func_get_argument(jd->func, 0);
         jd->throwflag = ir_func_get_argument(jd->func, 1);
-    } else if (!jd->use_virtual_locals) {
-        /* Arguments: f */
-        jd->f = ir_func_get_argument(jd->func, 0);
-        jd->throwflag = NULL;
     } else {
-        /* Arguments: ...pyargs..., closure?, f */
-        jd->f = ir_func_get_argument(jd->func, jd->total_direct_args - 1);
+        /* Arguments: ...pyargs..., closure?, locals? */
+        jd->f = NULL;
         jd->throwflag = NULL;
     }
 
     jd->retval = ALLOCA(ir_type_pyobject_ptr);
-    jd->next_instr_index = ALLOCA(ir_type_int);
 
     /* Initialization sequence */
     jd->tstate = IR_PyThreadState_GET();
@@ -3166,13 +3181,24 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
 
     /* Initialize and push PyRunFrame */
     jd->rf = ir_alloca(jd->func, ir_type_pyrunframe, 1);
-    JVALUE rfprev = LOAD_FIELD(jd->tstate, PyThreadState, runframe, ir_type_pyrunframe_ptr);
-    STORE_FIELD(jd->rf, PyRunFrame, prev, ir_type_pyrunframe_ptr, rfprev);
-    INCREF(CAST(ir_type_pyobject_ptr, jd->f));
-    STORE_FIELD(jd->rf, PyRunFrame, ref, ir_type_uintptr, CAST(ir_type_uintptr, jd->f));
-    STORE_FIELD(jd->rf, PyRunFrame, f_locals, ir_type_pyobject_ptr, LOAD_F_LOCALS());
-    STORE_FIELD(jd->rf, PyRunFrame, f_lasti, ir_type_int, CONSTANT_INT(-1));
-    STORE_FIELD(jd->tstate, PyThreadState, runframe, ir_type_pyrunframe_ptr, jd->rf);
+    if (jd->use_frame_object) {
+        IR_PyRunFrame_Push(jd->rf, jd->tstate, jd->f);
+    } else {
+        JVALUE jf = CONSTANT_PYOBJ((PyObject*)jd->jit_function);
+        JVALUE rflocals;
+        if ((co->co_flags & (CO_NEWLOCALS | CO_OPTIMIZED)) ==
+            (CO_NEWLOCALS | CO_OPTIMIZED)) {
+            rflocals = CONSTANT_PYOBJ(NULL);
+        } else if (co->co_flags & CO_NEWLOCALS) {
+            rflocals = CALL_PyDict_New();
+            GOTO_ERROR_IF_NOT(rflocals);
+        } else {
+            assert(jd->has_locals);
+            rflocals = ir_func_get_argument(jd->func, jd->total_direct_args - 1);
+            INCREF(rflocals);
+        }
+        IR_PyRunFrame_PushNoFrame(jd->rf, jd->tstate, jf, rflocals);
+    }
 
     /* Initialize arguments */
     if (jd->use_virtual_locals) {
@@ -3184,7 +3210,7 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
         }
         _initialize_virtual_locals(jd);
     } else {
-        jd->fastlocals = ir_get_element_ptr(jd->func, jd->f, offsetof(PyFrameObject, f_localsplus), ir_type_pyobject_ptr, "f_localsplus");
+        jd->fastlocals = LOAD_F_LOCALSPLUS();
         jd->fastlocals_size = 0;
         jd->fastlocals_values = NULL;
     }
@@ -3192,11 +3218,13 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     /* Setup retval and why */
     SET_RETVAL(CONSTANT_PYOBJ(NULL));
 
-    /* Set f_executing = 1 */
-    STORE_FIELD(jd->f, PyFrameObject, f_executing, ir_type_char, CONSTANT_CHAR(1));
+    if (jd->use_frame_object) {
+        /* Set f_executing = 1 */
+        STORE_FIELD(FRAMEPTR(), PyFrameObject, f_executing, ir_type_char, CONSTANT_CHAR(1));
 
-    /* assert f->f_lasti >= -1 */
-    IR_ASSERT(CMP_GE(LOAD_FIELD(jd->f, PyFrameObject, f_lasti, ir_type_int), CONSTANT_INT(-1)));
+        /* assert f->f_lasti >= -1 */
+        IR_ASSERT(CMP_GE(LOAD_F_LASTI(), CONSTANT_INT(-1)));
+    }
 
     if (jd->is_gen) {
         /* To be filled in by ir_lower() */
@@ -3208,14 +3236,16 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     LABEL(jd->body_start);
 
     /* Make sure the stack is setup correctly for function start */
+    if (jd->use_frame_object) {
 #ifndef NDEBUG
-    JVALUE f_valuestack = LOAD_FIELD(jd->f, PyFrameObject, f_valuestack, ir_type_pyobject_ptr_ptr);
-    JVALUE f_stacktop = LOAD_FIELD(jd->f, PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr);
-    IR_ASSERT(CMP_EQ(f_stacktop, f_valuestack));
+        JVALUE f_valuestack = LOAD_FIELD(FRAMEPTR(), PyFrameObject, f_valuestack, ir_type_pyobject_ptr_ptr);
+        JVALUE f_stacktop = LOAD_FIELD(FRAMEPTR(), PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr);
+        IR_ASSERT(CMP_EQ(f_stacktop, f_valuestack));
 #endif
 
-    /* We must clear f_stacktop */
-    STORE_FIELD(jd->f, PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr, CONSTANT_PTR(ir_type_pyobject_ptr_ptr, NULL));
+        /* We must clear f_stacktop */
+        STORE_FIELD(FRAMEPTR(), PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr, CONSTANT_PTR(ir_type_pyobject_ptr_ptr, NULL));
+    }
 
     if (jd->is_gen) {
         GOTO_ERROR_IF(jd->throwflag);
@@ -3228,8 +3258,7 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     IR_ASSERT(NOTBOOL(IR_PyErr_Occurred()));
 #endif
 
-    STORE(jd->next_instr_index, CONSTANT_INT(0));
-    CHECK_EVAL_BREAKER_SPECIAL();
+    CHECK_EVAL_BREAKER_EX(0);
 
     for (i = 0; i < inst_count; i++) {
         int opcode = _Py_OPCODE(code[i]);
@@ -3249,7 +3278,7 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
 
         // Emit instruction
         // Set f->f_lasti
-        STORE_FIELD(jd->f, PyFrameObject, f_lasti, ir_type_int, CONSTANT_INT(i * sizeof(_Py_CODEUNIT)));
+        STORE_F_LASTI(CONSTANT_INT(i * sizeof(_Py_CODEUNIT)));
         opcode_emitter_table[opcode](jd, i + 1, opcode, oparg);
 
         ir_label_pop_prefix(jd->func);
@@ -3258,26 +3287,17 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     /* Shouldn't ever fall through to this area */
     CRASH();
 
-    /* Special sections. While in a special section, jd->next_instr_index must
-       be valid and point to the next instruction to execute (for next dispatch).
-       There are two entrypoints to each special section. One for instructions,
-       and one for coming from another special section.
-     */
+    /* Special sections */
     LABEL(jd->exit);
     if (jd->use_virtual_locals) {
         _clear_virtual_locals(jd);
     }
 
     /* Pop PyRunFrame */
-    IR_ASSERT(CMP_EQ(LOAD_FIELD(jd->tstate, PyThreadState, runframe, ir_type_pyrunframe_ptr),
-                     jd->rf));
-    rfprev = LOAD_FIELD(jd->rf, PyRunFrame, prev, ir_type_pyrunframe_ptr);
-    STORE_FIELD(jd->tstate, PyThreadState, runframe, ir_type_pyrunframe_ptr, rfprev);
-    DECREF(CAST(ir_type_pyobject_ptr, jd->f));
+    IR_PyRunFrame_Pop(jd->rf, jd->tstate, jd->use_frame_object);
 
     /* Leave call */
     IR_Py_LeaveRecursiveCall();
-    STORE_FIELD(jd->f, PyFrameObject, f_executing, ir_type_char, CONSTANT_CHAR(0));
 
     /* Check return result */
     JVALUE ret = IR_Py_CheckFunctionResult(NULL, LOAD(jd->retval), "PyJIT_EvalFrame");
@@ -3337,14 +3357,6 @@ _PyJIT_CodeGen(PyCodeObject *co, PyObject *globals, PyObject *builtins) {
         globals = NULL;
         builtins = NULL;
     }
-    if (Py_JITDebugFlag > 0) {
-        fprintf(stderr, "Entering CodeGen for %s from %s (code == %p, globals = %p, builtins = %p)\n",
-            PyUnicode_AsUTF8(co->co_name),
-            PyUnicode_AsUTF8(co->co_filename),
-            co,
-            globals,
-            builtins);
-    }
     Py_ssize_t inst_count = PyBytes_GET_SIZE(co->co_code)/sizeof(_Py_CODEUNIT);
     size_t total_size = sizeof(JITData) + inst_count * sizeof(ir_label);
     JITData *jd = PyMem_RawMalloc(total_size);
@@ -3358,32 +3370,59 @@ _PyJIT_CodeGen(PyCodeObject *co, PyObject *globals, PyObject *builtins) {
     jd->builtins = builtins;
     jd->co = co;
     jd->context = ir_context_new();
-    jd->is_gen = (co->co_flags & (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR));
+    jd->is_gen = (co->co_flags & (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR)) ? 1 : 0;
+    jd->update_blockstack = jd->is_gen;
     jd->use_virtual_locals = !jd->is_gen && !_should_force_real_locals(co);
     jd->has_vararg = (co->co_flags & CO_VARARGS) ? 1 : 0;
     jd->has_kwdict = (co->co_flags & CO_VARKEYWORDS) ? 1 : 0;
     jd->total_pyargs = co->co_argcount + co->co_kwonlyargcount + jd->has_vararg + jd->has_kwdict;
     jd->has_closure = (PyTuple_GET_SIZE(co->co_freevars) > 0) ? 1 : 0;
+    jd->has_locals = !(co->co_flags & CO_NEWLOCALS);
+    jd->use_frame_object = (
+        globals == NULL ||
+        builtins == NULL ||
+        jd->is_gen ||
+        !jd->use_virtual_locals ||
+        jd->update_blockstack ||
+        jd->has_locals);
+
+    /* Force non-virtual locals if we're using a frame object */
+    if (jd->use_frame_object) {
+        jd->use_virtual_locals = 0;
+    }
+
+    if (Py_JITDebugFlag > 0) {
+        fprintf(stderr, "Entering CodeGen for %s:%s ===>\n",
+            PyUnicode_AsUTF8(co->co_filename),
+            PyUnicode_AsUTF8(co->co_name));
+        fprintf(stderr, "    code = %p\n", jd->co);
+        fprintf(stderr, "    globals = %p\n", jd->globals);
+        fprintf(stderr, "    builtins = %p\n", jd->builtins);
+        fprintf(stderr, "    is_gen = %d\n", jd->is_gen);
+        fprintf(stderr, "    update_blockstack = %d\n", jd->update_blockstack);
+        fprintf(stderr, "    use_virtual_locals = %d\n", jd->use_virtual_locals);
+        fprintf(stderr, "    has_vararg = %d\n", jd->has_vararg);
+        fprintf(stderr, "    has_kwdict = %d\n", jd->has_kwdict);
+        fprintf(stderr, "    has_closure = %d\n", jd->has_closure);
+        fprintf(stderr, "    has_locals = %d\n", jd->has_locals);
+        fprintf(stderr, "    use_frame_object = %d\n", jd->use_frame_object);
+        fprintf(stderr, "    total_pyargs = %ld\n", (long)jd->total_pyargs);
+    }
+
 
     ir_type sig;
-    if (jd->is_gen) {
+    if (jd->use_frame_object) {
         /* Signature: func(f, throwflag); */
         jd->total_direct_args = 0;
         ir_type argtypes[] = { ir_type_pyframeobject_ptr, ir_type_int };
         sig = ir_create_function_type(jd->context, ir_type_pyobject_ptr, sizeof(argtypes)/sizeof(argtypes[0]), argtypes);
-    } else if (!jd->use_virtual_locals) {
-        /* Signature: func(f); */
-        jd->total_direct_args = 0;
-        ir_type argtypes[] = { ir_type_pyframeobject_ptr };
-        sig = ir_create_function_type(jd->context, ir_type_pyobject_ptr, sizeof(argtypes)/sizeof(argtypes[0]), argtypes);
     } else {
-        /* Signature: func(...pyargs..., closure?, f); */
-        jd->total_direct_args = jd->total_pyargs + jd->has_closure + 1;
+        /* Signature: func(...pyargs..., closure?, locals?); */
+        jd->total_direct_args = jd->total_pyargs + jd->has_closure + jd->has_locals;
         ir_type *argtypes = (ir_type*)malloc(jd->total_direct_args * sizeof(ir_type));
-        for (Py_ssize_t i = 0; i < jd->total_direct_args - 1; i++) {
+        for (Py_ssize_t i = 0; i < jd->total_direct_args; i++) {
             argtypes[i] = ir_type_pyobject_ptr;
         }
-        argtypes[jd->total_direct_args - 1] = ir_type_pyframeobject_ptr;
         sig = ir_create_function_type(jd->context, ir_type_pyobject_ptr, jd->total_direct_args, argtypes);
         free(argtypes);
     }
@@ -3411,15 +3450,12 @@ _PyJIT_CodeGen(PyCodeObject *co, PyObject *globals, PyObject *builtins) {
 
     /* Populate JIT object for return */
     PyJITFunctionObject *jf = jd->jit_function;
-    jf->uses_virtual_locals = jd->use_virtual_locals;
+    jf->uses_frame_object = jd->use_frame_object;
     jf->eval_entrypoint = NULL;
-    jf->gen_entrypoint = NULL;
     jf->direct_entrypoint = NULL;
     jf->object = object;
     jf->eval_entrypoint_object = NULL;
-    if (jd->is_gen) {
-        jf->gen_entrypoint = (PyJIT_GenEntryPoint)object->entrypoint;
-    } else if (!jd->use_virtual_locals) {
+    if (jd->use_frame_object) {
         jf->eval_entrypoint = (PyJIT_EvalEntryPoint)object->entrypoint;
     } else {
         jf->direct_entrypoint = (PyJIT_DirectEntryPoint)object->entrypoint;
@@ -3481,11 +3517,11 @@ static void _push_pyblock_to_blockstack(JITData *jd, ir_pyblock pb) {
     }
 
     /* Verify the depth */
-    IR_ASSERT(CMP_EQ(LOAD_FIELD(jd->f, PyFrameObject, f_iblock, ir_type_int),
+    IR_ASSERT(CMP_EQ(LOAD_FIELD(FRAMEPTR(), PyFrameObject, f_iblock, ir_type_int),
                      CONSTANT_INT(_compute_pyblock_depth(pb->prev))));
 
     CALL_NATIVE(jd->blocksetup_sig, PyFrame_BlockSetup,
-                jd->f,
+                FRAMEPTR(),
                 CONSTANT_INT(b_type),
                 CONSTANT_INT(b_handler),
                 CONSTANT_INT(pb->b_level));
@@ -3495,9 +3531,9 @@ static void _pop_pyblock_from_blockstack(JITData *jd, ir_pyblock pb) {
     if (!jd->update_blockstack) return;
 
     /* Verify the depth */
-    IR_ASSERT(CMP_EQ(LOAD_FIELD(jd->f, PyFrameObject, f_iblock, ir_type_int),
+    IR_ASSERT(CMP_EQ(LOAD_FIELD(FRAMEPTR(), PyFrameObject, f_iblock, ir_type_int),
                      CONSTANT_INT(_compute_pyblock_depth(pb))));
-    JVALUE b = CALL_NATIVE(jd->blockpop_sig, PyFrame_BlockPop, jd->f);
+    JVALUE b = CALL_NATIVE(jd->blockpop_sig, PyFrame_BlockPop, FRAMEPTR());
 #ifdef Py_DEBUG
     /* Verify the fields */
     int b_type = _pyblock_type_to_b_type(pb->b_type);
@@ -3619,13 +3655,13 @@ int _ir_why_to_why(ir_why why) {
 static inline
 void _emit_resume_stub(JITData *jd, ir_label resume_label, ir_label b_handler_exception, int stack_level, ir_pyblock pb, int target_inst_index, ir_label target_inst_label) {
     LABEL(resume_label);
-    JVALUE f_valuestack = LOAD_FIELD(jd->f, PyFrameObject, f_valuestack, ir_type_pyobject_ptr_ptr);
+    JVALUE f_valuestack = LOAD_FIELD(FRAMEPTR(), PyFrameObject, f_valuestack, ir_type_pyobject_ptr_ptr);
 #ifndef NDEBUG
     JVALUE expected_stack_pointer = ir_get_index_ptr(jd->func, f_valuestack, CONSTANT_INT(stack_level));
-    JVALUE f_stacktop = LOAD_FIELD(jd->f, PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr);
+    JVALUE f_stacktop = LOAD_FIELD(FRAMEPTR(), PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr);
     IR_ASSERT(CMP_EQ(f_stacktop, expected_stack_pointer));
 #endif
-    STORE_FIELD(jd->f, PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr, CONSTANT_PTR(ir_type_pyobject_ptr_ptr, NULL));
+    STORE_FIELD(FRAMEPTR(), PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr, CONSTANT_PTR(ir_type_pyobject_ptr_ptr, NULL));
 
     /* Restore stack */
     STACKADJ(stack_level);
@@ -3656,7 +3692,7 @@ void _emit_error_exit(JITData *jd) {
         LABEL(jd->error_exit);
         IR_ASSERT(IR_PyErr_Occurred());
         /* Insert the current frame into the traceback */
-        CALL_NATIVE(jd->sig_if, PyTraceBack_Here, jd->f);
+        CALL_NATIVE(jd->sig_if, PyTraceBack_Here, FRAMEMAT());
         SET_RETVAL(CONSTANT_PYOBJ(NULL));
         BRANCH(jd->exit);
     }
@@ -3672,7 +3708,7 @@ void _emit_precursor(JITData *jd, ir_pyblock pb) {
     IR_ASSERT(IR_PyErr_Occurred());
 
     /* Insert the current frame into the traceback */
-    CALL_NATIVE(jd->sig_if, PyTraceBack_Here, jd->f);
+    CALL_NATIVE(jd->sig_if, PyTraceBack_Here, FRAMEMAT());
 
     /* The except handler has the same stack level as the EXCEPT
        or TRY_FINALLY block which caused it. */
@@ -3901,10 +3937,10 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr) {
         ir_label resume_inst_label = IR_INSTR_OPERAND(_instr, 2);
 
         SET_RETVAL(yieldval);
-        JVALUE f_valuestack = LOAD_FIELD(jd->f, PyFrameObject, f_valuestack, ir_type_pyobject_ptr_ptr);
+        JVALUE f_valuestack = LOAD_FIELD(FRAMEPTR(), PyFrameObject, f_valuestack, ir_type_pyobject_ptr_ptr);
         JVALUE stack_pointer = ir_get_index_ptr(jd->func, f_valuestack, CONSTANT_INT(instr->entry_stack_level));
-        STORE_FIELD(jd->f, PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr, stack_pointer);
-        STORE_FIELD(jd->f, PyFrameObject, f_lasti, ir_type_int, CONSTANT_INT(yield_f_lasti));
+        STORE_FIELD(FRAMEPTR(), PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr, stack_pointer);
+        STORE_F_LASTI(CONSTANT_INT(yield_f_lasti));
 
         /* Save stack */
         for (int i = 0; i < instr->entry_stack_level; i++) {
@@ -4086,7 +4122,7 @@ int _ir_lower_yield_dispatch(JITData *jd, ir_instr _instr) {
         return 0;
     }
     /* TODO: Find a less quadratic way to do this dispatch */
-    JVALUE f_lasti = LOAD_FIELD(jd->f, PyFrameObject, f_lasti, ir_type_int);
+    JVALUE f_lasti = LOAD_F_LASTI();
 
     /* Handle generator start */
     ir_label body_start = IR_INSTR_OPERAND(_instr, 0);
@@ -4253,10 +4289,10 @@ extern void jeval_error_handler_trampoline(void);
 void jeval_error_handler(_error_info *info, void **save_area) {
     ir_stackmap_info stackmap = info->stackmap;
 
-    /* Retrieve the PyFrameObject */
+    /* Retrieve the PyRunFrame */
 #ifndef NDEBUG
-    PyFrameObject *f = (PyFrameObject*)ir_stackmap_read_value(stackmap, 0, save_area);
-    assert(Py_TYPE(f) == &PyFrame_Type);
+    PyRunFrame *rf = (PyRunFrame*)ir_stackmap_read_value(stackmap, 0, save_area);
+    assert(rf != NULL);
 #endif
 
     /* Unwind the stack */
@@ -4329,11 +4365,11 @@ void _emit_patchpoint_error_handler(JITData *jd, ir_pyblock pb, int entry_stack_
 
     /* Prepare argument list for patchpoint. The first argument is a real argument containing
        the pointer to the _error_info for this error. The remaining arguments are map-only.
-       The second argument is jd->f, and later arguments are the stack positions to pop, in
+       The second argument is the PyRunFrame, and later arguments are the stack positions to pop, in
        reverse order. */
     ir_value *args = (ir_value*)malloc((total_unwind + 2) * sizeof(ir_value));
     args[0] = CONSTANT_PTR(ir_type_void_ptr, info);
-    args[1] = jd->f;
+    args[1] = jd->rf;
 
     /* Loop again, this time filling in the stack records and arg. */
     cur = pb;

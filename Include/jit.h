@@ -14,8 +14,7 @@ extern char *Py_JITDebugFile;
 struct _frame;
 typedef struct _frame PyFrameObject;
 
-typedef PyObject* (*PyJIT_EvalEntryPoint)(PyFrameObject *f);
-typedef PyObject* (*PyJIT_GenEntryPoint)(PyFrameObject *f, int throwflag);
+typedef PyObject* (*PyJIT_EvalEntryPoint)(PyFrameObject *f, int throwflag);
 typedef PyObject* (*PyJIT_DirectEntryPoint)(PyObject *arg0, ...);
 
 /* PyJITFunctionObject is a Python object that holds a reference to
@@ -64,10 +63,9 @@ struct _PyJITFunctionObject {
     PyJITFunctionObject *next;
 
     /* Everything below must be filled in by jeval */
-    int uses_virtual_locals;
+    int uses_frame_object;
 
     PyJIT_EvalEntryPoint eval_entrypoint;
-    PyJIT_GenEntryPoint gen_entrypoint;
     PyJIT_DirectEntryPoint direct_entrypoint;
 
     void *object; /* ir_object */
@@ -83,9 +81,9 @@ PyJITFunction_New(PyObject *code, PyObject *globals, PyObject *builtins);
 void
 PyJITFunction_SetParent(PyJITFunctionObject *self, PyJITFunctionObject *new_parent);
 
-static inline int PyJITFunction_HasVirtualLocals(PyObject *jf) {
+static inline int PyJITFunction_UsesFrameObject(PyObject *jf) {
     assert(PyJITFunction_Check(jf));
-    return ((PyJITFunctionObject*)jf)->uses_virtual_locals;
+    return ((PyJITFunctionObject*)jf)->uses_frame_object;
 }
 
 PyJITFunctionObject*
@@ -183,7 +181,7 @@ static inline PyObject* PyJIT_Prepare(PyObject *func) {
 static inline PyObject* PyJIT_ForFrame(PyObject *hint, PyCodeObject *co, PyObject *globals, PyObject *builtins) {
     if (hint != NULL) {
         return hint;
-    } else if (Py_JITFlag > 0) {
+    } else if (_should_jit(co)) {
         if (Py_JITDebugFlag > 0) {
             fprintf(stderr, "JIT_WARNING: One-time code generation for %s:%s\n",
                     PyUnicode_AsUTF8(co->co_name),

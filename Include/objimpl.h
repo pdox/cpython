@@ -234,6 +234,8 @@ PyAPI_FUNC(Py_ssize_t) PyGC_Collect(void);
 #ifndef Py_LIMITED_API
 PyAPI_FUNC(Py_ssize_t) _PyGC_CollectNoFail(void);
 PyAPI_FUNC(Py_ssize_t) _PyGC_CollectIfEnabled(void);
+PyAPI_FUNC(int) _PyGC_Pause(void);
+PyAPI_FUNC(void) _PyGC_Resume(int state);
 #endif
 
 /* Test if a type has a GC head */

@@ -1273,22 +1273,21 @@ purposes only."
 static PyObject *
 sys_getframe(PyObject *self, PyObject *args)
 {
-    PyRunFrame *rf = PyThreadState_GET()->runframe;
+    PyFrameObject *f = PyRunFrame_TopFrame(PyThreadState_GET());
     int depth = -1;
 
     if (!PyArg_ParseTuple(args, "|i:_getframe", &depth))
         return NULL;
 
-    while (depth > 0 && rf != NULL) {
-        rf = rf->prev;
+    while (depth > 0 && f != NULL) {
+        f = f->f_back;
         --depth;
     }
-    if (rf == NULL) {
+    if (f == NULL) {
         PyErr_SetString(PyExc_ValueError,
                         "call stack is not deep enough");
         return NULL;
     }
-    PyFrameObject *f = PyRunFrame_ToFrame(rf);
     Py_INCREF(f);
     return (PyObject*)f;
 }
@@ -1306,6 +1305,28 @@ static PyObject *
 sys_current_frames(PyObject *self, PyObject *noargs)
 {
     return _PyThread_CurrentFrames();
+}
+
+PyDoc_STRVAR(print_runframes_doc,
+"_print_runframes() -> None\n\
+\n\
+Emit PyRunFrame stack for the current thread to stderr (for debugging only)."
+);
+
+static PyObject *
+sys_print_runframes(PyObject *self, PyObject *noargs)
+{
+    PyThreadState *tstate = PyThreadState_GET();
+    PyRunFrame *cur = tstate->runframe;
+    fprintf(stderr, "\n---- PyRunFrames ----\n");
+    while (cur != NULL) {
+        fprintf(stderr, "RUNFRAME %p: prev=%p, ref=%p, f_locals=%p, f_lasti=%d\n",
+                cur, cur->prev, (void*)cur->ref, cur->f_locals, cur->f_lasti);
+        cur = cur->prev;
+    }
+    fprintf(stderr, "---- Finished ----\n");
+    Py_INCREF(Py_None);
+    return Py_None;
 }
 
 PyDoc_STRVAR(call_tracing_doc,
@@ -1448,6 +1469,8 @@ static PyMethodDef sys_methods[] = {
      sys_clear_type_cache__doc__},
     {"_current_frames", sys_current_frames, METH_NOARGS,
      current_frames_doc},
+    {"_print_runframes", sys_print_runframes, METH_NOARGS,
+     print_runframes_doc},
     {"displayhook",     sys_displayhook, METH_O, displayhook_doc},
     {"exc_info",        sys_exc_info, METH_NOARGS, exc_info_doc},
     {"excepthook",      sys_excepthook, METH_VARARGS, excepthook_doc},

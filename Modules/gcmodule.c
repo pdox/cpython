@@ -1603,6 +1603,17 @@ _PyGC_CollectNoFail(void)
     return n;
 }
 
+int _PyGC_Pause(void) {
+    int old_state = _PyRuntime.gc.enabled;
+    _PyRuntime.gc.enabled = 0;
+    return old_state;
+}
+
+void _PyGC_Resume(int state) {
+    assert(state == 0 || state == 1);
+    _PyRuntime.gc.enabled = state;
+}
+
 void
 _PyGC_DumpShutdownStats(void)
 {

@@ -143,12 +143,7 @@ PyObject* PyJIT_Execute(PyFrameObject *f, int throwflag) {
             PyUnicode_AsUTF8(co->co_filename),
             co);
     }
-    if (jf->gen_entrypoint) {
-        return jf->gen_entrypoint(f, throwflag);
-    } else {
-        assert(!throwflag);
-        return jf->eval_entrypoint(f);
-    }
+    return jf->eval_entrypoint(f, throwflag);
 }
 
 _Py_IDENTIFIER(__builtins__);

@@ -9,13 +9,14 @@ typedef struct {
     ir_context context;
     ir_func func;
     ir_value f; /* PyFrameObject* */
+    ir_value throwflag;
 } _jitdata;
 
 
 /* Make an EvalFrameDefault entrypoint for a JIT generated function.
    This has signature:
 
-       PyObject* entrypoint(PyFrameObject *f);
+       PyObject* entrypoint(PyFrameObject *f, int throwflag);
 
    This is here for compatibility with the existing EvalFrameDefault
    mechanism for calling a function. In particular, the first generated
@@ -35,13 +36,17 @@ PyJIT_MakeEvalEntrypoint(PyCodeObject *co, void *direct_entrypoint) {
     _jitdata _jd;
     _jitdata *jd = &_jd;
     jd->context = ir_context_new();
-    ir_type argtypes[] = { ir_type_pyframeobject_ptr };
+    ir_type argtypes[] = { ir_type_pyframeobject_ptr, ir_type_int };
     ir_type sig = ir_create_function_type(jd->context, ir_type_pyobject_ptr, sizeof(argtypes)/sizeof(argtypes[0]), argtypes);
     char namebuf[128];
     sprintf(namebuf, "%.100s_eval_entrypoint", PyUnicode_AsUTF8(co->co_name));
     jd->func = ir_func_new(jd->context, namebuf, sig);
     jd->f = ir_func_get_argument(jd->func, 0);
+    jd->throwflag = ir_func_get_argument(jd->func, 1);
     ir_value nullobj = CONSTANT_PYOBJ(NULL);
+
+    /* throwflag should never be set for non-generators */
+    IR_ASSERT(NOTBOOL(jd->throwflag));
 
     Py_ssize_t nlocals = co->co_nlocals;
     Py_ssize_t ncellvars = PyTuple_GET_SIZE(co->co_cellvars);
@@ -49,20 +54,22 @@ PyJIT_MakeEvalEntrypoint(PyCodeObject *co, void *direct_entrypoint) {
     int has_argtuple = (co->co_flags & CO_VARARGS) ? 1 : 0;
     int has_kwdict = (co->co_flags & CO_VARKEYWORDS) ? 1 : 0;
     int has_closure = (nfreevars > 0) ? 1 : 0;
+    int has_locals = !(co->co_flags & CO_NEWLOCALS);
     Py_ssize_t total_pyargs = co->co_argcount + co->co_kwonlyargcount + has_argtuple + has_kwdict;
     assert(total_pyargs <= nlocals);
     /* Direct entrypoint signature:
 
-         PyObject *entrypoint(...pyargs..., closure?, pyframeobject)
+         PyObject *entrypoint(...pyargs..., closure?, locals?)
 
      */
-    Py_ssize_t total_direct_args = total_pyargs + has_closure + 1;
+    Py_ssize_t total_direct_args = total_pyargs + has_closure + has_locals;
 
     /* Copy all of fastlocals into temporary buffers, and NULL out the frame's
        fastlocals. This is to prevent any code which might look at the frame
        from seeing the wrong version of the variables. This will be unnecessary
        once local inspection is implemented properly for JIT functions. */
-    ir_value fastlocals = ir_get_element_ptr(jd->func, jd->f, offsetof(PyFrameObject, f_localsplus), ir_type_pyobject_ptr, "f_localsplus");
+    IR_ASSERT(CMP_EQ(CONSTANT_CHAR(0), LOAD_FIELD(jd->f, PyFrameObject, f_partial, ir_type_char)));
+    ir_value fastlocals = ir_get_element_ptr(jd->func, jd->f, offsetof(PyFrameObject, f_localsplus_), ir_type_pyobject_ptr, "f_localsplus_");
     int nbuffers = nlocals + ncellvars + nfreevars;
     ir_value* buffers = (ir_value*)malloc(nbuffers * sizeof(ir_value));
     for (int j = 0; j < nbuffers; j++) {
@@ -115,14 +122,17 @@ PyJIT_MakeEvalEntrypoint(PyCodeObject *co, void *direct_entrypoint) {
         }
         direct_args[i++] = closure;
     }
-    direct_args[i++] = jd->f;
+    ir_value locals = NULL;
+    if (has_locals) {
+        locals = LOAD_FIELD(jd->f, PyFrameObject, f_locals, ir_type_pyobject_ptr);
+        direct_args[i++] = locals;
+    }
     assert(i == total_direct_args);
 
     ir_type *direct_arg_types = (ir_type*)malloc(total_direct_args * sizeof(ir_type));
-    for (i = 0; i < total_direct_args - 1; i++) {
+    for (i = 0; i < total_direct_args; i++) {
         direct_arg_types[i] = ir_type_pyobject_ptr;
     }
-    direct_arg_types[total_direct_args - 1] = ir_type_pyframeobject_ptr;
     ir_type direct_sig = ir_create_function_type(jd->context, ir_type_pyobject_ptr, total_direct_args, direct_arg_types);
     ir_value direct_func = ir_constant_from_ptr(jd->func, direct_sig, direct_entrypoint, "direct_entrypoint");
     ir_value ret = ir_call(jd->func, direct_func, total_direct_args, direct_args);

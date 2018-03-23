@@ -227,7 +227,7 @@ PyInterpreterState_GetID(PyInterpreterState *interp)
 static struct _frame *
 threadstate_getframe(PyThreadState *self)
 {
-    return PyRunFrame_ToFrame(self->runframe);
+    return PyRunFrame_TopFrame(self);
 }
 
 static PyThreadState *

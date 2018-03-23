@@ -275,7 +275,7 @@ function_code_fastcall(PyCodeObject *co, PyObject **args, Py_ssize_t nargs,
     }
     f->f_jit_function = PyJIT_ForFrame(jit_hint, co, globals, f->f_builtins);
 
-    fastlocals = f->f_localsplus;
+    fastlocals = PyFrame_GET_LOCALSPLUS(f);
 
     for (i = 0; i < nargs; i++) {
         Py_INCREF(*args);

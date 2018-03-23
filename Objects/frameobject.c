@@ -32,8 +32,14 @@ frame_getlocals(PyFrameObject *f, void *closure)
 static PyObject *
 frame_getlasti(PyFrameObject *f, void *closure)
 {
-    /* TODO: Recompute f_lasti using the RunFrame */
-    return PyLong_FromLong(f->f_lasti);
+    return PyLong_FromLong(PyFrame_GetLasti(f));
+}
+
+int PyFrame_GetLasti(PyFrameObject *f)
+{
+    if (f->f_runframe)
+        return PyRunFrame_GetLasti(f->f_runframe);
+    return f->f_lasti_ceval;
 }
 
 int
@@ -42,7 +48,7 @@ PyFrame_GetLineNumber(PyFrameObject *f)
     if (f->f_trace)
         return f->f_lineno;
     else
-        return PyCode_Addr2Line(f->f_code, f->f_lasti);
+        return PyCode_Addr2Line(f->f_code, PyFrame_GetLasti(f));
 }
 
 static PyObject *
@@ -92,6 +98,9 @@ frame_setlineno(PyFrameObject *f, PyObject* p_new_lineno)
     int in_finally[CO_MAXBLOCKS];       /* (ditto) */
     int blockstack_top = 0;             /* (ditto) */
     unsigned char setup_op = 0;         /* (ditto) */
+
+    /* This needs to be able to modify f_lasti arbitrarily */
+    assert(f->f_jit_function == NULL);
 
     /* f_lineno must be an integer. */
     if (!PyLong_CheckExact(p_new_lineno)) {
@@ -165,8 +174,8 @@ frame_setlineno(PyFrameObject *f, PyObject* p_new_lineno)
 
     /* We're now ready to look at the bytecode. */
     PyBytes_AsStringAndSize(f->f_code->co_code, (char **)&code, &code_len);
-    min_addr = Py_MIN(new_lasti, f->f_lasti);
-    max_addr = Py_MAX(new_lasti, f->f_lasti);
+    min_addr = Py_MIN(new_lasti, f->f_lasti_ceval);
+    max_addr = Py_MAX(new_lasti, f->f_lasti_ceval);
 
     /* You can't jump onto a line with an 'except' statement on it -
      * they expect to have an exception on the top of the stack, which
@@ -240,7 +249,7 @@ frame_setlineno(PyFrameObject *f, PyObject* p_new_lineno)
         /* For the addresses we're interested in, see whether they're
          * within a 'finally' block and if so, remember the address
          * of the SETUP_FINALLY. */
-        if (addr == new_lasti || addr == f->f_lasti) {
+        if (addr == new_lasti || addr == f->f_lasti_ceval) {
             int i = 0;
             int setup_addr = -1;
             for (i = blockstack_top-1; i >= 0; i--) {
@@ -255,7 +264,7 @@ frame_setlineno(PyFrameObject *f, PyObject* p_new_lineno)
                     new_lasti_setup_addr = setup_addr;
                 }
 
-                if (addr == f->f_lasti) {
+                if (addr == f->f_lasti_ceval) {
                     f_lasti_setup_addr = setup_addr;
                 }
             }
@@ -303,7 +312,7 @@ frame_setlineno(PyFrameObject *f, PyObject* p_new_lineno)
 
     /* Derive the absolute iblock values from the deltas. */
     min_iblock = f->f_iblock + min_delta_iblock;
-    if (new_lasti > f->f_lasti) {
+    if (new_lasti > f->f_lasti_ceval) {
         /* Forwards jump. */
         new_iblock = f->f_iblock + delta_iblock;
     }
@@ -320,8 +329,9 @@ frame_setlineno(PyFrameObject *f, PyObject* p_new_lineno)
     }
 
     /* Pop any blocks that we're jumping out of. */
+    PyTryBlock *f_blockstack = PyFrame_GET_BLOCKSTACK(f);
     while (f->f_iblock > new_iblock) {
-        PyTryBlock *b = &f->f_blockstack[--f->f_iblock];
+        PyTryBlock *b = &f_blockstack[--f->f_iblock];
         while ((f->f_stacktop - f->f_valuestack) > b->b_level) {
             PyObject *v = (*--f->f_stacktop);
             Py_DECREF(v);
@@ -330,7 +340,7 @@ frame_setlineno(PyFrameObject *f, PyObject* p_new_lineno)
 
     /* Finally set the new f_lineno and f_lasti and return OK. */
     f->f_lineno = new_lineno;
-    f->f_lasti = new_lasti;
+    f->f_lasti_ceval = new_lasti;
     return 0;
 }
 
@@ -418,6 +428,22 @@ static int numfree = 0;         /* number of frames currently in free_list */
 /* max value for numfree */
 #define PyFrame_MAXFREELIST 200
 
+/* We maintain a free list of partial frames, as well as an emergency reserve of
+   partial frames that are only used when we're out of memory (PyObject_GC_NewVar
+   returns NULL). Without an emergency reserve, the only way to handle this
+   situation is to to exit with fatal error.
+
+   The reserve is expected to be needed when hitting an out of memory condition,
+   since the MemoryError exception will generate a traceback, which may require
+   materializing a large number of frames.
+
+   TODO: Partial frames can be made even smaller to reduce memory footprint.
+ */
+static PyFrameObject *partial_free_list;
+static size_t partial_free_list_size;
+#define PARTIAL_FREE_LIST_MAX  600
+#define PARTIAL_FREE_LIST_MIN  500
+
 static void _Py_HOT_FUNCTION
 frame_dealloc(PyFrameObject *f)
 {
@@ -429,14 +455,16 @@ frame_dealloc(PyFrameObject *f)
 
     Py_TRASHCAN_SAFE_BEGIN(f)
     /* Kill all local variables */
-    valuestack = f->f_valuestack;
-    for (p = f->f_localsplus; p < valuestack; p++)
-        Py_CLEAR(*p);
+    if (!f->f_partial) {
+        valuestack = f->f_valuestack;
+        for (p = PyFrame_GET_LOCALSPLUS(f); p < valuestack; p++)
+            Py_CLEAR(*p);
 
-    /* Free stack */
-    if (f->f_stacktop != NULL) {
-        for (p = valuestack; p < f->f_stacktop; p++)
-            Py_XDECREF(*p);
+        /* Free stack */
+        if (f->f_stacktop != NULL) {
+            for (p = valuestack; p < f->f_stacktop; p++)
+                Py_XDECREF(*p);
+        }
     }
 
     Py_XDECREF(f->f_back);
@@ -447,7 +475,16 @@ frame_dealloc(PyFrameObject *f)
     Py_CLEAR(f->f_trace);
 
     co = f->f_code;
-    if (co->co_zombieframe == NULL)
+    if (f->f_partial) {
+        if (partial_free_list_size < PARTIAL_FREE_LIST_MAX) {
+            f->f_back = partial_free_list;
+            partial_free_list = f;
+            partial_free_list_size++;
+        } else {
+            PyObject_GC_Del(f);
+        }
+    }
+    else if (co->co_zombieframe == NULL)
         co->co_zombieframe = f;
     else if (numfree < PyFrame_MAXFREELIST) {
         ++numfree;
@@ -475,16 +512,18 @@ frame_traverse(PyFrameObject *f, visitproc visit, void *arg)
     Py_VISIT(f->f_trace);
     Py_VISIT(f->f_jit_function);
 
-    /* locals */
-    slots = f->f_code->co_nlocals + PyTuple_GET_SIZE(f->f_code->co_cellvars) + PyTuple_GET_SIZE(f->f_code->co_freevars);
-    fastlocals = f->f_localsplus;
-    for (i = slots; --i >= 0; ++fastlocals)
-        Py_VISIT(*fastlocals);
+    if (!f->f_partial) {
+        /* locals */
+        slots = f->f_code->co_nlocals + PyTuple_GET_SIZE(f->f_code->co_cellvars) + PyTuple_GET_SIZE(f->f_code->co_freevars);
+        fastlocals = PyFrame_GET_LOCALSPLUS(f);
+        for (i = slots; --i >= 0; ++fastlocals)
+            Py_VISIT(*fastlocals);
 
-    /* stack */
-    if (f->f_stacktop != NULL) {
-        for (p = f->f_valuestack; p < f->f_stacktop; p++)
-            Py_VISIT(*p);
+        /* stack */
+        if (f->f_stacktop != NULL) {
+            for (p = f->f_valuestack; p < f->f_stacktop; p++)
+                Py_VISIT(*p);
+        }
     }
     return 0;
 }
@@ -503,26 +542,29 @@ frame_tp_clear(PyFrameObject *f)
     oldtop = f->f_stacktop;
     f->f_stacktop = NULL;
     f->f_executing = 0;
+    f->f_runframe = NULL;
 
     Py_CLEAR(f->f_trace);
 
     /* locals */
-    slots = f->f_code->co_nlocals + PyTuple_GET_SIZE(f->f_code->co_cellvars) + PyTuple_GET_SIZE(f->f_code->co_freevars);
-    fastlocals = f->f_localsplus;
-    for (i = slots; --i >= 0; ++fastlocals)
-        Py_CLEAR(*fastlocals);
+    if (!f->f_partial) {
+        slots = f->f_code->co_nlocals + PyTuple_GET_SIZE(f->f_code->co_cellvars) + PyTuple_GET_SIZE(f->f_code->co_freevars);
+        fastlocals = PyFrame_GET_LOCALSPLUS(f);
+        for (i = slots; --i >= 0; ++fastlocals)
+            Py_CLEAR(*fastlocals);
 
-    /* stack */
-    if (oldtop != NULL) {
-        for (p = f->f_valuestack; p < oldtop; p++)
-            Py_CLEAR(*p);
+        /* stack */
+        if (oldtop != NULL) {
+            for (p = f->f_valuestack; p < oldtop; p++)
+                Py_CLEAR(*p);
+        }
     }
 }
 
 static PyObject *
 frame_clear(PyFrameObject *f)
 {
-    if (f->f_executing) {
+    if (f->f_executing || f->f_runframe) {
         PyErr_SetString(PyExc_RuntimeError,
                         "cannot clear an executing frame");
         return NULL;
@@ -609,18 +651,71 @@ int _PyFrame_Init()
     return 1;
 }
 
+PyFrameObject*
+_PyFrame_New_Partial(PyCodeObject *code, PyObject *globals, PyObject *builtins, PyObject *locals)
+{
+    /* We may clear exceptions */
+    PyObject *saved_exc, *saved_val, *saved_tb;
+    PyErr_Fetch(&saved_exc, &saved_val, &saved_tb);
+    assert(!PyErr_Occurred());
+
+    /* Try to repopulate emergency reserve */
+    while (partial_free_list_size < PARTIAL_FREE_LIST_MIN) {
+        PyFrameObject *f = PyObject_GC_NewVar(PyFrameObject, &PyFrame_Type, 0);
+        if (f == NULL) {
+            PyErr_Clear();
+            break;
+        }
+        f->f_back = partial_free_list;
+        partial_free_list = f;
+        partial_free_list_size++;
+    }
+
+    PyFrameObject *f = PyObject_GC_NewVar(PyFrameObject, &PyFrame_Type, 0);
+    if (f == NULL) {
+        PyErr_Clear();
+        if (partial_free_list == NULL) {
+            Py_FatalError("Unrecoverable out-of-memory error in _PyFrame_New_Partial");
+        }
+        f = partial_free_list;
+        partial_free_list = f->f_back;
+        partial_free_list_size--;
+        if (Py_REFCNT(f) == 0) {
+            _Py_NewReference((PyObject*)f);
+        }
+    }
+    f->f_back = NULL;
+    Py_INCREF(code);
+    f->f_code = code;
+    f->f_jit_function = NULL;
+    f->f_runframe = NULL;
+    Py_INCREF(builtins);
+    f->f_builtins = builtins;
+    Py_INCREF(globals);
+    f->f_globals = globals;
+    f->f_locals = locals; /* steals reference */
+    f->f_valuestack = NULL;
+    f->f_stacktop = NULL;
+    f->f_trace = NULL;
+    f->f_trace_lines = 0;
+    f->f_trace_opcodes = 0;
+    f->f_gen = NULL;
+    f->f_lasti_ceval = -1;
+    f->f_lineno = 0;
+    f->f_iblock = 0;
+    f->f_executing = 0;
+    f->f_partial = 1;
+    _PyObject_GC_TRACK(f);
+
+    PyErr_Restore(saved_exc, saved_val, saved_tb);
+    return f;
+}
+
 PyFrameObject* _Py_HOT_FUNCTION
 _PyFrame_New_NoTrack(PyThreadState *tstate, PyCodeObject *code,
                      PyObject *globals, PyObject *locals)
 {
-    PyFrameObject *back = PyRunFrame_ToFrame(tstate->runframe);
-    return _PyFrame_New_Raw(back, code, globals, locals);
-}
-
-PyFrameObject* _Py_HOT_FUNCTION
-_PyFrame_New_Raw(PyFrameObject *back, PyCodeObject *code,
-                 PyObject *globals, PyObject *locals)
-{
+    PyFrameObject *back = PyRunFrame_TopFrame(tstate);
     PyFrameObject *f;
     PyObject *builtins;
     Py_ssize_t i;
@@ -678,6 +773,7 @@ _PyFrame_New_Raw(PyFrameObject *back, PyCodeObject *code,
                 Py_DECREF(builtins);
                 return NULL;
             }
+            f->f_partial = 0;
         }
         else {
             assert(numfree > 0);
@@ -694,13 +790,15 @@ _PyFrame_New_Raw(PyFrameObject *back, PyCodeObject *code,
                 f = new_f;
             }
             _Py_NewReference((PyObject *)f);
+            f->f_partial = 0;
         }
 
         f->f_code = code;
         extras = code->co_nlocals + ncells + nfrees;
-        f->f_valuestack = f->f_localsplus + extras;
+        PyObject **localsplus = PyFrame_GET_LOCALSPLUS(f);
+        f->f_valuestack = localsplus + extras;
         for (i=0; i<extras; i++)
-            f->f_localsplus[i] = NULL;
+            localsplus[i] = NULL;
         f->f_locals = NULL;
         f->f_trace = NULL;
     }
@@ -731,10 +829,11 @@ _PyFrame_New_Raw(PyFrameObject *back, PyCodeObject *code,
     }
     f->f_jit_function = NULL;
 
-    f->f_lasti = -1;
+    f->f_lasti_ceval = -1;
     f->f_lineno = code->co_firstlineno;
     f->f_iblock = 0;
     f->f_executing = 0;
+    f->f_runframe = NULL;
     f->f_gen = NULL;
     f->f_trace_opcodes = 0;
     f->f_trace_lines = 1;
@@ -758,10 +857,11 @@ PyFrame_New(PyThreadState *tstate, PyCodeObject *code,
 void
 PyFrame_BlockSetup(PyFrameObject *f, int type, int handler, int level)
 {
+    PyTryBlock *blockstack = PyFrame_GET_BLOCKSTACK(f);
     PyTryBlock *b;
     if (f->f_iblock >= CO_MAXBLOCKS)
         Py_FatalError("XXX block stack overflow");
-    b = &f->f_blockstack[f->f_iblock++];
+    b = &blockstack[f->f_iblock++];
     b->b_type = type;
     b->b_level = level;
     b->b_handler = handler;
@@ -770,10 +870,11 @@ PyFrame_BlockSetup(PyFrameObject *f, int type, int handler, int level)
 PyTryBlock *
 PyFrame_BlockPop(PyFrameObject *f)
 {
+    PyTryBlock *blockstack = PyFrame_GET_BLOCKSTACK(f);
     PyTryBlock *b;
     if (f->f_iblock <= 0)
         Py_FatalError("XXX block stack underflow");
-    b = &f->f_blockstack[--f->f_iblock];
+    b = &blockstack[--f->f_iblock];
     return b;
 }
 
@@ -875,18 +976,10 @@ dict_to_map(PyObject *map, Py_ssize_t nmap, PyObject *dict, PyObject **values,
     }
 }
 
-int PyFrame_HasVirtualLocals(PyFrameObject *f)
-{
-    if (f->f_jit_function) {
-        return PyJITFunction_HasVirtualLocals(f->f_jit_function);
-    }
-    return 0;
-}
-
 int
 PyFrame_FastToLocalsWithError(PyFrameObject *f)
 {
-    assert(!PyFrame_HasVirtualLocals(f));
+    assert(!f->f_partial);
     /* Merge fast locals into f->f_locals */
     PyObject *locals, *map;
     PyObject **fast;
@@ -912,7 +1005,7 @@ PyFrame_FastToLocalsWithError(PyFrameObject *f)
                      Py_TYPE(map)->tp_name);
         return -1;
     }
-    fast = f->f_localsplus;
+    fast = PyFrame_GET_LOCALSPLUS(f);
     j = PyTuple_GET_SIZE(map);
     if (j > co->co_nlocals)
         j = co->co_nlocals;
@@ -959,7 +1052,7 @@ PyFrame_FastToLocals(PyFrameObject *f)
 void
 PyFrame_LocalsToFast(PyFrameObject *f, int clear)
 {
-    assert(!PyFrame_HasVirtualLocals(f));
+    assert(!f->f_partial);
     /* Merge f->f_locals into fast locals */
     PyObject *locals, *map;
     PyObject **fast;
@@ -977,7 +1070,7 @@ PyFrame_LocalsToFast(PyFrameObject *f, int clear)
     if (!PyTuple_Check(map))
         return;
     PyErr_Fetch(&error_type, &error_value, &error_traceback);
-    fast = f->f_localsplus;
+    fast = PyFrame_GET_LOCALSPLUS(f);
     j = PyTuple_GET_SIZE(map);
     if (j > co->co_nlocals)
         j = co->co_nlocals;

@@ -545,8 +545,11 @@ PyObject *
 PyEval_EvalFrameEx(PyFrameObject *f, int throwflag)
 {
     PyThreadState *tstate = PyThreadState_GET();
-    if (f->f_jit_function && !tstate->use_tracing && !_Py_TracingPossible && !PyDTrace_LINE_ENABLED()) {
-        return PyJIT_Execute(f, throwflag);
+    if (f->f_jit_function) {
+        if (!tstate->use_tracing && !_Py_TracingPossible && !PyDTrace_LINE_ENABLED()) {
+            return PyJIT_Execute(f, throwflag);
+        }
+        Py_CLEAR(f->f_jit_function);
     }
     return tstate->interp->eval_frame(f, throwflag);
 }
@@ -661,7 +664,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
 #define FAST_DISPATCH() \
     { \
         if (!lltrace && !_Py_TracingPossible && !PyDTrace_LINE_ENABLED()) { \
-            f->f_lasti = INSTR_OFFSET(); \
+            f->f_lasti_ceval = INSTR_OFFSET(); \
             NEXTOPARG(); \
             goto *opcode_targets[opcode]; \
         } \
@@ -671,7 +674,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
 #define FAST_DISPATCH() \
     { \
         if (!_Py_TracingPossible && !PyDTrace_LINE_ENABLED()) { \
-            f->f_lasti = INSTR_OFFSET(); \
+            f->f_lasti_ceval = INSTR_OFFSET(); \
             NEXTOPARG(); \
             goto *opcode_targets[opcode]; \
         } \
@@ -920,33 +923,33 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
     co = f->f_code;
     names = co->co_names;
     consts = co->co_consts;
-    fastlocals = f->f_localsplus;
-    freevars = f->f_localsplus + co->co_nlocals;
+    fastlocals = PyFrame_GET_LOCALSPLUS(f);
+    freevars = PyFrame_GET_LOCALSPLUS(f) + co->co_nlocals;
     assert(PyBytes_Check(co->co_code));
     assert(PyBytes_GET_SIZE(co->co_code) <= INT_MAX);
     assert(PyBytes_GET_SIZE(co->co_code) % sizeof(_Py_CODEUNIT) == 0);
     assert(_Py_IS_ALIGNED(PyBytes_AS_STRING(co->co_code), sizeof(_Py_CODEUNIT)));
     first_instr = (_Py_CODEUNIT *) PyBytes_AS_STRING(co->co_code);
     /*
-       f->f_lasti refers to the index of the last instruction,
+       f->f_lasti_ceval refers to the index of the last instruction,
        unless it's -1 in which case next_instr should be first_instr.
 
-       YIELD_FROM sets f_lasti to itself, in order to repeatedly yield
+       YIELD_FROM sets f_lasti_ceval to itself, in order to repeatedly yield
        multiple values.
 
        When the PREDICT() macros are enabled, some opcode pairs follow in
-       direct succession without updating f->f_lasti.  A successful
+       direct succession without updating f->f_lasti_ceval.  A successful
        prediction effectively links the two codes together as if they
-       were a single new opcode; accordingly,f->f_lasti will point to
+       were a single new opcode; accordingly,f->f_lasti_ceval will point to
        the first code in the pair (for instance, GET_ITER followed by
-       FOR_ITER is effectively a single opcode and f->f_lasti will point
+       FOR_ITER is effectively a single opcode and f->f_lasti_ceval will point
        to the beginning of the combined pair.)
     */
-    assert(f->f_lasti >= -1);
+    assert(f->f_lasti_ceval >= -1);
     next_instr = first_instr;
-    if (f->f_lasti >= 0) {
-        assert(f->f_lasti % sizeof(_Py_CODEUNIT) == 0);
-        next_instr += f->f_lasti / sizeof(_Py_CODEUNIT) + 1;
+    if (f->f_lasti_ceval >= 0) {
+        assert(f->f_lasti_ceval % sizeof(_Py_CODEUNIT) == 0);
+        next_instr += f->f_lasti_ceval / sizeof(_Py_CODEUNIT) + 1;
     }
     stack_pointer = f->f_stacktop;
     assert(stack_pointer != NULL);
@@ -1041,7 +1044,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
         }
 
     fast_next_opcode:
-        f->f_lasti = INSTR_OFFSET();
+        f->f_lasti_ceval = INSTR_OFFSET();
 
         if (PyDTrace_LINE_ENABLED())
             maybe_dtrace_line(f, &instr_lb, &instr_ub, &instr_prev);
@@ -1060,7 +1063,7 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
                                         tstate, f,
                                         &instr_lb, &instr_ub, &instr_prev);
             /* Reload possibly changed frame fields */
-            JUMPTO(f->f_lasti);
+            JUMPTO(f->f_lasti_ceval);
             if (f->f_stacktop != NULL) {
                 stack_pointer = f->f_stacktop;
                 f->f_stacktop = NULL;
@@ -1088,11 +1091,11 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
         if (lltrace) {
             if (HAS_ARG(opcode)) {
                 printf("%d: %d, %d\n",
-                       f->f_lasti, opcode, oparg);
+                       f->f_lasti_ceval, opcode, oparg);
             }
             else {
                 printf("%d: %d\n",
-                       f->f_lasti, opcode);
+                       f->f_lasti_ceval, opcode);
             }
         }
 #endif
@@ -1895,8 +1898,8 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
             f->f_stacktop = stack_pointer;
             why = WHY_YIELD;
             /* and repeat... */
-            assert(f->f_lasti >= (int)sizeof(_Py_CODEUNIT));
-            f->f_lasti -= sizeof(_Py_CODEUNIT);
+            assert(f->f_lasti_ceval >= (int)sizeof(_Py_CODEUNIT));
+            f->f_lasti_ceval -= sizeof(_Py_CODEUNIT);
             goto fast_yield;
         }
 
@@ -3426,9 +3429,10 @@ fast_block_end:
         assert(why != WHY_NOT);
 
         /* Unwind stacks if a (pseudo) exception occurred */
+        PyTryBlock *blockstack = PyFrame_GET_BLOCKSTACK(f);
         while (why != WHY_NOT && f->f_iblock > 0) {
             /* Peek at the current block. */
-            PyTryBlock *b = &f->f_blockstack[f->f_iblock - 1];
+            PyTryBlock *b = &blockstack[f->f_iblock - 1];
 
             assert(why != WHY_YIELD);
             if (b->b_type == SETUP_LOOP && why == WHY_CONTINUE) {
@@ -3771,8 +3775,8 @@ _PyEval_EvalCodeWithName(PyObject *_co, PyObject *globals, PyObject *locals,
         return NULL;
     }
     f->f_jit_function = PyJIT_ForFrame(jit_hint, co, globals, f->f_builtins);
-    fastlocals = f->f_localsplus;
-    freevars = f->f_localsplus + co->co_nlocals;
+    fastlocals = PyFrame_GET_LOCALSPLUS(f);
+    freevars = PyFrame_GET_LOCALSPLUS(f) + co->co_nlocals;
 
     /* Create a dictionary for keyword parameters (**kwags) */
     if (co->co_flags & CO_VARKEYWORDS) {
@@ -4354,9 +4358,9 @@ maybe_call_line_trace(Py_tracefunc func, PyObject *obj,
     /* If the last instruction executed isn't in the current
        instruction window, reset the window.
     */
-    if (frame->f_lasti < *instr_lb || frame->f_lasti >= *instr_ub) {
+    if (frame->f_lasti_ceval < *instr_lb || frame->f_lasti_ceval >= *instr_ub) {
         PyAddrPair bounds;
-        line = _PyCode_CheckLineNumber(frame->f_code, frame->f_lasti,
+        line = _PyCode_CheckLineNumber(frame->f_code, frame->f_lasti_ceval,
                                        &bounds);
         *instr_lb = bounds.ap_lower;
         *instr_ub = bounds.ap_upper;
@@ -4365,7 +4369,7 @@ maybe_call_line_trace(Py_tracefunc func, PyObject *obj,
        represents a jump backwards, update the frame's line number and
        then call the trace function if we're tracing source lines.
     */
-    if ((frame->f_lasti == *instr_lb || frame->f_lasti < *instr_prev)) {
+    if ((frame->f_lasti_ceval == *instr_lb || frame->f_lasti_ceval < *instr_prev)) {
         frame->f_lineno = line;
         if (frame->f_trace_lines) {
             result = call_trace(func, obj, tstate, frame, PyTrace_LINE, Py_None);
@@ -4375,7 +4379,7 @@ maybe_call_line_trace(Py_tracefunc func, PyObject *obj,
     if (frame->f_trace_opcodes) {
         result = call_trace(func, obj, tstate, frame, PyTrace_OPCODE, Py_None);
     }
-    *instr_prev = frame->f_lasti;
+    *instr_prev = frame->f_lasti_ceval;
     return result;
 }
 
@@ -5036,14 +5040,14 @@ unicode_concatenate(PyObject *v, PyObject *w,
         switch (opcode) {
         case STORE_FAST:
         {
-            PyObject **fastlocals = f->f_localsplus;
+            PyObject **fastlocals = PyFrame_GET_LOCALSPLUS(f);
             if (GETLOCAL(oparg) == v)
                 SETLOCAL(oparg, NULL);
             break;
         }
         case STORE_DEREF:
         {
-            PyObject **freevars = (f->f_localsplus +
+            PyObject **freevars = (PyFrame_GET_LOCALSPLUS(f) +
                                    f->f_code->co_nlocals);
             PyObject *c = freevars[oparg];
             if (PyCell_GET(c) ==  v) {
@@ -5139,7 +5143,7 @@ dtrace_function_entry(PyFrameObject *f)
 
     filename = PyUnicode_AsUTF8(f->f_code->co_filename);
     funcname = PyUnicode_AsUTF8(f->f_code->co_name);
-    lineno = PyCode_Addr2Line(f->f_code, f->f_lasti);
+    lineno = PyCode_Addr2Line(f->f_code, f->f_lasti_ceval);
 
     PyDTrace_FUNCTION_ENTRY(filename, funcname, lineno);
 }
@@ -5153,7 +5157,7 @@ dtrace_function_return(PyFrameObject *f)
 
     filename = PyUnicode_AsUTF8(f->f_code->co_filename);
     funcname = PyUnicode_AsUTF8(f->f_code->co_name);
-    lineno = PyCode_Addr2Line(f->f_code, f->f_lasti);
+    lineno = PyCode_Addr2Line(f->f_code, f->f_lasti_ceval);
 
     PyDTrace_FUNCTION_RETURN(filename, funcname, lineno);
 }
@@ -5169,9 +5173,9 @@ maybe_dtrace_line(PyFrameObject *frame,
     /* If the last instruction executed isn't in the current
        instruction window, reset the window.
     */
-    if (frame->f_lasti < *instr_lb || frame->f_lasti >= *instr_ub) {
+    if (frame->f_lasti_ceval < *instr_lb || frame->f_lasti_ceval >= *instr_ub) {
         PyAddrPair bounds;
-        line = _PyCode_CheckLineNumber(frame->f_code, frame->f_lasti,
+        line = _PyCode_CheckLineNumber(frame->f_code, frame->f_lasti_ceval,
                                        &bounds);
         *instr_lb = bounds.ap_lower;
         *instr_ub = bounds.ap_upper;
@@ -5179,7 +5183,7 @@ maybe_dtrace_line(PyFrameObject *frame,
     /* If the last instruction falls at the start of a line or if
        it represents a jump backwards, update the frame's line
        number and call the trace function. */
-    if (frame->f_lasti == *instr_lb || frame->f_lasti < *instr_prev) {
+    if (frame->f_lasti_ceval == *instr_lb || frame->f_lasti_ceval < *instr_prev) {
         frame->f_lineno = line;
         co_filename = PyUnicode_AsUTF8(frame->f_code->co_filename);
         if (!co_filename)
@@ -5189,5 +5193,5 @@ maybe_dtrace_line(PyFrameObject *frame,
             co_name = "?";
         PyDTrace_LINE(co_filename, co_name, line);
     }
-    *instr_prev = frame->f_lasti;
+    *instr_prev = frame->f_lasti_ceval;
 }
