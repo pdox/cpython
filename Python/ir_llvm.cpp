@@ -61,6 +61,18 @@ typedef struct {
 } while (0)
 
 
+static llvm::Type*
+_llvm_int_type(_TranslationContext &ctx, size_t size_in_bytes) {
+    auto &context = ctx.module->getContext();
+    switch (size_in_bytes) {
+    case 1: return llvm::Type::getInt8Ty(context);
+    case 2: return llvm::Type::getInt16Ty(context);
+    case 4: return llvm::Type::getInt32Ty(context);
+    case 8: return llvm::Type::getInt64Ty(context);
+    default: abort(); /* Other integer widths unhandled */
+    }
+}
+
 static inline
 llvm::Type *
 _ir_type_to_llvm_type(_TranslationContext &ctx, ir_type type) {
@@ -73,14 +85,7 @@ _ir_type_to_llvm_type(_TranslationContext &ctx, ir_type type) {
     case ir_type_kind_ ## name:
 #include "ir_integral_types.def"
 #undef PROCESS
-        switch (type->size) {
-            case 1: return llvm::Type::getInt8Ty(context);
-            case 2: return llvm::Type::getInt16Ty(context);
-            case 4: return llvm::Type::getInt32Ty(context);
-            case 8: return llvm::Type::getInt64Ty(context);
-            default: abort(); /* Other integer widths unhandled */
-        }
-        break;
+        return _llvm_int_type(ctx, type->size);
     case ir_type_kind_pointer: {
         /* LLVM void is weird. There is a LLVM void type, but it cannot be used as the base of a pointer.
            So instead, use i8* */
@@ -107,7 +112,19 @@ _ir_type_to_llvm_type(_TranslationContext &ctx, ir_type type) {
         /* Find an existing type in the module, or create a new one */
         llvm::Type *ret = ctx.module->getTypeByName(type->name);
         if (ret == nullptr) {
-            ret = llvm::StructType::create(context, type->name);
+            /* We don't know the individual elements, so make it appear to just be an array of ints.
+               TODO: Take into account the actual struct alignment.
+             */
+            size_t eltsize = 8;
+            while (type->size % eltsize != 0) eltsize >>= 1;
+            size_t nelements = type->size / eltsize;
+            llvm::Type* elem_type = _llvm_int_type(ctx, eltsize);
+            llvm::Type** elements = (llvm::Type**)malloc(nelements * sizeof(llvm::Type*));
+            for (size_t i = 0; i < nelements; i++) {
+                elements[i] = elem_type;
+            }
+            ret = llvm::StructType::create(context, llvm::ArrayRef<llvm::Type*>(elements, nelements), type->name);
+            free(elements);
         }
         return ret;
     }

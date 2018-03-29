@@ -58,8 +58,10 @@ _PyJIT_CallTrampoline_MakeBootstrap(void) {
         a.push(saveregs[i]);
     }
 
-    /* Prepare the function for JIT (this returns the new trampoline in %rax) */
+    /* Prepare the function for JIT (returns the new trampoline in %rax) */
+    a.sub(x86::rsp, 8); /* Align stack for call */
     a.call((uintptr_t)_jit_and_set_trampoline);
+    a.add(x86::rsp, 8);
 
     /* Restore original argument registers */
     for (int i = 0; i < 6; i++) {
