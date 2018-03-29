@@ -64,7 +64,7 @@ typedef struct _JITData {
     ir_type sig_io;
     ir_type sig_ioo;
     ir_type sig_iooo;
-    ir_type sig_ioi; /* for _do_eval_breaker() helper */
+    ir_type sig_ioi; /* for _do_eval_break() helper */
     ir_type sig_if;  /* for PyTraceBack_Here */
     ir_type sig_ol;  /* for PyLong_FromLong */
     ir_type dealloc_sig;
@@ -294,18 +294,6 @@ static inline JVALUE _materialize_frame(JITData *jd) {
         LOAD(jd->fastlocals_values[jd->co->co_nlocals + (i)]) \
         : LOAD_AT_INDEX(jd->fastlocals, CONSTANT_INT(jd->co->co_nlocals + (i))))
 
-// TODO: This needs to be adjusted depending on the configuration of _Py_atomic_int
-#define LOAD_EVAL_BREAKER() \
-    LOAD(CONSTANT_PTR(ir_type_int_ptr, &_PyRuntime.ceval.eval_breaker._value))
-
-/* Check eval breaker, and call handler if set. This can only be used
-   in instructions with no jumping, since it assumes the next instruction
-   is computed using f_lasti.
- */
-#define CHECK_EVAL_BREAKER()         _emit_check_eval_breaker(jd, CONSTANT_INT(next_instr_index))
-#define CHECK_EVAL_BREAKER_EX(_next_instr_index) \
-    _emit_check_eval_breaker(jd, CONSTANT_INT(_next_instr_index))
-
 /* ------------------- Macros and include copied from ceval.c ------------------- */
 #define GIL_REQUEST _Py_atomic_load_relaxed(&_PyRuntime.ceval.gil_drop_request)
 
@@ -367,7 +355,7 @@ static inline JVALUE _materialize_frame(JITData *jd) {
 void *dummy2[] = {_gil_initialize, gil_created, destroy_gil, recreate_gil};
 
 /* Do eval break. Return 0 on success, -1 on exception. */
-static int _do_eval_breaker(PyCodeObject *co, int next_instr_index) {
+static int _do_eval_break(PyCodeObject *co, int next_instr_index) {
     PyThreadState *tstate = PyThreadState_GET();
     assert(!PyErr_Occurred());
 
@@ -439,12 +427,25 @@ static int _do_eval_breaker(PyCodeObject *co, int next_instr_index) {
     return 0;
 }
 
-static inline void _emit_check_eval_breaker(JITData *jd, ir_value next_instr_index) {
+// TODO: This needs to be adjusted depending on the configuration of _Py_atomic_int
+#define LOAD_EVAL_BREAKER() \
+    LOAD(CONSTANT_PTR(ir_type_int_ptr, &_PyRuntime.ceval.eval_breaker._value))
+
+static inline void _emit_eval_break_check(JITData *jd, ir_value next_instr_index) {
     IF(LOAD_EVAL_BREAKER(), IR_UNLIKELY, {
-        JVALUE res = CALL_NATIVE(jd->sig_ioi, _do_eval_breaker, CONSTANT_PYOBJ((PyObject*)jd->co), next_instr_index);
+        JVALUE res = CALL_NATIVE(jd->sig_ioi, _do_eval_break, CONSTANT_PYOBJ((PyObject*)jd->co), next_instr_index);
         GOTO_ERROR_IF(res);
     });
 }
+
+/* Check eval breaker, and call handler if set. */
+#define HARD_EVAL_BREAK_CHECK_EX(_next_instr_index)  _emit_eval_break_check(jd, CONSTANT_INT(_next_instr_index))
+#define HARD_EVAL_BREAK_CHECK()                      HARD_EVAL_BREAK_CHECK_EX(next_instr_index)
+#define SOFT_EVAL_BREAK_CHECK() do { \
+    if (Py_JITEvalBreaks) { \
+        HARD_EVAL_BREAK_CHECK(); \
+    } \
+} while (0)
 
 #define IR_PyErr_ExceptionMatches(exc) \
     CALL_NATIVE(jd->sig_io, PyErr_ExceptionMatches, CONSTANT_PYOBJ(exc))
@@ -512,7 +513,7 @@ int do_raise(PyObject *, PyObject *);
 
 #define EMIT_JUMP(check_eval_breaker) do { \
     if (check_eval_breaker) { \
-        CHECK_EVAL_BREAKER(); \
+        HARD_EVAL_BREAK_CHECK(); \
     } \
     BRANCH(jd->jmptab[next_instr_index]); \
 } while (0)
@@ -725,7 +726,7 @@ EMITTER_FOR(DUP_TOP_TWO) {
         DECREF(objval); \
         SET_TOP(res); \
         GOTO_ERROR_IF_NOT(res); \
-        CHECK_EVAL_BREAKER(); \
+        SOFT_EVAL_BREAK_CHECK(); \
     }
 
 EMIT_AS_UNARY_OP(UNARY_POSITIVE, PyNumber_Positive)
@@ -747,7 +748,7 @@ EMITTER_FOR(UNARY_NOT) {
     JVALUE obj = TERNARY(err, CONSTANT_PYOBJ(Py_False), CONSTANT_PYOBJ(Py_True));
     INCREF(obj);
     SET_TOP(obj);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(BINARY_POWER) {
@@ -758,7 +759,7 @@ EMITTER_FOR(BINARY_POWER) {
     DECREF(exp);
     SET_TOP(res);
     GOTO_ERROR_IF_NOT(res);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 #define EMIT_AS_BINARY_OP(op, func) \
@@ -770,7 +771,7 @@ EMITTER_FOR(BINARY_POWER) {
         DECREF(right); \
         SET_TOP(res); \
         GOTO_ERROR_IF_NOT(res); \
-        CHECK_EVAL_BREAKER(); \
+        SOFT_EVAL_BREAK_CHECK(); \
     }
 
 EMIT_AS_BINARY_OP(BINARY_MULTIPLY, PyNumber_Multiply)
@@ -794,7 +795,7 @@ EMITTER_FOR(LIST_APPEND) {
     JVALUE err = CALL_NATIVE(jd->sig_ioo, PyList_Append, list, v);
     DECREF(v);
     GOTO_ERROR_IF(err);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(SET_ADD) {
@@ -803,7 +804,7 @@ EMITTER_FOR(SET_ADD) {
     JVALUE err = CALL_NATIVE(jd->sig_ioo, PySet_Add, set, v);
     DECREF(v);
     GOTO_ERROR_IF(err);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(INPLACE_POWER) {
@@ -814,7 +815,7 @@ EMITTER_FOR(INPLACE_POWER) {
     DECREF(exp);
     SET_TOP(res);
     GOTO_ERROR_IF_NOT(res);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMIT_AS_BINARY_OP(INPLACE_MULTIPLY, PyNumber_InPlaceMultiply)
@@ -841,7 +842,7 @@ EMITTER_FOR(STORE_SUBSCR) {
     DECREF(container);
     DECREF(sub);
     GOTO_ERROR_IF(err);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 /* This is most of the work of STORE_ANNOTATION, taken from ceval,
@@ -904,7 +905,7 @@ EMITTER_FOR(STORE_ANNOTATION) {
     JVALUE err = CALL_NATIVE(jd->sig_iooo, _store_annotation_helper, locals, CONSTANT_PYOBJ(name), ann);
     DECREF(ann);
     GOTO_ERROR_IF(err);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(DELETE_SUBSCR) {
@@ -916,7 +917,7 @@ EMITTER_FOR(DELETE_SUBSCR) {
     DECREF(container);
     DECREF(sub);
     GOTO_ERROR_IF(err);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(PRINT_EXPR) {
@@ -933,7 +934,7 @@ EMITTER_FOR(PRINT_EXPR) {
     DECREF(value);
     GOTO_ERROR_IF_NOT(res);
     DECREF(res);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(RAISE_VARARGS) {
@@ -1002,7 +1003,7 @@ EMITTER_FOR(GET_AITER) {
 
     /* Good iterator, normal dispatch */
     SET_TOP(iter);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 
     REMOTE_SECTION({
         LABEL(invalid_iter);
@@ -1085,7 +1086,7 @@ EMITTER_FOR(GET_ANEXT) {
     JVALUE awaitable = LOAD(awaitableptr);
     GOTO_ERROR_IF_NOT(awaitable);
     PUSH(awaitable);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(GET_AWAITABLE) {
@@ -1116,7 +1117,7 @@ EMITTER_FOR(GET_AWAITABLE) {
     JVALUE iter = LOAD(iterptr);
     SET_TOP(iter);
     GOTO_ERROR_IF_NOT(iter);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(YIELD_FROM) {
@@ -1175,7 +1176,7 @@ EMITTER_FOR(YIELD_FROM) {
     GOTO_ERROR_IF(CMP_LT(err, CONSTANT_INT(0)));
     DECREF(receiver);
     SET_TOP(LOAD(valptr));
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(YIELD_VALUE) {
@@ -1191,12 +1192,12 @@ EMITTER_FOR(YIELD_VALUE) {
 
 EMITTER_FOR(POP_EXCEPT) {
     DO_POP_BLOCK(EXCEPT_HANDLER);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(POP_BLOCK) {
     DO_POP_BLOCK(ANY);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(ENTER_FINALLY) {
@@ -1212,7 +1213,7 @@ EMITTER_FOR(END_FINALLY) {
     IR_LABEL_INIT(fallthrough);
     ir_end_finally(jd->func, fallthrough, jd->unknown_handler);
     LABEL(fallthrough);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 static
@@ -1249,7 +1250,7 @@ EMITTER_FOR(LOAD_BUILD_CLASS) {
     JVALUE bc = CALL_NATIVE(jd->sig_oo, _load_build_class_helper, builtins);
     GOTO_ERROR_IF_NOT(bc);
     PUSH(bc);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(STORE_NAME) {
@@ -1278,7 +1279,7 @@ EMITTER_FOR(STORE_NAME) {
     LABEL(after_setitem);
     DECREF(v);
     GOTO_ERROR_IF(LOAD(err));
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(DELETE_NAME) {
@@ -1291,7 +1292,7 @@ EMITTER_FOR(DELETE_NAME) {
     BRANCH_IF_NOT(ns, no_locals, IR_UNLIKELY);
     JVALUE err = CALL_NATIVE(jd->sig_ioo, PyObject_DelItem, ns, CONSTANT_PYOBJ(name));
     BRANCH_IF(err, handle_err, IR_UNLIKELY);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
     BRANCH(fast_dispatch);
 
     LABEL(no_locals);
@@ -1388,7 +1389,7 @@ EMITTER_FOR(UNPACK_SEQUENCE) {
     GOTO_ERROR();
 
     LABEL(dispatch);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(UNPACK_EX) {
@@ -1457,7 +1458,7 @@ EMITTER_FOR(UNPACK_EX) {
     GOTO_ERROR();
 
     LABEL(dispatch);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(STORE_ATTR) {
@@ -1469,7 +1470,7 @@ EMITTER_FOR(STORE_ATTR) {
     DECREF(v);
     DECREF(owner);
     GOTO_ERROR_IF(err);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(DELETE_ATTR) {
@@ -1478,7 +1479,7 @@ EMITTER_FOR(DELETE_ATTR) {
     JVALUE err = CALL_NATIVE(jd->sig_iooo, PyObject_SetAttr, owner, CONSTANT_PYOBJ(name), CONSTANT_PYOBJ(NULL));
     DECREF(owner);
     GOTO_ERROR_IF(err);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(STORE_GLOBAL) {
@@ -1488,7 +1489,7 @@ EMITTER_FOR(STORE_GLOBAL) {
     JVALUE err = CALL_NATIVE(jd->sig_iooo, PyDict_SetItem, globals, CONSTANT_PYOBJ(name), v);
     DECREF(v);
     GOTO_ERROR_IF(err);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(DELETE_GLOBAL) {
@@ -1499,7 +1500,7 @@ EMITTER_FOR(DELETE_GLOBAL) {
         CALL_format_exc_check_arg(PyExc_NameError, NAME_ERROR_MSG, name);
         GOTO_ERROR();
     });
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 static PyObject *
@@ -1559,7 +1560,7 @@ EMITTER_FOR(LOAD_NAME) {
     JVALUE v = CALL_NATIVE(jd->sig_ooooo, _load_name_helper, CONSTANT_PYOBJ(name), globals, builtins, locals);
     GOTO_ERROR_IF_NOT(v);
     PUSH(v);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 static PyObject* _load_global_helper(PyObject *globals, PyObject *builtins, PyObject *name) {
@@ -1612,14 +1613,14 @@ EMITTER_FOR(LOAD_GLOBAL) {
     JVALUE v = CALL_NATIVE(jd->sig_oooo, _load_global_helper, globals, builtins, CONSTANT_PYOBJ(name));
     GOTO_ERROR_IF_NOT(v);
     PUSH(v);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(DELETE_FAST) {
     JVALUE tmp = ir_getlocal(jd->func, oparg, 1, jd->unknown_handler);
     ir_dellocal(jd->func, oparg);
     DECREF(tmp);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(DELETE_DEREF) {
@@ -1630,7 +1631,7 @@ EMITTER_FOR(DELETE_DEREF) {
     BRANCH_IF_NOT(oldobj, cell_empty, IR_UNLIKELY);
     IR_PyCell_SET(cell, CONSTANT_PYOBJ(NULL));
     DECREF(oldobj);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
     BRANCH(fast_dispatch);
 
     LABEL(cell_empty);
@@ -1644,7 +1645,7 @@ EMITTER_FOR(LOAD_CLOSURE) {
     JVALUE cell = LOAD_FREEVAR(oparg);
     INCREF(cell);
     PUSH(cell);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(LOAD_CLASSDEREF) {
@@ -1684,7 +1685,7 @@ EMITTER_FOR(LOAD_CLASSDEREF) {
         INCREF(LOAD(value));
     });
     PUSH(LOAD(value));
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(LOAD_DEREF) {
@@ -1695,7 +1696,7 @@ EMITTER_FOR(LOAD_DEREF) {
     BRANCH_IF_NOT(value, unbound_value, IR_UNLIKELY);
     INCREF(value);
     PUSH(value);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
     BRANCH(fast_dispatch);
 
     LABEL(unbound_value);
@@ -1711,7 +1712,7 @@ EMITTER_FOR(STORE_DEREF) {
     JVALUE oldobj = IR_PyCell_GET(cell);
     IR_PyCell_SET(cell, v);
     XDECREF(oldobj);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 static PyObject* _build_string_helper0(PyObject *empty) {
@@ -1808,7 +1809,7 @@ EMITTER_FOR(BUILD_STRING) {
     STACKADJ(-oparg);
     GOTO_ERROR_IF_NOT(result);
     PUSH(result);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 /* TODO: Replace with a new opcode which directly places items into
@@ -1825,7 +1826,7 @@ EMITTER_FOR(BUILD_TUPLE) {
     }
     STACKADJ(-oparg);
     PUSH(tup);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(BUILD_LIST) {
@@ -1838,7 +1839,7 @@ EMITTER_FOR(BUILD_LIST) {
     }
     STACKADJ(-oparg);
     PUSH(list);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 /* from ceval.c */
@@ -1872,7 +1873,7 @@ static void _build_unpack_common(JITData *jd, int opcode, int oparg, int next_in
     }
     STACKADJ(-oparg);
     PUSH(result);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 
     REMOTE_SECTION({
         LABEL(handle_error);
@@ -1914,7 +1915,7 @@ EMITTER_FOR(BUILD_SET) {
     }
     STACKADJ(-oparg);
     PUSH(set);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 
     REMOTE_SECTION({
         LABEL(handle_error);
@@ -1936,7 +1937,7 @@ EMITTER_FOR(BUILD_SET_UNPACK) {
     }
     STACKADJ(-oparg);
     PUSH(sum);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 
     REMOTE_SECTION({
         LABEL(handle_error);
@@ -2031,7 +2032,7 @@ _setup_annotations_helper(PyObject *f_locals) {
 EMITTER_FOR(SETUP_ANNOTATIONS) {
     JVALUE ret = CALL_NATIVE(jd->sig_io, _setup_annotations_helper, LOAD_F_LOCALS());
     GOTO_ERROR_IF(ret);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(BUILD_CONST_KEY_MAP) {
@@ -2055,7 +2056,7 @@ EMITTER_FOR(BUILD_CONST_KEY_MAP) {
         DECREF(POP());
     }
     PUSH(map);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 
     REMOTE_SECTION({
         LABEL(handle_setitem_error);
@@ -2087,7 +2088,7 @@ EMITTER_FOR(BUILD_MAP_UNPACK) {
         DECREF(POP());
     }
     PUSH(sum);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 
     REMOTE_SECTION({
         LABEL(handle_error);
@@ -2152,7 +2153,7 @@ EMITTER_FOR(BUILD_MAP_UNPACK_WITH_CALL) {
         DECREF(POP());
     }
     PUSH(sum);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 
     REMOTE_SECTION({
         LABEL(handle_error);
@@ -2173,7 +2174,7 @@ EMITTER_FOR(MAP_ADD) {
     DECREF(value);
     DECREF(key);
     GOTO_ERROR_IF(err);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(LOAD_ATTR) {
@@ -2183,7 +2184,7 @@ EMITTER_FOR(LOAD_ATTR) {
     DECREF(owner);
     SET_TOP(res);
     GOTO_ERROR_IF_NOT(res);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 /* Copied from ceval cmp_outcome */
@@ -2280,7 +2281,7 @@ EMITTER_FOR(COMPARE_OP) {
     DECREF(right);
     SET_TOP(res);
     GOTO_ERROR_IF_NOT(res);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 static PyObject *
@@ -2336,7 +2337,7 @@ EMITTER_FOR(IMPORT_NAME) {
     DECREF(fromlist);
     GOTO_ERROR_IF_NOT(res);
     PUSH(res);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 int import_all_from(PyObject *, PyObject *);
@@ -2368,7 +2369,7 @@ EMITTER_FOR(IMPORT_STAR) {
     CALL_NATIVE(sig2, PyFrame_LocalsToFast, FRAMEPTR(), CONSTANT_INT(0));
     DECREF(from);
     GOTO_ERROR_IF(err);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 PyObject * import_from(PyObject *, PyObject *);
@@ -2379,7 +2380,7 @@ EMITTER_FOR(IMPORT_FROM) {
     JVALUE res = CALL_NATIVE(jd->sig_ooo, import_from, from, CONSTANT_PYOBJ(name));
     GOTO_ERROR_IF_NOT(res);
     PUSH(res);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(JUMP_FORWARD) {
@@ -2409,7 +2410,7 @@ EMITTER_FOR(POP_JUMP_IF_FALSE) {
     /* err == 0 case */
     JUMPTO(oparg, 1);
     LABEL(fin);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(POP_JUMP_IF_TRUE) {
@@ -2435,7 +2436,7 @@ EMITTER_FOR(POP_JUMP_IF_TRUE) {
     /* err > 0 case */
     JUMPTO(oparg, 1);
     LABEL(fin);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(JUMP_IF_FALSE_OR_POP) {
@@ -2467,7 +2468,7 @@ EMITTER_FOR(JUMP_IF_FALSE_OR_POP) {
     LABEL(do_jump);
     JUMPTO(oparg, 1);
     LABEL(dispatch);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
     LABEL(fast_dispatch);
 }
 
@@ -2500,7 +2501,7 @@ EMITTER_FOR(JUMP_IF_TRUE_OR_POP) {
     LABEL(do_jump);
     JUMPTO(oparg, 1);
     LABEL(dispatch);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
     LABEL(fast_dispatch);
 }
 
@@ -2515,7 +2516,7 @@ EMITTER_FOR(GET_ITER) {
     DECREF(iterable);
     GOTO_ERROR_IF_NOT(iter);
     PUSH(iter);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(GET_YIELD_FROM_ITER) {
@@ -2545,7 +2546,7 @@ EMITTER_FOR(GET_YIELD_FROM_ITER) {
     LABEL(exact_gen);
     PUSH(iterable);
     LABEL(dispatch);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(FOR_ITER) {
@@ -2572,7 +2573,7 @@ EMITTER_FOR(FOR_ITER) {
     DECREF(iter_obj);
     JUMPBY(oparg, 1);
     LABEL(next_instruction);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(BREAK_LOOP) {
@@ -2587,17 +2588,17 @@ EMITTER_FOR(CONTINUE_LOOP) {
 
 EMITTER_FOR(SETUP_LOOP) {
     DO_SETUP_BLOCK(LOOP, INSTR_OFFSET() + oparg);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(SETUP_EXCEPT) {
     DO_SETUP_BLOCK(EXCEPT, INSTR_OFFSET() + oparg);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(SETUP_FINALLY) {
     DO_SETUP_BLOCK(FINALLY_TRY, INSTR_OFFSET() + oparg);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 PyObject * special_lookup(PyObject *, _Py_Identifier *);
@@ -2618,14 +2619,14 @@ EMITTER_FOR(BEFORE_ASYNC_WITH) {
     DECREF(enter);
     GOTO_ERROR_IF_NOT(res);
     PUSH(res);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(SETUP_ASYNC_WITH) {
     JVALUE res = POP();
     DO_SETUP_BLOCK(FINALLY_TRY, INSTR_OFFSET() + oparg);
     PUSH(res);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(SETUP_WITH) {
@@ -2651,7 +2652,7 @@ EMITTER_FOR(SETUP_WITH) {
        of __enter__ on the stack. */
     DO_SETUP_BLOCK(FINALLY_TRY, INSTR_OFFSET() + oparg);
     PUSH(res);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(WITH_CLEANUP_START) {
@@ -2682,7 +2683,7 @@ EMITTER_FOR(WITH_CLEANUP_START) {
     INCREF(LOAD(excptr));
     PUSH(LOAD(excptr));
     PUSH(res);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(WITH_CLEANUP_FINISH) {
@@ -2702,7 +2703,7 @@ EMITTER_FOR(WITH_CLEANUP_FINISH) {
         JVALUE why_silenced = CALL_PyLong_FromLong(CONSTANT_LONG(WHY_SILENCED));
         PUSH(why_silenced);
     });
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 /* Private API for the LOAD_METHOD opcode. */
@@ -2738,7 +2739,7 @@ EMITTER_FOR(LOAD_METHOD) {
     PUSH(obj); // self
 
     LABEL(fin);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 static
@@ -2804,7 +2805,7 @@ EMITTER_FOR(CALL_METHOD) {
     XDECREF(POP());
     GOTO_ERROR_IF_NOT(LOAD(res));
     PUSH(LOAD(res));
-    CHECK_EVAL_BREAKER();
+    HARD_EVAL_BREAK_CHECK();
 }
 
 #if 0
@@ -2856,7 +2857,7 @@ EMITTER_FOR(CALL_FUNCTION) {
     DECREF(POP()); /* callable */
     GOTO_ERROR_IF_NOT(res);
     PUSH(res);
-    CHECK_EVAL_BREAKER();
+    HARD_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(CALL_FUNCTION_KW) {
@@ -2884,7 +2885,7 @@ EMITTER_FOR(CALL_FUNCTION_KW) {
     DECREF(names);
     GOTO_ERROR_IF_NOT(res);
     PUSH(res);
-    CHECK_EVAL_BREAKER();
+    HARD_EVAL_BREAK_CHECK();
 }
 
 /* Helper to convert "kwargs" to a dict, when it is not already an exact dict */
@@ -2952,7 +2953,7 @@ EMITTER_FOR(CALL_FUNCTION_EX) {
     }
     GOTO_ERROR_IF_NOT(result);
     PUSH(result);
-    CHECK_EVAL_BREAKER();
+    HARD_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(MAKE_FUNCTION) {
@@ -2991,7 +2992,7 @@ EMITTER_FOR(MAKE_FUNCTION) {
         STORE_FIELD(func, PyFunctionObject, func_defaults, ir_type_pyobject_ptr, defaults);
     }
     PUSH(CAST(ir_type_pyobject_ptr, func));
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(BUILD_SLICE) {
@@ -3006,7 +3007,7 @@ EMITTER_FOR(BUILD_SLICE) {
     }
     GOTO_ERROR_IF_NOT(slice);
     PUSH(slice);
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(FORMAT_VALUE) {
@@ -3064,7 +3065,7 @@ EMITTER_FOR(FORMAT_VALUE) {
     /* Done */
     LABEL(skip_format);
     PUSH(LOAD(valueptr));
-    CHECK_EVAL_BREAKER();
+    SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(EXTENDED_ARG) {
@@ -3338,7 +3339,7 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     IR_ASSERT(NOTBOOL(IR_PyErr_Occurred()));
 #endif
 
-    CHECK_EVAL_BREAKER_EX(0);
+    HARD_EVAL_BREAK_CHECK_EX(0);
 
     for (i = 0; i < inst_count; i++) {
         int opcode = _Py_OPCODE(code[i]);
@@ -3757,7 +3758,7 @@ void _emit_resume_stub(JITData *jd, ir_label resume_label, ir_label b_handler_ex
     GOTO_ERROR_IF_EX(jd->throwflag, b_handler_exception, stack_level, pb);
     IR_ASSERT(NOTBOOL(IR_PyErr_Occurred()));
     ir_cursor_set_pyblock(jd->func, stack_level, pb);
-    CHECK_EVAL_BREAKER_EX(target_inst_index);
+    HARD_EVAL_BREAK_CHECK_EX(target_inst_index);
     ir_cursor_clear_pyblock(jd->func);
     BRANCH(target_inst_label);
 }
@@ -3841,7 +3842,7 @@ void _emit_precursor(JITData *jd, ir_pyblock pb) {
     PUSH(tb_or_none);
     PUSH(val);
     PUSH(exc);
-    //CHECK_EVAL_BREAKER?
+    //SOFT_EVAL_BREAK_CHECK?
     BRANCH(pb->b_handler);
 }
 
@@ -3933,7 +3934,7 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr) {
             if (cur->b_type == IR_PYBLOCK_LOOP && why == IR_WHY_CONTINUE) {
                 /* Unwind stack without popping block. 'iter' remains on TOS */
                 UNWIND_TO_NEW(curlevel, cur->b_level + 1);
-                //CHECK_EVAL_BREAKER?
+                //SOFT_EVAL_BREAK_CHECK?
                 assert(expected_handler == cur->b_continue);
                 BRANCH(cur->b_continue);
                 why = IR_WHY_NOT;
@@ -3953,7 +3954,7 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr) {
             curlevel = cur->b_level;
 
             if (cur->b_type == IR_PYBLOCK_LOOP && why == IR_WHY_BREAK) {
-                //CHECK_EVAL_BREAKER?
+                //SOFT_EVAL_BREAK_CHECK?
                 assert(expected_handler == cur->b_handler);
                 BRANCH(cur->b_handler);
                 why = IR_WHY_NOT;
@@ -3985,7 +3986,7 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr) {
                     PUSH(none);
                 }
                 PUSH(CALL_PyLong_FromLong(CONSTANT_LONG((long)_ir_why_to_why(why))));
-                //CHECK_EVAL_BREAKER?
+                //SOFT_EVAL_BREAK_CHECK?
                 assert(expected_handler == cur->b_handler);
                 BRANCH(cur->b_handler);
                 why = IR_WHY_NOT;

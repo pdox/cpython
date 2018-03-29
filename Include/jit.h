@@ -12,6 +12,7 @@ extern int Py_JITDebugFlag;
 extern char *Py_JITDebugFunc;
 extern char *Py_JITDebugFile;
 extern int Py_JITSuper;
+extern int Py_JITEvalBreaks;
 
 /* Forward declaration */
 struct _frame;
