@@ -7,6 +7,7 @@ extern "C" {
 #include "adt_macros.h"
 #include "adt_bitset.h"
 #include "adt_vector.h"
+#include "adt_hashmap.h"
 
 #ifdef __cplusplus
 }

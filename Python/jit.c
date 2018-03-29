@@ -2,6 +2,61 @@
 #include "internal/pystate.h"
 #include "frameobject.h"
 #include "ir.h"
+#include "jit_eval_entrypoint.h"
+
+/* CallSiteSig map */
+static adt_hashmap csmap;
+
+int csmap_key_eq(void *pa, void *pb) {
+    PyJITCallSiteSig *a = *(PyJITCallSiteSig**)pa;
+    PyJITCallSiteSig *b = *(PyJITCallSiteSig**)pb;
+    if (a->hash != b->hash) return 0;
+    if (a->argcount != b->argcount) return 0;
+    if (a->kwnames && b->kwnames) {
+        int k = PyObject_RichCompareBool(a->kwnames, b->kwnames, Py_EQ);
+        assert(k >= 0);
+        if (!k) return 0;
+    } else if (a->kwnames || b->kwnames) {
+        return 0;
+    }
+    return 1;
+}
+
+size_t csmap_key_hash(void *pa) {
+    PyJITCallSiteSig *a = *(PyJITCallSiteSig**)pa;
+    return (size_t)a->hash;
+}
+
+PyJITCallSiteSig*
+PyJIT_CallSiteSig_GetOrCreate(int argcount, PyObject *kwnames) {
+    assert(argcount >= 0);
+    if (kwnames != NULL) {
+        assert(PyTuple_CheckExact(kwnames));
+        assert(PyTuple_GET_SIZE(kwnames) > 0);
+        assert(argcount >= PyTuple_GET_SIZE(kwnames));
+    }
+    PyJITCallSiteSig key;
+    key.hash = argcount + (kwnames ? PyObject_Hash(kwnames) : 0);
+    key.argcount = argcount;
+    key.kwnames = kwnames;
+
+    if (csmap == NULL)
+        csmap = adt_hashmap_new(sizeof(PyJITCallSiteSig*), sizeof(PyJITCallSiteSig*),
+                                csmap_key_eq, csmap_key_hash);
+
+    PyJITCallSiteSig *pkey = &key;
+    PyJITCallSiteSig *ret;
+    if (adt_hashmap_get(csmap, &pkey, &ret)) {
+        return ret;
+    }
+    ret = PyMem_RawMalloc(sizeof(PyJITCallSiteSig));
+    if (ret == NULL)
+        return NULL;
+    *ret = key;
+    Py_XINCREF(ret->kwnames);
+    adt_hashmap_insert(csmap, &ret, &ret);
+    return ret;
+}
 
 PyObject *
 PyJITFunction_New(PyObject *code, PyObject *globals, PyObject *builtins) {
@@ -16,6 +71,8 @@ PyJITFunction_New(PyObject *code, PyObject *globals, PyObject *builtins) {
     op->globals = globals;
     Py_XINCREF(builtins);
     op->builtins = builtins;
+
+    op->trampoline = NULL;
 
     op->parent = NULL;
     op->deps_head = NULL;
@@ -142,6 +199,12 @@ PyObject* PyJIT_Execute(PyFrameObject *f, int throwflag) {
             PyUnicode_AsUTF8(co->co_name),
             PyUnicode_AsUTF8(co->co_filename),
             co);
+    }
+    if (jf->eval_entrypoint == NULL) {
+        ir_object object = (ir_object)jf->object;
+        ir_object eval_entrypoint_object = PyJIT_MakeEvalEntrypoint((PyCodeObject*)jf->code, object->entrypoint);
+        jf->eval_entrypoint_object = eval_entrypoint_object;
+        jf->eval_entrypoint = (PyJIT_EvalEntryPoint)eval_entrypoint_object->entrypoint;
     }
     return jf->eval_entrypoint(f, throwflag);
 }

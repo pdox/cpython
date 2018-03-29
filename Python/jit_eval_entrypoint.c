@@ -12,6 +12,8 @@ typedef struct {
     ir_value throwflag;
 } _jitdata;
 
+/* See comment in jeval.c for the same define */
+#define DEAD_ARGS 2
 
 /* Make an EvalFrameDefault entrypoint for a JIT generated function.
    This has signature:
@@ -27,9 +29,18 @@ typedef struct {
 
    Note that for generators/coroutines, the direct function already
    has an eval-like signature, so this entrypoint is never required.
+
+   TODO: Deprecate this, replace with a trampoline.
  */
 ir_object
 PyJIT_MakeEvalEntrypoint(PyCodeObject *co, void *direct_entrypoint) {
+    if (Py_JITDebugFlag > 0) {
+        fprintf(stderr, "MakeEvalEntrypoint called for %s:%s (co=%p)\n",
+                PyUnicode_AsUTF8(co->co_name),
+                PyUnicode_AsUTF8(co->co_filename),
+                co);
+    }
+
     /* Should not be called for generators */
     assert(!(co->co_flags & (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR)));
 
@@ -85,10 +96,15 @@ PyJIT_MakeEvalEntrypoint(PyCodeObject *co, void *direct_entrypoint) {
        expects to create those cells for itself. We also need to create a new closures
        tuple to mimic the original. This is extremely wasteful, but this code shouldn't
        be called frequently. (famous last words...) */
-    ir_value* direct_args = (ir_value*)malloc(total_direct_args * sizeof(ir_value));
-    memset(direct_args, 0, total_direct_args * sizeof(ir_value));
+    ir_value* raw_direct_args = (ir_value*)malloc((DEAD_ARGS + total_direct_args) * sizeof(ir_value));
+    memset(raw_direct_args, 0, (DEAD_ARGS + total_direct_args) * sizeof(ir_value));
+
+    for (int i = 0; i < DEAD_ARGS; i++) {
+        raw_direct_args[i] = CONSTANT_PTR(ir_type_void_ptr, NULL);
+    }
 
     /* Extract arguments from cells */
+    ir_value *direct_args = &raw_direct_args[DEAD_ARGS];
     for (int j = 0; j < ncellvars; j++) {
         Py_ssize_t arg;
         if (co->co_cell2arg != NULL &&
@@ -129,13 +145,16 @@ PyJIT_MakeEvalEntrypoint(PyCodeObject *co, void *direct_entrypoint) {
     }
     assert(i == total_direct_args);
 
-    ir_type *direct_arg_types = (ir_type*)malloc(total_direct_args * sizeof(ir_type));
-    for (i = 0; i < total_direct_args; i++) {
-        direct_arg_types[i] = ir_type_pyobject_ptr;
+    ir_type *direct_arg_types = (ir_type*)malloc((DEAD_ARGS + total_direct_args) * sizeof(ir_type));
+    for (i = 0; i < DEAD_ARGS; i++) {
+        direct_arg_types[i] = ir_type_void_ptr;
     }
-    ir_type direct_sig = ir_create_function_type(jd->context, ir_type_pyobject_ptr, total_direct_args, direct_arg_types);
+    for (i = 0; i < total_direct_args; i++) {
+        direct_arg_types[DEAD_ARGS + i] = ir_type_pyobject_ptr;
+    }
+    ir_type direct_sig = ir_create_function_type(jd->context, ir_type_pyobject_ptr, DEAD_ARGS + total_direct_args, direct_arg_types);
     ir_value direct_func = ir_constant_from_ptr(jd->func, direct_sig, direct_entrypoint, "direct_entrypoint");
-    ir_value ret = ir_call(jd->func, direct_func, total_direct_args, direct_args);
+    ir_value ret = ir_call(jd->func, direct_func, DEAD_ARGS + total_direct_args, raw_direct_args);
 
     if (has_closure) {
         /* Before returning, we need to clear out and decref the temporary closure tuple */
@@ -164,7 +183,7 @@ PyJIT_MakeEvalEntrypoint(PyCodeObject *co, void *direct_entrypoint) {
         Py_UNREACHABLE();
     }
     free(buffers);
-    free(direct_args);
+    free(raw_direct_args);
     free(direct_arg_types);
     ir_context_destroy(jd->context);
     return object;

@@ -218,6 +218,9 @@ void _jit_macros_assert(int expr, const char *expr_str);
 #define IR_PyCFunction_Check(obj) \
     CMP_EQ(IR_Py_TYPE(obj), CONSTANT_PTR(ir_type_pytypeobject_ptr, &PyCFunction_Type))
 
+#define IR_PyFunction_Check(obj) \
+    CMP_EQ(IR_Py_TYPE(obj), CONSTANT_PTR(ir_type_pytypeobject_ptr, &PyFunction_Type))
+
 #define IR_PyExceptionClass_Check(x) \
     LOGICAL_AND_SC( \
         IR_PyType_Check((x)), \

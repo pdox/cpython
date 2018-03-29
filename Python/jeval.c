@@ -22,6 +22,12 @@ typedef void (*PyJITEmitHandlerFunction)(JITData *jd, int opcode);
 typedef void (*PyJITEmitterFunction)(JITData *jd, int next_instr_index, int opcode, int oparg);
 typedef void (*PyJITSpecialEmitterFunction)(JITData *jd);
 
+/* Because trampolines need their first two arguments (%rdi and %rsi)
+   for the callable and callsitesig, it makes sense to ignore the first two arguments
+   of the direct entrypoint, to match the alignment of the trampoline, so that we
+   don't have to shift the arguments around for the most common kind of call. */
+#define DEAD_ARGS 2
+
 typedef struct resume_entry {
     int f_lasti;
     ir_label resume_point;
@@ -192,6 +198,38 @@ int _label_to_instr_index(JITData *jd, ir_label target) {
     }
     assert(i < jd->inst_count);
     return i;
+}
+
+/* Fetch the previous instruction.
+   Places the values in 'opcode_ptr' and 'oparg_ptr' respectively. (both int*)
+   This transparently handles EXTENDED_ARG.
+ */
+#define FETCH_PREV_INSTR(opcode_ptr, oparg_ptr) \
+    _fetch_prev_instr(jd, next_instr_index, (opcode_ptr), (oparg_ptr))
+
+static void _fetch_prev_instr(JITData *jd, int next_instr_index, int *opcode_ptr, int *oparg_ptr) {
+    _Py_CODEUNIT *code = (_Py_CODEUNIT*)PyBytes_AS_STRING(jd->co->co_code);
+
+    /* Skip EXTENDED_ARG for the current instruction */
+    int i = next_instr_index - 2;
+    while (i >= 0 && _Py_OPCODE(code[i]) == EXTENDED_ARG) --i;
+    if (i < 0) {
+        Py_FatalError("FETCH_PREV_INSTR called, but no previous instruction exists");
+    }
+
+    /* i is now the index of the previous instruction */
+    *opcode_ptr = _Py_OPCODE(code[i]);
+
+    /* The previous instruction may have EXTENDED_ARG. Find the first one. */
+    while (i > 0 && _Py_OPCODE(code[i-1]) == EXTENDED_ARG) --i;
+
+    int oparg = _Py_OPARG(code[i]);
+    while (_Py_OPCODE(code[i]) == EXTENDED_ARG) {
+        i++;
+        oparg = (oparg << 8) | _Py_OPARG(code[i]);
+    }
+    assert(_Py_OPCODE(code[i]) == *opcode_ptr);
+    *oparg_ptr = oparg;
 }
 
 #define DO_SETUP_BLOCK(irkind, arg) do { \
@@ -2703,31 +2741,61 @@ EMITTER_FOR(LOAD_METHOD) {
     CHECK_EVAL_BREAKER();
 }
 
+static
+ir_type _create_call_signature(JITData *jd, int oparg) {
+    ir_type ret;
+    /* PyObject* (PyFunctionObject*, PyJIT_CallSiteSig*, pyarg1, ..., pyargN) */
+    ir_type *argtypes = (ir_type*)malloc((2 + oparg) * sizeof(ir_type));
+    argtypes[0] = ir_type_pyfunctionobject_ptr;
+    argtypes[1] = ir_type_pyjitcallsitesig_ptr;
+    for (int i = 0; i < oparg; i++) {
+        argtypes[2 + i] = ir_type_pyobject_ptr;
+    }
+    ret = ir_create_function_type(jd->context, ir_type_pyobject_ptr, 2 + oparg, argtypes);
+    free(argtypes);
+    return ret;
+}
+
 /* From ceval */
 PyObject *call_function_extern(PyObject **, Py_ssize_t,
                                PyObject *);
 
-ir_value _emit_call_function(JITData *jd, ir_value callable, int oparg, ir_value kwnames) {
-    assert(jd->tmpstack_size >= (size_t)oparg + 1);
-
-    /* This assumes the arguments are at the top of the "stack" */
-    STORE_AT_INDEX(jd->tmpstack, CONSTANT_INT(0), callable);
-    for (int i = 0; i < oparg; i++) {
-        STORE_AT_INDEX(jd->tmpstack, CONSTANT_INT(i+1), PEEK(oparg-i));
-    }
-    JVALUE endptr = ir_get_index_ptr(jd->func, jd->tmpstack, CONSTANT_INT(oparg+1));
-    JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr_ptr, ir_type_pyssizet, ir_type_pyobject_ptr);
-    JVALUE res = CALL_NATIVE(sig, call_function_extern, endptr, CONSTANT_PYSSIZET(oparg), kwnames);
-    return res;
+ir_value _emit_call_function(JITData *jd, ir_value callable, int oparg, PyObject *kwnames) {
+    JVALUE res = ALLOCA(ir_type_pyobject_ptr);
+    IF_ELSE(IR_PyFunction_Check(callable), IR_SEMILIKELY, {
+        PyJITCallSiteSig* css = PyJIT_CallSiteSig_GetOrCreate(oparg, kwnames);
+        JTYPE sig = _create_call_signature(jd, oparg);
+        JVALUE callable_casted = CAST(ir_type_pyfunctionobject_ptr, callable);
+        JVALUE trampoline = LOAD_FIELD(callable_casted, PyFunctionObject, func_jit_call, sig);
+        ir_value *args = (ir_value*)malloc((2 + oparg) * sizeof(ir_value));
+        args[0] = callable_casted;
+        args[1] = CONSTANT_PTR(ir_type_pyjitcallsitesig_ptr, css);
+        for (int i = 0; i < oparg; i++) {
+            args[2 + i] = PEEK(oparg - i);
+        }
+        STORE(res, ir_call(jd->func, trampoline, 2 + oparg, args));
+        free(args);
+    }, {
+        /* This assumes the arguments are at the top of the "stack" */
+        assert(jd->tmpstack_size >= (size_t)oparg + 1);
+        STORE_AT_INDEX(jd->tmpstack, CONSTANT_INT(0), callable);
+        for (int i = 0; i < oparg; i++) {
+            STORE_AT_INDEX(jd->tmpstack, CONSTANT_INT(i+1), PEEK(oparg-i));
+        }
+        JVALUE endptr = ir_get_index_ptr(jd->func, jd->tmpstack, CONSTANT_INT(oparg+1));
+        JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr_ptr, ir_type_pyssizet, ir_type_pyobject_ptr);
+        STORE(res, CALL_NATIVE(sig, call_function_extern, endptr, CONSTANT_PYSSIZET(oparg), CONSTANT_PYOBJ(kwnames)));
+    });
+    return LOAD(res);
 }
 
 EMITTER_FOR(CALL_METHOD) {
     JVALUE meth = PEEK(oparg + 2);
     JVALUE res = ALLOCA(ir_type_pyobject_ptr);
     IF_ELSE(NOTBOOL(meth), IR_SOMETIMES, {
-        STORE(res, _emit_call_function(jd, PEEK(oparg+1), oparg, CONSTANT_PYOBJ(NULL)));
+        STORE(res, _emit_call_function(jd, PEEK(oparg+1), oparg, NULL));
     }, {
-        STORE(res, _emit_call_function(jd, meth, oparg + 1, CONSTANT_PYOBJ(NULL)));
+        STORE(res, _emit_call_function(jd, meth, oparg + 1, NULL));
     });
     for (int i = 0; i < oparg; i++) {
         DECREF(POP());
@@ -2781,7 +2849,7 @@ _call_function(JITData *jd, size_t nargs, PyObject *kwnames) {
 #endif
 
 EMITTER_FOR(CALL_FUNCTION) {
-    JVALUE res = _emit_call_function(jd, PEEK(oparg+1), oparg, CONSTANT_PYOBJ(NULL));
+    JVALUE res = _emit_call_function(jd, PEEK(oparg+1), oparg, NULL);
     for (int i = 0; i < oparg; i++) {
         DECREF(POP());
     }
@@ -2796,7 +2864,19 @@ EMITTER_FOR(CALL_FUNCTION_KW) {
     IR_ASSERT(IR_PyTuple_CheckExact(names));
     IR_ASSERT(CMP_LE(IR_PyTuple_GET_SIZE(names), CONSTANT_PYSSIZET(oparg)));
 
-    JVALUE res = _emit_call_function(jd, PEEK(oparg+1), oparg, names);
+    /* CALL_FUNCTION_KW is always immediately preceded by LOAD_CONST to fetch
+       kwnames. We want kwnames to be available at compile time, so grab it
+       directly here. */
+    int prev_opcode;
+    int prev_oparg;
+    FETCH_PREV_INSTR(&prev_opcode, &prev_oparg);
+    if (prev_opcode != LOAD_CONST) {
+        Py_FatalError("Expected LOAD_CONST before CALL_FUNCTION_KW");
+    }
+    PyObject *kwnames = PyTuple_GET_ITEM(jd->co->co_consts, prev_oparg);
+    IR_ASSERT(CMP_EQ(names, CONSTANT_PYOBJ(kwnames)));
+
+    JVALUE res = _emit_call_function(jd, PEEK(oparg+1), oparg, kwnames);
     for (int i = 0; i < oparg; i++) {
         DECREF(POP());
     }
@@ -3045,7 +3125,7 @@ _initialize_virtual_locals(JITData *jd)
         if (slotmap[i] == -1) {
             ir_dellocal(jd->func, i);
         } else {
-            ir_value value = ir_func_get_argument(jd->func, slotmap[i]);
+            ir_value value = ir_func_get_argument(jd->func, DEAD_ARGS + slotmap[i]);
             INCREF(value);
             ir_setlocal(jd->func, i, value);
         }
@@ -3059,7 +3139,7 @@ _initialize_virtual_locals(JITData *jd)
         if (src == -1) {
             value = jd->null;
         } else {
-            value = ir_func_get_argument(jd->func, slotmap[i]);
+            value = ir_func_get_argument(jd->func, DEAD_ARGS + slotmap[i]);
         }
         ir_value cell = CALL_PyCell_New(value);
         STORE(jd->fastlocals_values[i], cell);
@@ -3068,7 +3148,7 @@ _initialize_virtual_locals(JITData *jd)
 
     /* Copy closure cells */
     if (jd->has_closure) {
-        ir_value closure = ir_func_get_argument(jd->func, jd->total_pyargs);
+        ir_value closure = ir_func_get_argument(jd->func, DEAD_ARGS + jd->total_pyargs);
         ir_value ob_item = IR_PyTuple_OB_ITEM(closure);
         i = co->co_nlocals + ncellvars;
         for (int j = 0; j < nfreevars; j++, i++) {
@@ -3194,7 +3274,7 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
             GOTO_ERROR_IF_NOT(rflocals);
         } else {
             assert(jd->has_locals);
-            rflocals = ir_func_get_argument(jd->func, jd->total_direct_args - 1);
+            rflocals = ir_func_get_argument(jd->func, DEAD_ARGS + jd->total_direct_args - 1);
             INCREF(rflocals);
         }
         IR_PyRunFrame_PushNoFrame(jd->rf, jd->tstate, jf, rflocals);
@@ -3341,10 +3421,12 @@ int _should_force_real_locals(PyCodeObject *co) {
     }
 
     /* If the function's hash is in jit_locals_hack, force real locals. */
-    uint64_t hash = djb2_hash((unsigned char*)code, inst_count * sizeof(_Py_CODEUNIT));
-    void *match = bsearch(&hash, jit_locals_hack, sizeof(jit_locals_hack)/sizeof(uint64_t), sizeof(uint64_t), _uint64_cmp);
-    if (match)
-        return 1;
+    if (Py_JITSuper) {
+        uint64_t hash = djb2_hash((unsigned char*)code, inst_count * sizeof(_Py_CODEUNIT));
+        void *match = bsearch(&hash, jit_locals_hack, sizeof(jit_locals_hack)/sizeof(uint64_t), sizeof(uint64_t), _uint64_cmp);
+        if (match)
+            return 1;
+    }
     return 0;
 }
 
@@ -3392,21 +3474,23 @@ _PyJIT_CodeGen(PyCodeObject *co, PyObject *globals, PyObject *builtins) {
     }
 
     if (Py_JITDebugFlag > 0) {
-        fprintf(stderr, "Entering CodeGen for %s:%s ===>\n",
+        fprintf(stderr, "Entering CodeGen for %s:%s\n",
             PyUnicode_AsUTF8(co->co_filename),
             PyUnicode_AsUTF8(co->co_name));
-        fprintf(stderr, "    code = %p\n", jd->co);
-        fprintf(stderr, "    globals = %p\n", jd->globals);
-        fprintf(stderr, "    builtins = %p\n", jd->builtins);
-        fprintf(stderr, "    is_gen = %d\n", jd->is_gen);
-        fprintf(stderr, "    update_blockstack = %d\n", jd->update_blockstack);
-        fprintf(stderr, "    use_virtual_locals = %d\n", jd->use_virtual_locals);
-        fprintf(stderr, "    has_vararg = %d\n", jd->has_vararg);
-        fprintf(stderr, "    has_kwdict = %d\n", jd->has_kwdict);
-        fprintf(stderr, "    has_closure = %d\n", jd->has_closure);
-        fprintf(stderr, "    has_locals = %d\n", jd->has_locals);
-        fprintf(stderr, "    use_frame_object = %d\n", jd->use_frame_object);
-        fprintf(stderr, "    total_pyargs = %ld\n", (long)jd->total_pyargs);
+        if (Py_JITDebugFlag > 1) {
+            fprintf(stderr, "    code = %p\n", jd->co);
+            fprintf(stderr, "    globals = %p\n", jd->globals);
+            fprintf(stderr, "    builtins = %p\n", jd->builtins);
+            fprintf(stderr, "    is_gen = %d\n", jd->is_gen);
+            fprintf(stderr, "    update_blockstack = %d\n", jd->update_blockstack);
+            fprintf(stderr, "    use_virtual_locals = %d\n", jd->use_virtual_locals);
+            fprintf(stderr, "    has_vararg = %d\n", jd->has_vararg);
+            fprintf(stderr, "    has_kwdict = %d\n", jd->has_kwdict);
+            fprintf(stderr, "    has_closure = %d\n", jd->has_closure);
+            fprintf(stderr, "    has_locals = %d\n", jd->has_locals);
+            fprintf(stderr, "    use_frame_object = %d\n", jd->use_frame_object);
+            fprintf(stderr, "    total_pyargs = %ld\n", (long)jd->total_pyargs);
+        }
     }
 
 
@@ -3419,11 +3503,14 @@ _PyJIT_CodeGen(PyCodeObject *co, PyObject *globals, PyObject *builtins) {
     } else {
         /* Signature: func(...pyargs..., closure?, locals?); */
         jd->total_direct_args = jd->total_pyargs + jd->has_closure + jd->has_locals;
-        ir_type *argtypes = (ir_type*)malloc(jd->total_direct_args * sizeof(ir_type));
-        for (Py_ssize_t i = 0; i < jd->total_direct_args; i++) {
-            argtypes[i] = ir_type_pyobject_ptr;
+        ir_type *argtypes = (ir_type*)malloc((DEAD_ARGS + jd->total_direct_args) * sizeof(ir_type));
+        for (Py_ssize_t i = 0; i < DEAD_ARGS; i++) {
+            argtypes[i] = ir_type_void_ptr;
         }
-        sig = ir_create_function_type(jd->context, ir_type_pyobject_ptr, jd->total_direct_args, argtypes);
+        for (Py_ssize_t i = 0; i < jd->total_direct_args; i++) {
+            argtypes[DEAD_ARGS + i] = ir_type_pyobject_ptr;
+        }
+        sig = ir_create_function_type(jd->context, ir_type_pyobject_ptr, DEAD_ARGS + jd->total_direct_args, argtypes);
         free(argtypes);
     }
     jd->func = ir_func_new(jd->context, PyUnicode_AsUTF8(co->co_name), sig);
@@ -3459,9 +3546,6 @@ _PyJIT_CodeGen(PyCodeObject *co, PyObject *globals, PyObject *builtins) {
         jf->eval_entrypoint = (PyJIT_EvalEntryPoint)object->entrypoint;
     } else {
         jf->direct_entrypoint = (PyJIT_DirectEntryPoint)object->entrypoint;
-        ir_object eval_entrypoint_object = PyJIT_MakeEvalEntrypoint(co, object->entrypoint);
-        jf->eval_entrypoint_object = eval_entrypoint_object;
-        jf->eval_entrypoint = (PyJIT_EvalEntryPoint)eval_entrypoint_object->entrypoint;
     }
     ir_context_destroy(jd->context);
     if (jd->fastlocals_values) {

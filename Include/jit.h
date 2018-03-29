@@ -4,18 +4,21 @@
 extern "C" {
 #endif
 
+#include "jitcall.h"
+
 /* Interface exposed to the rest of cPython */
 extern int Py_JITFlag;
 extern int Py_JITDebugFlag;
 extern char *Py_JITDebugFunc;
 extern char *Py_JITDebugFile;
+extern int Py_JITSuper;
 
 /* Forward declaration */
 struct _frame;
 typedef struct _frame PyFrameObject;
 
 typedef PyObject* (*PyJIT_EvalEntryPoint)(PyFrameObject *f, int throwflag);
-typedef PyObject* (*PyJIT_DirectEntryPoint)(PyObject *arg0, ...);
+typedef PyObject* (*PyJIT_DirectEntryPoint)(void *unused1, void *unused2, ...);
 
 /* PyJITFunctionObject is a Python object that holds a reference to
    JIT-generated native code and all other Python objects needed to keep
@@ -42,6 +45,9 @@ struct _PyJITFunctionObject {
     PyObject *code;
     PyObject *globals;
     PyObject *builtins;
+
+    /* Trampoline */
+    PyJIT_CallTrampoline *trampoline;
 
     /* This is a linked list of all PyJITFunctionObject's that may be
        needed as a result of MAKE_FUNCTION calls inside 'code'. This is here

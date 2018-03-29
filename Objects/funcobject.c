@@ -7,6 +7,10 @@
 #include "code.h"
 #include "structmember.h"
 
+#define RESET_TRAMPOLINE(op) do { \
+    ((PyFunctionObject*)(op))->func_jit_call = PyJIT_CallTrampoline_GetBootstrap(); \
+} while (0)
+
 PyObject *
 PyFunction_NewWithQualName(PyObject *code, PyObject *globals, PyObject *qualname)
 {
@@ -24,6 +28,7 @@ PyFunction_NewWithQualName(PyObject *code, PyObject *globals, PyObject *qualname
     if (op == NULL)
         return NULL;
 
+    RESET_TRAMPOLINE(op);
     op->func_jit_function = NULL;
     op->func_jit_parent = NULL;
     op->func_weakreflist = NULL;
@@ -132,6 +137,7 @@ PyFunction_SetDefaults(PyObject *op, PyObject *defaults)
         return -1;
     }
     Py_XSETREF(((PyFunctionObject *)op)->func_defaults, defaults);
+    RESET_TRAMPOLINE(op);
     return 0;
 }
 
@@ -163,6 +169,7 @@ PyFunction_SetKwDefaults(PyObject *op, PyObject *defaults)
         return -1;
     }
     Py_XSETREF(((PyFunctionObject *)op)->func_kwdefaults, defaults);
+    RESET_TRAMPOLINE(op);
     return 0;
 }
 
@@ -195,6 +202,7 @@ PyFunction_SetClosure(PyObject *op, PyObject *closure)
         return -1;
     }
     Py_XSETREF(((PyFunctionObject *)op)->func_closure, closure);
+    RESET_TRAMPOLINE(op);
     return 0;
 }
 
@@ -277,6 +285,7 @@ func_set_code(PyFunctionObject *op, PyObject *value)
     /* Clear cached JIT info */
     Py_CLEAR(op->func_jit_function);
     Py_CLEAR(op->func_jit_parent);
+    RESET_TRAMPOLINE(op);
 
     Py_INCREF(value);
     Py_XSETREF(op->func_code, value);
@@ -351,6 +360,7 @@ func_set_defaults(PyFunctionObject *op, PyObject *value)
     }
     Py_XINCREF(value);
     Py_XSETREF(op->func_defaults, value);
+    RESET_TRAMPOLINE(op);
     return 0;
 }
 
@@ -378,6 +388,7 @@ func_set_kwdefaults(PyFunctionObject *op, PyObject *value)
     }
     Py_XINCREF(value);
     Py_XSETREF(op->func_kwdefaults, value);
+    RESET_TRAMPOLINE(op);
     return 0;
 }
 

@@ -20,6 +20,7 @@ extern "C" {
 
 typedef struct {
     PyObject_HEAD
+    void     *func_jit_call;     /* JIT call entrypoint */
     PyObject *func_jit_function; /* Cached PyJITFunction */
     PyObject *func_jit_parent;   /* If this function is a closure (created inside)
                                     another function which has JIT code, this is a

@@ -1,3 +1,9 @@
+/* Round down size "n" to be a multiple of "a". */
+#define ADT_ROUND_DOWN(n, a) ((size_t)(n) & ~(size_t)((a) - 1))
+
+/* Round up size "n" to be a multiple of "a". */
+#define ADT_ROUND_UP(n, a) (((size_t)(n) + (size_t)((a) - 1)) & ~(size_t)((a) - 1))
+
 /* Insert 'b' at the front of a doubly-linked list */
 #define ADT_LL_INSERT_FIRST(head, tail, b) do { \
     b->prev = NULL; \
