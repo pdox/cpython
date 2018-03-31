@@ -769,6 +769,39 @@ ir_value ir_constant_from_ptr(ir_func func, ir_type type, void *value, const cha
     return IR_INSTR_INSERT();
 }
 
+/* Arbitrary integer constant */
+static inline
+ir_value ir_constant_from_int64(ir_func func, ir_type type, int64_t value, const char *debug_name) {
+    assert(ir_type_is_integral(type));
+    IR_INSTR_ALLOC(ir_instr_constant, ir_opcode_constant, type, 0, 0)
+    /* TODO: Make this uniform for all integral types */
+    switch (type->kind) {
+#define PROCESS(name, ctype, printf_string, imm_identifier, va_arg_type) \
+    case ir_type_kind_ ## name: instr->imm. imm_identifier = (ctype)value; break;
+#include "ir_integral_types.def"
+#undef PROCESS
+    default: abort(); /* Unhandled type */
+    }
+    instr->debug_name = debug_name ? _ir_strdup(func->context, debug_name) : NULL;
+    return IR_INSTR_INSERT();
+}
+
+static inline
+ir_value ir_constant_from_uint64(ir_func func, ir_type type, uint64_t value, const char *debug_name) {
+    assert(ir_type_is_integral(type));
+    IR_INSTR_ALLOC(ir_instr_constant, ir_opcode_constant, type, 0, 0)
+    /* TODO: Make this uniform for all integral types */
+    switch (type->kind) {
+#define PROCESS(name, ctype, printf_string, imm_identifier, va_arg_type) \
+    case ir_type_kind_ ## name: instr->imm. imm_identifier = (ctype)value; break;
+#include "ir_integral_types.def"
+#undef PROCESS
+    default: abort(); /* Unhandled type */
+    }
+    instr->debug_name = debug_name ? _ir_strdup(func->context, debug_name) : NULL;
+    return IR_INSTR_INSERT();
+}
+
 /*****************************************************************************/
 
 IR_PROTOTYPE(ir_instr_func_arg)

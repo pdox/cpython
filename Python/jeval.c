@@ -90,7 +90,6 @@ typedef struct _JITData {
                               Needed for generators, where execution can switch between
                               the JIT and the interpreter (e.g. if tracing is enabled
                               while yielding) */
-    int use_patchpoint_error_handler;
 
     ir_label body_start;
 
@@ -455,7 +454,34 @@ static inline void _emit_eval_break_check(JITData *jd, ir_value next_instr_index
 
 void format_exc_check_arg(PyObject *, const char *, PyObject *);
 
-#define CALL_PyDict_New()  CALL_NATIVE(jd->sig_o, PyDict_New)
+#define RTCALL_NZ(sig, native_func, ...)  _rtcall_nz(jd, CALL_NATIVE((sig), (native_func), ##__VA_ARGS__))
+#define RTCALL_Z(sig, native_func, ...)   _rtcall_z(jd, CALL_NATIVE((sig), (native_func), ##__VA_ARGS__))
+#define RTCALL_GE0(sig, native_func, ...) _rtcall_ge0(jd, CALL_NATIVE((sig), (native_func), ##__VA_ARGS__))
+
+static inline ir_value _rtcall_nz(JITData *jd, ir_value v) {
+    if (!Py_JITNoExc) {
+        GOTO_ERROR_IF_NOT(v);
+    }
+    return v;
+}
+
+static inline ir_value _rtcall_z(JITData *jd, ir_value v) {
+    if (!Py_JITNoExc) {
+        GOTO_ERROR_IF(v);
+    }
+    return v;
+}
+
+static inline ir_value _rtcall_ge0(JITData *jd, ir_value v) {
+    assert(ir_type_is_integral(ir_typeof(v)));
+    if (!Py_JITNoExc) {
+        ir_value zero = ir_constant_from_uint64(jd->func, ir_typeof(v), 0, NULL);
+        GOTO_ERROR_IF_NOT(CMP_GE(v, zero));
+    }
+    return v;
+}
+
+#define RTCALL_PyDict_New()  RTCALL_NZ(jd->sig_o, PyDict_New)
 
 #define CALL_format_exc_check_arg(exc, msg, name) do { \
     JTYPE _sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr, ir_type_char_ptr, ir_type_pyobject_ptr); \
@@ -722,10 +748,10 @@ EMITTER_FOR(DUP_TOP_TWO) {
 #define EMIT_AS_UNARY_OP(op, func) \
     EMITTER_FOR_BASE(_ ## op) { \
         JVALUE objval = TOP(); \
-        JVALUE res = CALL_NATIVE(jd->sig_oo, func, objval); \
+        JVALUE res = RTCALL_NZ(jd->sig_oo, func, objval); \
+        STACKADJ(-1); \
         DECREF(objval); \
-        SET_TOP(res); \
-        GOTO_ERROR_IF_NOT(res); \
+        PUSH(res); \
         SOFT_EVAL_BREAK_CHECK(); \
     }
 
@@ -735,42 +761,37 @@ EMIT_AS_UNARY_OP(UNARY_INVERT, PyNumber_Invert)
 
 EMITTER_FOR(UNARY_NOT) {
     JVALUE value = TOP();
-    JVALUE err = CALL_NATIVE(jd->sig_io, PyObject_IsTrue, value);
+    JVALUE err = RTCALL_GE0(jd->sig_io, PyObject_IsTrue, value);
+    STACKADJ(-1);
     DECREF(value);
 
-    /* Handle error case, err < 0 (unlikely) */
-    IF(CMP_LT(err, CONSTANT_INT(0)), IR_UNLIKELY, {
-        STACKADJ(-1);
-        GOTO_ERROR();
-    });
-
-    /* Handle err > 0 case */
+    /* err >= 0 */
     JVALUE obj = TERNARY(err, CONSTANT_PYOBJ(Py_False), CONSTANT_PYOBJ(Py_True));
     INCREF(obj);
-    SET_TOP(obj);
+    PUSH(obj);
     SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(BINARY_POWER) {
-    JVALUE exp = POP();
-    JVALUE base = TOP();
-    JVALUE res = CALL_NATIVE(jd->sig_oooo, PyNumber_Power, base, exp, CONSTANT_PYOBJ(Py_None));
+    JVALUE exp = TOP();
+    JVALUE base = SECOND();
+    JVALUE res = RTCALL_NZ(jd->sig_oooo, PyNumber_Power, base, exp, CONSTANT_PYOBJ(Py_None));
+    STACKADJ(-2);
     DECREF(base);
     DECREF(exp);
-    SET_TOP(res);
-    GOTO_ERROR_IF_NOT(res);
+    PUSH(res);
     SOFT_EVAL_BREAK_CHECK();
 }
 
 #define EMIT_AS_BINARY_OP(op, func) \
     EMITTER_FOR_BASE(_ ## op) { \
-        JVALUE right = POP(); \
-        JVALUE left = TOP(); \
-        JVALUE res = CALL_NATIVE(jd->sig_ooo, func, left, right); \
+        JVALUE right = TOP(); \
+        JVALUE left = SECOND(); \
+        JVALUE res = RTCALL_NZ(jd->sig_ooo, func, left, right); \
+        STACKADJ(-2); \
         DECREF(left); \
         DECREF(right); \
-        SET_TOP(res); \
-        GOTO_ERROR_IF_NOT(res); \
+        PUSH(res); \
         SOFT_EVAL_BREAK_CHECK(); \
     }
 
@@ -790,31 +811,31 @@ EMIT_AS_BINARY_OP(BINARY_OR, PyNumber_Or)
 
 
 EMITTER_FOR(LIST_APPEND) {
-    JVALUE v = POP();
-    JVALUE list = PEEK(oparg);
-    JVALUE err = CALL_NATIVE(jd->sig_ioo, PyList_Append, list, v);
+    JVALUE v = TOP();
+    JVALUE list = PEEK(oparg + 1);
+    RTCALL_Z(jd->sig_ioo, PyList_Append, list, v);
+    STACKADJ(-1);
     DECREF(v);
-    GOTO_ERROR_IF(err);
     SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(SET_ADD) {
-    JVALUE v = POP();
-    JVALUE set = PEEK(oparg);
-    JVALUE err = CALL_NATIVE(jd->sig_ioo, PySet_Add, set, v);
+    JVALUE v = TOP();
+    JVALUE set = PEEK(oparg + 1);
+    RTCALL_Z(jd->sig_ioo, PySet_Add, set, v);
+    STACKADJ(-1);
     DECREF(v);
-    GOTO_ERROR_IF(err);
     SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(INPLACE_POWER) {
-    JVALUE exp = POP();
-    JVALUE base = TOP();
-    JVALUE res = CALL_NATIVE(jd->sig_oooo, PyNumber_InPlacePower, base, exp, CONSTANT_PYOBJ(Py_None));
+    JVALUE exp = TOP();
+    JVALUE base = SECOND();
+    JVALUE res = RTCALL_NZ(jd->sig_oooo, PyNumber_InPlacePower, base, exp, CONSTANT_PYOBJ(Py_None));
+    STACKADJ(-2);
     DECREF(base);
     DECREF(exp);
-    SET_TOP(res);
-    GOTO_ERROR_IF_NOT(res);
+    PUSH(res);
     SOFT_EVAL_BREAK_CHECK();
 }
 
@@ -835,13 +856,12 @@ EMITTER_FOR(STORE_SUBSCR) {
     JVALUE sub = TOP();
     JVALUE container = SECOND();
     JVALUE v = THIRD();
-    STACKADJ(-3);
     /* container[sub] = v */
-    JVALUE err = CALL_NATIVE(jd->sig_iooo, PyObject_SetItem, container, sub, v);
+    RTCALL_Z(jd->sig_iooo, PyObject_SetItem, container, sub, v);
+    STACKADJ(-3);
     DECREF(v);
     DECREF(container);
     DECREF(sub);
-    GOTO_ERROR_IF(err);
     SOFT_EVAL_BREAK_CHECK();
 }
 
@@ -900,40 +920,39 @@ int _store_annotation_helper(PyObject *locals, PyObject *name, PyObject *ann) {
 
 EMITTER_FOR(STORE_ANNOTATION) {
     PyObject *name = GETNAME(oparg);
-    JVALUE ann = POP();
+    JVALUE ann = TOP();
     JVALUE locals = LOAD_F_LOCALS();
-    JVALUE err = CALL_NATIVE(jd->sig_iooo, _store_annotation_helper, locals, CONSTANT_PYOBJ(name), ann);
+    RTCALL_Z(jd->sig_iooo, _store_annotation_helper, locals, CONSTANT_PYOBJ(name), ann);
+    STACKADJ(-1);
     DECREF(ann);
-    GOTO_ERROR_IF(err);
     SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(DELETE_SUBSCR) {
     JVALUE sub = TOP();
     JVALUE container = SECOND();
-    STACKADJ(-2);
     /* del container[sub] */
-    JVALUE err = CALL_NATIVE(jd->sig_ioo, PyObject_DelItem, container, sub);
+    RTCALL_Z(jd->sig_ioo, PyObject_DelItem, container, sub);
+    STACKADJ(-2);
     DECREF(container);
     DECREF(sub);
-    GOTO_ERROR_IF(err);
     SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(PRINT_EXPR) {
     _Py_IDENTIFIER(displayhook);
-    JVALUE value = POP();
+    JVALUE value = TOP();
     JTYPE sig1 = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_void_ptr);
+    // CUSTOM SITE
     JVALUE hook = CALL_NATIVE(sig1, _PySys_GetObjectId, CONSTANT_VOID_PTR(&PyId_displayhook));
     IF_NOT(hook, IR_UNLIKELY, {
         CALL_PyErr_SetString(PyExc_RuntimeError, "lost sys.displayhook");
-        DECREF(value);
         GOTO_ERROR();
     });
-    JVALUE res = CALL_NATIVE(jd->sig_oooo, PyObject_CallFunctionObjArgs, hook, value, jd->null);
-    DECREF(value);
-    GOTO_ERROR_IF_NOT(res);
+    JVALUE res = RTCALL_NZ(jd->sig_oooo, PyObject_CallFunctionObjArgs, hook, value, jd->null);
     DECREF(res);
+    STACKADJ(-1);
+    DECREF(value);
     SOFT_EVAL_BREAK_CHECK();
 }
 
@@ -1180,12 +1199,14 @@ EMITTER_FOR(YIELD_FROM) {
 }
 
 EMITTER_FOR(YIELD_VALUE) {
-    JVALUE v = POP();
+    JVALUE v = TOP();
     if (jd->co->co_flags & CO_ASYNC_GENERATOR) {
-        JVALUE wrapped = CALL_NATIVE(jd->sig_oo, _PyAsyncGenValueWrapperNew, v);
+        JVALUE wrapped = RTCALL_NZ(jd->sig_oo, _PyAsyncGenValueWrapperNew, v);
+        STACKADJ(-1);
         DECREF(v);
-        GOTO_ERROR_IF_NOT(wrapped);
         v = wrapped;
+    } else {
+        STACKADJ(-1);
     }
     ir_yield(jd->func, next_instr_index, v, jd->exit, jd->jmptab[next_instr_index], NULL);
 }
@@ -1247,8 +1268,7 @@ _load_build_class_helper(PyObject *builtins) {
 
 EMITTER_FOR(LOAD_BUILD_CLASS) {
     JVALUE builtins = LOAD_F_BUILTINS();
-    JVALUE bc = CALL_NATIVE(jd->sig_oo, _load_build_class_helper, builtins);
-    GOTO_ERROR_IF_NOT(bc);
+    JVALUE bc = RTCALL_NZ(jd->sig_oo, _load_build_class_helper, builtins);
     PUSH(bc);
     SOFT_EVAL_BREAK_CHECK();
 }
@@ -1465,36 +1485,36 @@ EMITTER_FOR(STORE_ATTR) {
     PyObject *name = GETNAME(oparg)
     JVALUE owner = TOP();
     JVALUE v = SECOND();
+    RTCALL_Z(jd->sig_iooo, PyObject_SetAttr, owner, CONSTANT_PYOBJ(name), v);
     STACKADJ(-2);
-    JVALUE err = CALL_NATIVE(jd->sig_iooo, PyObject_SetAttr, owner, CONSTANT_PYOBJ(name), v);
     DECREF(v);
     DECREF(owner);
-    GOTO_ERROR_IF(err);
     SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(DELETE_ATTR) {
     PyObject *name = GETNAME(oparg);
-    JVALUE owner = POP();
-    JVALUE err = CALL_NATIVE(jd->sig_iooo, PyObject_SetAttr, owner, CONSTANT_PYOBJ(name), CONSTANT_PYOBJ(NULL));
+    JVALUE owner = TOP();
+    RTCALL_Z(jd->sig_iooo, PyObject_SetAttr, owner, CONSTANT_PYOBJ(name), CONSTANT_PYOBJ(NULL));
+    STACKADJ(-1);
     DECREF(owner);
-    GOTO_ERROR_IF(err);
     SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(STORE_GLOBAL) {
     PyObject *name = GETNAME(oparg);
-    JVALUE v = POP();
+    JVALUE v = TOP();
     JVALUE globals = LOAD_F_GLOBALS();
-    JVALUE err = CALL_NATIVE(jd->sig_iooo, PyDict_SetItem, globals, CONSTANT_PYOBJ(name), v);
+    RTCALL_Z(jd->sig_iooo, PyDict_SetItem, globals, CONSTANT_PYOBJ(name), v);
+    STACKADJ(-1);
     DECREF(v);
-    GOTO_ERROR_IF(err);
     SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(DELETE_GLOBAL) {
     PyObject *name = GETNAME(oparg);
     JVALUE globals = LOAD_F_GLOBALS();
+    // CUSTOM SITE
     JVALUE err = CALL_NATIVE(jd->sig_ioo, PyDict_DelItem, globals, CONSTANT_PYOBJ(name));
     IF(err, IR_UNLIKELY, {
         CALL_format_exc_check_arg(PyExc_NameError, NAME_ERROR_MSG, name);
@@ -1557,8 +1577,7 @@ EMITTER_FOR(LOAD_NAME) {
     JVALUE globals = LOAD_F_GLOBALS();
     JVALUE builtins = LOAD_F_BUILTINS();
     JVALUE locals = LOAD_F_LOCALS();
-    JVALUE v = CALL_NATIVE(jd->sig_ooooo, _load_name_helper, CONSTANT_PYOBJ(name), globals, builtins, locals);
-    GOTO_ERROR_IF_NOT(v);
+    JVALUE v = RTCALL_NZ(jd->sig_ooooo, _load_name_helper, CONSTANT_PYOBJ(name), globals, builtins, locals);
     PUSH(v);
     SOFT_EVAL_BREAK_CHECK();
 }
@@ -1610,8 +1629,7 @@ EMITTER_FOR(LOAD_GLOBAL) {
     PyObject *name = GETNAME(oparg);
     JVALUE globals = LOAD_F_GLOBALS();
     JVALUE builtins = LOAD_F_BUILTINS();
-    JVALUE v = CALL_NATIVE(jd->sig_oooo, _load_global_helper, globals, builtins, CONSTANT_PYOBJ(name));
-    GOTO_ERROR_IF_NOT(v);
+    JVALUE v = RTCALL_NZ(jd->sig_oooo, _load_global_helper, globals, builtins, CONSTANT_PYOBJ(name));
     PUSH(v);
     SOFT_EVAL_BREAK_CHECK();
 }
@@ -1744,8 +1762,7 @@ EMITTER_FOR(BUILD_STRING) {
     // TODO: The extra call and stack allocation makes this slower than the
     // interpreted version. Consider inlining _PyUnicode_JoinArray.
     JTYPE sig1 = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyssizet, ir_type_uint);
-    JVALUE empty = CALL_NATIVE(sig1, PyUnicode_New, CONSTANT_PYSSIZET(0), CONSTANT_UINT32(0));
-    GOTO_ERROR_IF_NOT(empty);
+    JVALUE empty = RTCALL_NZ(sig1, PyUnicode_New, CONSTANT_PYSSIZET(0), CONSTANT_UINT32(0));
 
     JVALUE result;
     switch (oparg) {
@@ -1818,8 +1835,7 @@ EMITTER_FOR(BUILD_STRING) {
  */
 EMITTER_FOR(BUILD_TUPLE) {
     JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyssizet);
-    JVALUE tup = CALL_NATIVE(sig, PyTuple_New, CONSTANT_PYSSIZET(oparg));
-    GOTO_ERROR_IF_NOT(tup);
+    JVALUE tup = RTCALL_NZ(sig, PyTuple_New, CONSTANT_PYSSIZET(oparg));
     JVALUE ob_item = IR_PyTuple_OB_ITEM(tup);
     for (int i = 0; i < oparg; i++) {
         STORE_AT_INDEX(ob_item, CONSTANT_INT(i), PEEK(oparg - i));
@@ -1831,8 +1847,7 @@ EMITTER_FOR(BUILD_TUPLE) {
 
 EMITTER_FOR(BUILD_LIST) {
     JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyssizet);
-    JVALUE list = CALL_NATIVE(sig, PyList_New, CONSTANT_PYSSIZET(oparg));
-    GOTO_ERROR_IF_NOT(list);
+    JVALUE list = RTCALL_NZ(sig, PyList_New, CONSTANT_PYSSIZET(oparg));
     JVALUE ob_item = IR_PyList_OB_ITEM(list);
     for (int i = 0; i < oparg; i++) {
         STORE_AT_INDEX(ob_item, CONSTANT_INT(i), PEEK(oparg - i));
@@ -1849,8 +1864,7 @@ static void _build_unpack_common(JITData *jd, int opcode, int oparg, int next_in
     int convert_to_tuple = opcode != BUILD_LIST_UNPACK;
     JLABEL handle_error = JLABEL_INIT("handle_error");
     JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyssizet);
-    JVALUE sum = CALL_NATIVE(sig, PyList_New, CONSTANT_PYSSIZET(0));
-    GOTO_ERROR_IF_NOT(sum);
+    JVALUE sum = RTCALL_NZ(sig, PyList_New, CONSTANT_PYSSIZET(0));
     JVALUE badobj = ALLOCA(ir_type_pyobject_ptr);
     for (int i = oparg; i > 0; i--) {
         JVALUE item = PEEK(i);
@@ -1902,8 +1916,7 @@ EMITTER_FOR(BUILD_LIST_UNPACK) {
 
 EMITTER_FOR(BUILD_SET) {
     JLABEL handle_error = JLABEL_INIT("handle_error");
-    JVALUE set = CALL_NATIVE(jd->sig_oo, PySet_New, CONSTANT_PYOBJ(NULL));
-    GOTO_ERROR_IF_NOT(set);
+    JVALUE set = RTCALL_NZ(jd->sig_oo, PySet_New, CONSTANT_PYOBJ(NULL));
     for (int i = 0; i < oparg; i++) {
         JVALUE item = PEEK(oparg - i);
         JVALUE err = CALL_NATIVE(jd->sig_ioo, PySet_Add, set, item);
@@ -1926,8 +1939,7 @@ EMITTER_FOR(BUILD_SET) {
 
 EMITTER_FOR(BUILD_SET_UNPACK) {
     JLABEL handle_error = JLABEL_INIT("handle_error");
-    JVALUE sum = CALL_NATIVE(jd->sig_oo, PySet_New, CONSTANT_PYOBJ(NULL));
-    GOTO_ERROR_IF_NOT(sum);
+    JVALUE sum = RTCALL_NZ(jd->sig_oo, PySet_New, CONSTANT_PYOBJ(NULL));
     for (int i = 0; i < oparg; i++) {
         JVALUE err = CALL_NATIVE(jd->sig_ioo, _PySet_Update, sum, PEEK(oparg - i));
         BRANCH_IF(CMP_LT(err, CONSTANT_INT(0)), handle_error, IR_UNLIKELY);
@@ -1949,8 +1961,7 @@ EMITTER_FOR(BUILD_SET_UNPACK) {
 EMITTER_FOR(BUILD_MAP) {
     JLABEL handle_error = JLABEL_INIT("handle_error");
     JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyssizet);
-    JVALUE map = CALL_NATIVE(sig, _PyDict_NewPresized, CONSTANT_PYSSIZET(oparg));
-    GOTO_ERROR_IF_NOT(map);
+    JVALUE map = RTCALL_NZ(sig, _PyDict_NewPresized, CONSTANT_PYSSIZET(oparg));
     for (int i = oparg; i > 0; i--) {
         JVALUE key = PEEK(2*i);
         JVALUE value = PEEK(2*i - 1);
@@ -2030,8 +2041,7 @@ _setup_annotations_helper(PyObject *f_locals) {
 }
 
 EMITTER_FOR(SETUP_ANNOTATIONS) {
-    JVALUE ret = CALL_NATIVE(jd->sig_io, _setup_annotations_helper, LOAD_F_LOCALS());
-    GOTO_ERROR_IF(ret);
+    RTCALL_Z(jd->sig_io, _setup_annotations_helper, LOAD_F_LOCALS());
     SOFT_EVAL_BREAK_CHECK();
 }
 
@@ -2042,8 +2052,7 @@ EMITTER_FOR(BUILD_CONST_KEY_MAP) {
     BRANCH_IF_NOT(IR_PyTuple_CheckExact(keys), bad_keys_arg, IR_UNLIKELY);
     BRANCH_IF_NOT(CMP_EQ(IR_PyTuple_GET_SIZE(keys), CONSTANT_PYSSIZET(oparg)), bad_keys_arg, IR_UNLIKELY);
     JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyssizet);
-    JVALUE map = CALL_NATIVE(sig, _PyDict_NewPresized, CONSTANT_PYSSIZET(oparg));
-    GOTO_ERROR_IF_NOT(map);
+    JVALUE map = RTCALL_NZ(sig, _PyDict_NewPresized, CONSTANT_PYSSIZET(oparg));
     JVALUE ob_item = IR_PyTuple_OB_ITEM(keys);
     for (int i = oparg; i > 0; i--) {
         JVALUE key = LOAD_AT_INDEX(ob_item, CONSTANT_INT(oparg - i));
@@ -2074,8 +2083,7 @@ EMITTER_FOR(BUILD_CONST_KEY_MAP) {
 
 EMITTER_FOR(BUILD_MAP_UNPACK) {
     IR_LABEL_INIT(handle_error);
-    JVALUE sum = CALL_NATIVE(jd->sig_o, PyDict_New);
-    GOTO_ERROR_IF_NOT(sum);
+    JVALUE sum = RTCALL_NZ(jd->sig_o, PyDict_New);
     JVALUE err_arg = ALLOCA(ir_type_pyobject_ptr);
     for (int i = oparg; i > 0; i--) {
         JVALUE arg = PEEK(i);
@@ -2138,9 +2146,7 @@ void _build_map_unpack_with_call_format_error(PyObject *func, PyObject *arg) {
 
 EMITTER_FOR(BUILD_MAP_UNPACK_WITH_CALL) {
     IR_LABEL_INIT(handle_error);
-    JVALUE sum = CALL_PyDict_New();
-    GOTO_ERROR_IF_NOT(sum);
-
+    JVALUE sum = RTCALL_PyDict_New();
     JTYPE sig = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_int);
     JVALUE err_arg = ALLOCA(ir_type_pyobject_ptr);
     for (int i = oparg; i > 0; i--) {
@@ -2166,24 +2172,24 @@ EMITTER_FOR(BUILD_MAP_UNPACK_WITH_CALL) {
 }
 
 EMITTER_FOR(MAP_ADD) {
-    JVALUE key = POP();
-    JVALUE value = POP();
-    JVALUE map = PEEK(oparg);
+    JVALUE key = TOP();
+    JVALUE value = SECOND();
+    JVALUE map = PEEK(oparg + 2);
     IR_ASSERT(IR_PyDict_CheckExact(map));
-    JVALUE err = CALL_NATIVE(jd->sig_iooo, PyDict_SetItem, map, key, value);
+    RTCALL_Z(jd->sig_iooo, PyDict_SetItem, map, key, value);
+    STACKADJ(-2);
     DECREF(value);
     DECREF(key);
-    GOTO_ERROR_IF(err);
     SOFT_EVAL_BREAK_CHECK();
 }
 
 EMITTER_FOR(LOAD_ATTR) {
     PyObject *name = GETNAME(oparg);
     JVALUE owner = TOP();
-    JVALUE res = CALL_NATIVE(jd->sig_ooo, PyObject_GetAttr, owner, CONSTANT_PYOBJ(name));
+    JVALUE res = RTCALL_NZ(jd->sig_ooo, PyObject_GetAttr, owner, CONSTANT_PYOBJ(name));
+    STACKADJ(-1);
     DECREF(owner);
-    SET_TOP(res);
-    GOTO_ERROR_IF_NOT(res);
+    PUSH(res);
     SOFT_EVAL_BREAK_CHECK();
 }
 
@@ -2327,15 +2333,15 @@ _import_name(PyObject *globals, PyObject *builtins, PyObject *locals,
 
 EMITTER_FOR(IMPORT_NAME) {
     PyObject *name = GETNAME(oparg);
-    JVALUE fromlist = POP();
-    JVALUE level = POP();
+    JVALUE fromlist = TOP();
+    JVALUE level = SECOND();
     JVALUE globals = LOAD_F_GLOBALS();
     JVALUE builtins = LOAD_F_BUILTINS();
     JVALUE locals = LOAD_F_LOCALS();
-    JVALUE res = CALL_NATIVE(jd->sig_ooooooo, _import_name, globals, builtins, locals, CONSTANT_PYOBJ(name), fromlist, level);
+    JVALUE res = RTCALL_NZ(jd->sig_ooooooo, _import_name, globals, builtins, locals, CONSTANT_PYOBJ(name), fromlist, level);
+    STACKADJ(-2);
     DECREF(level);
     DECREF(fromlist);
-    GOTO_ERROR_IF_NOT(res);
     PUSH(res);
     SOFT_EVAL_BREAK_CHECK();
 }
@@ -2391,22 +2397,24 @@ EMITTER_FOR(POP_JUMP_IF_FALSE) {
     JLABEL skip1 = JLABEL_INIT("skip1");
     JLABEL skip2 = JLABEL_INIT("skip2");
     JLABEL fin = JLABEL_INIT("fin");
-    JVALUE cond = POP();
+    JVALUE cond = TOP();
     BRANCH_IF(CMP_NE(cond, CONSTANT_PYOBJ(Py_True)), skip1, IR_SEMILIKELY);
     /* Py_True case */
+    STACKADJ(-1);
     DECREF(cond);
     BRANCH(fin);
     LABEL(skip1);
     BRANCH_IF(CMP_NE(cond, CONSTANT_PYOBJ(Py_False)), skip2, IR_SEMILIKELY);
     /* Py_False case */
+    STACKADJ(-1);
     DECREF(cond);
     JUMPTO(oparg, 0);
     LABEL(skip2);
     /* Generic case */
-    JVALUE err = CALL_NATIVE(jd->sig_io, PyObject_IsTrue, cond);
+    JVALUE err = RTCALL_GE0(jd->sig_io, PyObject_IsTrue, cond);
+    STACKADJ(-1);
     DECREF(cond);
     BRANCH_IF(CMP_GT(err, CONSTANT_INT(0)), fin, IR_SEMILIKELY);
-    GOTO_ERROR_IF(CMP_LT(err, CONSTANT_INT(0)));
     /* err == 0 case */
     JUMPTO(oparg, 1);
     LABEL(fin);
@@ -3183,7 +3191,6 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     Py_ssize_t inst_count = PyBytes_GET_SIZE(co->co_code)/sizeof(_Py_CODEUNIT);
 
     jd->inst_count = inst_count;
-    jd->use_patchpoint_error_handler = 0;
 
     jd->error_exit = NULL;
     jd->exit = ir_label_new(jd->func, "exit");
@@ -3271,8 +3278,7 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
             (CO_NEWLOCALS | CO_OPTIMIZED)) {
             rflocals = CONSTANT_PYOBJ(NULL);
         } else if (co->co_flags & CO_NEWLOCALS) {
-            rflocals = CALL_PyDict_New();
-            GOTO_ERROR_IF_NOT(rflocals);
+            rflocals = RTCALL_PyDict_New();
         } else {
             assert(jd->has_locals);
             rflocals = ir_func_get_argument(jd->func, DEAD_ARGS + jd->total_direct_args - 1);
@@ -3884,7 +3890,7 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr) {
     case ir_opcode_goto_error: {
         IR_INSTR_AS(goto_error)
         assert(instr->pb != INVALID_PYBLOCK);
-        if (jd->use_patchpoint_error_handler) {
+        if (Py_JITPatchpoint) {
             /* This will unwind the stack and branch to the precursor
                (same as the code below) */
             _emit_patchpoint_error_handler(jd, instr->pb, instr->entry_stack_level);
