@@ -119,33 +119,34 @@ jf_traverse(PyJITFunctionObject *op, visitproc visit, void *arg)
 }
 
 static int jf_clear(PyJITFunctionObject *op) {
-    Py_CLEAR(op->code);
-    Py_CLEAR(op->globals);
-    Py_CLEAR(op->builtins);
-
     /* Unlink children */
     while (op->deps_head != NULL) {
         PyJITFunction_SetParent(op->deps_head, NULL);
     }
+
+    _jeval_cleanup(op);
+
+    Py_CLEAR(op->code);
+    Py_CLEAR(op->globals);
+    Py_CLEAR(op->builtins);
     return 0;
 }
 
 static void jf_dealloc(PyJITFunctionObject *op) {
     PyObject_GC_UnTrack(op);
     Py_TRASHCAN_SAFE_BEGIN(op)
-    Py_XDECREF(op->code);
-    Py_XDECREF(op->globals);
-    Py_XDECREF(op->builtins);
 
     /* Unlink children */
     while (op->deps_head != NULL) {
         PyJITFunction_SetParent(op->deps_head, NULL);
     }
 
-    ir_object_free((ir_object)op->object);
-    if (op->eval_entrypoint_object != NULL) {
-        ir_object_free((ir_object)op->eval_entrypoint_object);
-    }
+    /* This must be done first, since it may use code/globals/builtins. */
+    _jeval_cleanup(op);
+
+    Py_XDECREF(op->code);
+    Py_XDECREF(op->globals);
+    Py_XDECREF(op->builtins);
     PyObject_GC_Del(op);
     Py_TRASHCAN_SAFE_END(op)
 }

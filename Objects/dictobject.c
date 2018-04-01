@@ -592,6 +592,7 @@ new_dict(PyDictKeysObject *keys, PyObject **values)
     mp->ma_values = values;
     mp->ma_used = 0;
     mp->ma_version_tag = DICT_NEXT_VERSION();
+    mp->ma_listeners = NULL;
     assert(_PyDict_CheckConsistency(mp));
     return (PyObject *)mp;
 }
@@ -1003,6 +1004,7 @@ insertdict(PyDictObject *mp, PyObject *key, Py_hash_t hash, PyObject *value)
         mp->ma_keys->dk_nentries++;
         assert(mp->ma_keys->dk_usable >= 0);
         assert(_PyDict_CheckConsistency(mp));
+        _PyDict_NotifyListeners(mp);
         return 0;
     }
 
@@ -1023,6 +1025,7 @@ insertdict(PyDictObject *mp, PyObject *key, Py_hash_t hash, PyObject *value)
     Py_XDECREF(old_value); /* which **CAN** re-enter (see issue #22653) */
     assert(_PyDict_CheckConsistency(mp));
     Py_DECREF(key);
+    _PyDict_NotifyListeners(mp);
     return 0;
 
 Fail:
@@ -1380,6 +1383,46 @@ _PyDict_LoadGlobal(PyDictObject *globals, PyDictObject *builtins, PyObject *key)
     return value;
 }
 
+PyDictListener* _PyDict_AddListener(PyDictObject *d, PyDictListenerCallback callback, void *arg) {
+    PyDictListener *dl = (PyDictListener*)PyMem_RawMalloc(sizeof(PyDictListener));
+    if (dl == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    dl->dl_callback = callback;
+    dl->dl_arg = arg;
+    dl->dl_prev = NULL;
+    dl->dl_next = d->ma_listeners;
+    if (dl->dl_next) {
+        dl->dl_next->dl_prev = dl;
+    }
+    d->ma_listeners = dl;
+    return dl;
+}
+
+void _PyDict_NotifyListeners(PyDictObject *d) {
+    PyDictListener *dl = d->ma_listeners;
+    PyDictListener *dl_next;
+    while (dl != NULL) {
+        dl_next = dl->dl_next;
+        dl->dl_callback(dl->dl_arg, d);
+        dl = dl_next;
+    }
+}
+
+void _PyDict_DeleteListener(PyDictObject *d, PyDictListener *dl) {
+    if (dl->dl_prev) {
+        dl->dl_prev->dl_next = dl->dl_next;
+    } else {
+        assert(d->ma_listeners == dl);
+        d->ma_listeners = dl->dl_next;
+    }
+    if (dl->dl_next) {
+        dl->dl_next->dl_prev = dl->dl_prev;
+    }
+    PyMem_RawFree(dl);
+}
+
 /* CAUTION: PyDict_SetItem() must guarantee that it won't resize the
  * dictionary if it's merely replacing the value for an existing key.
  * This means that it's safe to loop over a dictionary with PyDict_Next()
@@ -1451,6 +1494,7 @@ delitem_common(PyDictObject *mp, Py_hash_t hash, Py_ssize_t ix,
     Py_DECREF(old_value);
 
     assert(_PyDict_CheckConsistency(mp));
+    _PyDict_NotifyListeners(mp);
     return 0;
 }
 
@@ -1591,6 +1635,7 @@ PyDict_Clear(PyObject *op)
        DK_DECREF(oldkeys);
     }
     assert(_PyDict_CheckConsistency(mp));
+    _PyDict_NotifyListeners(mp);
 }
 
 /* Internal version of PyDict_Next that returns a hash value in addition
@@ -1721,6 +1766,7 @@ _PyDict_Pop_KnownHash(PyObject *dict, PyObject *key, Py_hash_t hash, PyObject *d
     Py_DECREF(old_key);
 
     assert(_PyDict_CheckConsistency(mp));
+    _PyDict_NotifyListeners(mp);
     return old_value;
 }
 
@@ -1842,6 +1888,11 @@ dict_dealloc(PyDictObject *mp)
     PyObject **values = mp->ma_values;
     PyDictKeysObject *keys = mp->ma_keys;
     Py_ssize_t i, n;
+
+    /* All listeners must remove themselves before releasing their reference */
+    if (mp->ma_listeners != NULL) {
+        Py_FatalError("Deallocating dict with listeners");
+    }
 
     /* bpo-31095: UnTrack is needed before calling any callbacks */
     PyObject_GC_UnTrack(mp);
@@ -2497,6 +2548,8 @@ PyDict_Copy(PyObject *o)
             Py_XINCREF(value);
             split_copy->ma_values[i] = value;
         }
+        split_copy->ma_version_tag = DICT_NEXT_VERSION();
+        split_copy->ma_listeners = NULL;
         if (_PyObject_GC_IS_TRACKED(mp))
             _PyObject_GC_TRACK(split_copy);
         return (PyObject *)split_copy;
@@ -2766,6 +2819,7 @@ PyDict_SetDefault(PyObject *d, PyObject *key, PyObject *defaultobj)
     }
 
     assert(_PyDict_CheckConsistency(mp));
+    _PyDict_NotifyListeners(mp);
     return value;
 }
 
@@ -2868,6 +2922,7 @@ dict_popitem(PyDictObject *mp)
     mp->ma_used--;
     mp->ma_version_tag = DICT_NEXT_VERSION();
     assert(_PyDict_CheckConsistency(mp));
+    _PyDict_NotifyListeners(mp);
     return res;
 }
 
@@ -3084,6 +3139,7 @@ dict_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
         Py_DECREF(self);
         return NULL;
     }
+    d->ma_listeners = NULL;
     assert(_PyDict_CheckConsistency(d));
     return self;
 }

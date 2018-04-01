@@ -17,6 +17,9 @@ extern "C" {
 
 typedef struct _dictkeysobject PyDictKeysObject;
 
+struct _PyDictListener;
+typedef struct _PyDictListener PyDictListener;
+
 /* The ma_values pointer is NULL for a combined table
  * or points to an array of PyObject* for a split table
  */
@@ -38,12 +41,23 @@ typedef struct {
        If ma_values is not NULL, the table is splitted:
        keys are stored in ma_keys and values are stored in ma_values */
     PyObject **ma_values;
+
+    /* Listeners are notified whenever ma_version_tag changes */
+    PyDictListener *ma_listeners;
 } PyDictObject;
 
 typedef struct {
     PyObject_HEAD
     PyDictObject *dv_dict;
 } _PyDictViewObject;
+
+typedef void (*PyDictListenerCallback)(void *arg, PyDictObject *d);
+typedef struct _PyDictListener {
+    PyDictListenerCallback dl_callback;
+    void *dl_arg;
+    PyDictListener *dl_prev;
+    PyDictListener *dl_next;
+} PyDictListener;
 
 #endif /* Py_LIMITED_API */
 
@@ -171,6 +185,11 @@ PyAPI_FUNC(void) _PyDict_DebugMallocStats(FILE *out);
 
 int _PyObjectDict_SetItem(PyTypeObject *tp, PyObject **dictptr, PyObject *name, PyObject *value);
 PyObject *_PyDict_LoadGlobal(PyDictObject *, PyDictObject *, PyObject *);
+
+PyDictListener* _PyDict_AddListener(PyDictObject *d, PyDictListenerCallback callback, void *arg);
+void _PyDict_NotifyListeners(PyDictObject *d);
+void _PyDict_DeleteListener(PyDictObject *d, PyDictListener *dl);
+
 #endif
 
 #ifdef __cplusplus

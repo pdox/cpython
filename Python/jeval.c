@@ -34,6 +34,16 @@ typedef struct resume_entry {
     struct resume_entry *next;
 } resume_entry;
 
+/* These are kept around inside the PyJITFunctionObject,
+   so that they can be released when the function is
+   deallocated. (see _jeval_cleanup) */
+typedef struct {
+    Py_ssize_t load_global_cache_size;
+    PyObject **load_global_cache;
+    PyDictListener *globals_dl;
+    PyDictListener *builtins_dl;
+} _JITState;
+
 typedef struct _JITData {
     PyJITFunctionObject *jit_function;
     PyObject *globals;
@@ -41,6 +51,8 @@ typedef struct _JITData {
     PyCodeObject *co; /* Borrowed reference */
     ir_context context;
     ir_func func;
+
+    _JITState *jstate;
 
     /* Some common function signature types:
 
@@ -1619,12 +1631,54 @@ static PyObject* _load_global_helper(PyObject *globals, PyObject *builtins, PyOb
     return v;
 }
 
+/* If either globals or builtins is updated, invalidate our cache. */
+void _invalidate_cache(void *arg, PyDictObject *d) {
+    _JITState *js = (_JITState*)arg;
+    memset(js->load_global_cache, 0, sizeof(PyObject*) * js->load_global_cache_size);
+}
+
+static inline PyObject** _get_globals_inline_cache(JITData *jd, int oparg) {
+    _JITState *js = jd->jstate;
+    if (js->load_global_cache == NULL) {
+        /* TODO: Many of these slots will be unused because they belong to attribute names
+                 rather than global names. Splitting them up would save memory. */
+        js->load_global_cache_size = PyTuple_GET_SIZE(jd->co->co_names);
+        /* TODO: When it becomes possible to patch constants in the code, place the
+                 cached values directly inline. */
+        js->load_global_cache = calloc(sizeof(PyObject*) * js->load_global_cache_size, 1);
+        js->globals_dl = _PyDict_AddListener((PyDictObject*)jd->globals, _invalidate_cache, js);
+        js->builtins_dl = _PyDict_AddListener((PyDictObject*)jd->builtins, _invalidate_cache, js);
+        if (!js->globals_dl || !js->builtins_dl) {
+            Py_FatalError("Out of memory in _init_globals_inline_cache");
+        }
+    }
+    assert(oparg >= 0 && oparg < js->load_global_cache_size);
+    return &js->load_global_cache[oparg];
+}
+
 EMITTER_FOR(LOAD_GLOBAL) {
     PyObject *name = GETNAME(oparg);
-    JVALUE globals = LOAD_F_GLOBALS();
-    JVALUE builtins = LOAD_F_BUILTINS();
-    JVALUE v = RTCALL_NZ(jd->sig_oooo, _load_global_helper, globals, builtins, CONSTANT_PYOBJ(name));
-    PUSH(v);
+    if (jd->globals && jd->builtins) {
+        PyObject **slot = _get_globals_inline_cache(jd, oparg);
+        JVALUE slotval = CONSTANT_PTR(ir_type_pyobject_ptr_ptr, slot);
+        JVALUE v = LOAD(slotval);
+        IF_ELSE(v, IR_LIKELY, {
+            INCREF(v);
+            PUSH(v);
+        }, {
+            JVALUE globals = LOAD_F_GLOBALS();
+            JVALUE builtins = LOAD_F_BUILTINS();
+            JVALUE rv = RTCALL_NZ(jd->sig_oooo, _load_global_helper, globals, builtins, CONSTANT_PYOBJ(name));
+            PUSH(rv);
+            STORE(slotval, rv);
+        });
+    } else {
+        JVALUE globals = LOAD_F_GLOBALS();
+        JVALUE builtins = LOAD_F_BUILTINS();
+        JVALUE null = CONSTANT_PTR(ir_type_pyobject_ptr_ptr, NULL);
+        JVALUE v = RTCALL_NZ(jd->sig_oooo, _load_global_helper, globals, builtins, CONSTANT_PYOBJ(name), null);
+        PUSH(v);
+    }
     SOFT_EVAL_BREAK_CHECK();
 }
 
@@ -3386,6 +3440,28 @@ int _should_force_real_locals(PyCodeObject *co) {
     return 0;
 }
 
+void _jeval_cleanup(PyJITFunctionObject *jf) {
+    if (jf->object != NULL) {
+        ir_object_free((ir_object)jf->object);
+        jf->object = NULL;
+    }
+    if (jf->eval_entrypoint_object != NULL) {
+        ir_object_free((ir_object)jf->eval_entrypoint_object);
+        jf->eval_entrypoint_object = NULL;
+    }
+    if (jf->jstate != NULL) {
+        _JITState *js = (_JITState*)jf->jstate;
+        if (js->globals_dl)
+            _PyDict_DeleteListener((PyDictObject*)jf->globals, js->globals_dl);
+        if (js->builtins_dl)
+            _PyDict_DeleteListener((PyDictObject*)jf->builtins, js->builtins_dl);
+        if (js->load_global_cache != NULL)
+            free(js->load_global_cache);
+        PyMem_RawFree(js);
+        jf->jstate = NULL;
+    }
+}
+
 PyJITFunctionObject*
 _PyJIT_CodeGen(PyCodeObject *co, PyObject *globals, PyObject *builtins) {
     assert(PyCode_Check(co));
@@ -3403,6 +3479,8 @@ _PyJIT_CodeGen(PyCodeObject *co, PyObject *globals, PyObject *builtins) {
         return NULL;
     }
     memset(jd, 0, total_size);
+    jd->jstate = PyMem_RawCalloc(sizeof(_JITState), 1);
+    assert(jd->jstate);
     jd->jit_function = (PyJITFunctionObject*)PyJITFunction_New((PyObject*)co, globals, builtins);
     jd->globals = globals;
     jd->builtins = builtins;
@@ -3498,6 +3576,7 @@ _PyJIT_CodeGen(PyCodeObject *co, PyObject *globals, PyObject *builtins) {
     jf->direct_entrypoint = NULL;
     jf->object = object;
     jf->eval_entrypoint_object = NULL;
+    jf->jstate = (void*)jd->jstate;
     if (jd->use_frame_object) {
         jf->eval_entrypoint = (PyJIT_EvalEntryPoint)object->entrypoint;
     } else {

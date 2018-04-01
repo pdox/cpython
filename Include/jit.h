@@ -79,6 +79,7 @@ struct _PyJITFunctionObject {
 
     void *object; /* ir_object */
     void *eval_entrypoint_object;
+    void *jstate;
 };
 
 PyAPI_DATA(PyTypeObject) PyJITFunction_Type;
@@ -200,6 +201,8 @@ static inline PyObject* PyJIT_ForFrame(PyObject *hint, PyCodeObject *co, PyObjec
     }
     return NULL;
 }
+
+void _jeval_cleanup(PyJITFunctionObject *jf);
 
 #ifdef __cplusplus
 }
