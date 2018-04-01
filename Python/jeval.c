@@ -433,7 +433,9 @@ static int _do_eval_break(PyCodeObject *co, int next_instr_index) {
 static inline void _emit_eval_break_check(JITData *jd, ir_value next_instr_index) {
     IF(LOAD_EVAL_BREAKER(), IR_UNLIKELY, {
         JVALUE res = CALL_NATIVE(jd->sig_ioi, _do_eval_break, CONSTANT_PYOBJ((PyObject*)jd->co), next_instr_index);
-        GOTO_ERROR_IF(res);
+        if (!Py_JITNoExc) {
+            GOTO_ERROR_IF(res);
+        }
     });
 }
 
@@ -1191,8 +1193,7 @@ EMITTER_FOR(YIELD_FROM) {
     JVALUE valptr = jd->tmpstack;
     STORE(valptr, CONSTANT_PYOBJ(NULL));
     JTYPE sig2 = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr_ptr);
-    JVALUE err = CALL_NATIVE(sig2, _PyGen_FetchStopIterationValue, valptr);
-    GOTO_ERROR_IF(CMP_LT(err, CONSTANT_INT(0)));
+    RTCALL_GE0(sig2, _PyGen_FetchStopIterationValue, valptr);
     DECREF(receiver);
     SET_TOP(LOAD(valptr));
     SOFT_EVAL_BREAK_CHECK();
@@ -1273,58 +1274,51 @@ EMITTER_FOR(LOAD_BUILD_CLASS) {
     SOFT_EVAL_BREAK_CHECK();
 }
 
+static int _do_store_name(PyObject *ns, PyObject *name, PyObject *v) {
+    if (ns == NULL) {
+        PyErr_Format(PyExc_SystemError,
+                     "no locals found when storing %R", name);
+        return 1;
+    }
+    if (PyDict_CheckExact(ns)) {
+        return PyDict_SetItem(ns, name, v);
+    } else {
+        return PyObject_SetItem(ns, name, v);
+    }
+}
+
 EMITTER_FOR(STORE_NAME) {
-    JLABEL after_setitem = JLABEL_INIT("after_setitem");
-    JLABEL no_locals_found = JLABEL_INIT("no_locals_found");
-    JLABEL object_case = JLABEL_INIT("object_case");
     PyObject *name = GETNAME(oparg);
-    JVALUE v = POP();
+    JVALUE v = TOP();
     JVALUE ns = LOAD_F_LOCALS();
-    BRANCH_IF_NOT(ns, no_locals_found, IR_UNLIKELY);
-    BRANCH_IF_NOT(IR_PyDict_CheckExact(ns), object_case, IR_UNLIKELY);
-    JVALUE err = ALLOCA(ir_type_int);
-    STORE(err, CALL_NATIVE(jd->sig_iooo, PyDict_SetItem, ns, CONSTANT_PYOBJ(name), v));
-    BRANCH(after_setitem);
-
-    LABEL(no_locals_found);
-    CALL_PyErr_Format(PyExc_SystemError,
-                      "no locals found when storing %R", CONSTANT_PYOBJ(name));
+    RTCALL_Z(jd->sig_iooo, _do_store_name, ns, CONSTANT_PYOBJ(name), v);
+    STACKADJ(-1);
     DECREF(v);
-    GOTO_ERROR();
-
-    LABEL(object_case);
-    STORE(err, CALL_NATIVE(jd->sig_iooo, PyObject_SetItem, ns, CONSTANT_PYOBJ(name), v));
-    BRANCH(after_setitem);
-
-    LABEL(after_setitem);
-    DECREF(v);
-    GOTO_ERROR_IF(LOAD(err));
     SOFT_EVAL_BREAK_CHECK();
 }
 
+static int _do_delete_name(PyObject *ns, PyObject *name) {
+    if (ns == NULL) {
+        PyErr_Format(PyExc_SystemError,
+                     "no locals when deleting %R", name);
+        return 1;
+    }
+    int err = PyObject_DelItem(ns, name);
+    if (err != 0) {
+        format_exc_check_arg(PyExc_NameError,
+                             NAME_ERROR_MSG,
+                             name);
+        return 1;
+    }
+    return 0;
+}
+
 EMITTER_FOR(DELETE_NAME) {
-    JLABEL no_locals = JLABEL_INIT("no_locals");
-    JLABEL handle_err = JLABEL_INIT("handle_err");
-    JLABEL fast_dispatch = JLABEL_INIT("fast_dispatch");
     PyObject *name = GETNAME(oparg);
     assert(name);
     JVALUE ns = LOAD_F_LOCALS();
-    BRANCH_IF_NOT(ns, no_locals, IR_UNLIKELY);
-    JVALUE err = CALL_NATIVE(jd->sig_ioo, PyObject_DelItem, ns, CONSTANT_PYOBJ(name));
-    BRANCH_IF(err, handle_err, IR_UNLIKELY);
+    RTCALL_Z(jd->sig_ioo, _do_delete_name, ns, CONSTANT_PYOBJ(name));
     SOFT_EVAL_BREAK_CHECK();
-    BRANCH(fast_dispatch);
-
-    LABEL(no_locals);
-    CALL_PyErr_Format(PyExc_SystemError,
-                      "no locals when deleting %R", CONSTANT_PYOBJ(name));
-    GOTO_ERROR();
-
-    LABEL(handle_err);
-    CALL_format_exc_check_arg(PyExc_NameError, NAME_ERROR_MSG, name);
-    GOTO_ERROR();
-
-    LABEL(fast_dispatch);
 }
 
 EMITTER_FOR(UNPACK_SEQUENCE) {
@@ -2213,8 +2207,8 @@ _compare_op_exc_match_helper(PyObject *v, PyObject *w) {
 }
 
 EMITTER_FOR(COMPARE_OP) {
-    JVALUE right = POP();
-    JVALUE left = TOP();
+    JVALUE right = TOP();
+    JVALUE left = SECOND();
     JVALUE res;
 
     /* Each of these must set 'res' */
@@ -2231,62 +2225,50 @@ EMITTER_FOR(COMPARE_OP) {
     }
     case PyCmp_IN:
     case PyCmp_NOT_IN: {
-        JVALUE tmp = CALL_NATIVE(jd->sig_ioo, PySequence_Contains, right, left);
-        JVALUE resptr = ALLOCA(ir_type_pyobject_ptr);
-        IF_ELSE(CMP_LT(tmp, CONSTANT_INT(0)), IR_UNLIKELY, {
-            STORE(resptr, CONSTANT_PYOBJ(NULL));
-        }, {
-            STORE(resptr, (oparg == PyCmp_IN) ?
-                          TERNARY(tmp, CONSTANT_PYOBJ(Py_True), CONSTANT_PYOBJ(Py_False)) :
-                          TERNARY(tmp, CONSTANT_PYOBJ(Py_False), CONSTANT_PYOBJ(Py_True)));
-            INCREF(LOAD(resptr));
-        });
-        res = LOAD(resptr);
+        JVALUE tmp = RTCALL_GE0(jd->sig_ioo, PySequence_Contains, right, left);
+        if (oparg == PyCmp_IN)
+            res = TERNARY(tmp, CONSTANT_PYOBJ(Py_True), CONSTANT_PYOBJ(Py_False));
+        else
+            res = TERNARY(tmp, CONSTANT_PYOBJ(Py_False), CONSTANT_PYOBJ(Py_True));
+        INCREF(res);
         break;
     }
     case PyCmp_EXC_MATCH: {
         JLABEL do_exc_match = JLABEL_INIT("do_exc_match");
-        JLABEL after_exc_match = JLABEL_INIT("after_exc_match");
         JLABEL handle_tuple = JLABEL_INIT("handle_tuple");
-        JVALUE restmp = ALLOCA(ir_type_pyobject_ptr);
+
         /* Handle common case (exception class) first */
         BRANCH_IF(IR_PyExceptionClass_Check(right), do_exc_match, IR_LIKELY);
         BRANCH_IF(IR_PyTuple_Check(right), handle_tuple, IR_LIKELY);
 
         /* Error case: neither exception class nor tuple */
         CALL_PyErr_SetString(PyExc_TypeError, CANNOT_CATCH_MSG "2");
-        STORE(restmp, CONSTANT_PYOBJ(NULL));
-        BRANCH(after_exc_match);
+        if (!Py_JITNoExc) {
+            GOTO_ERROR();
+        }
 
         /* Tuple case */
         LABEL(handle_tuple);
-        JVALUE tmp = CALL_NATIVE(jd->sig_ioo, _compare_op_exc_match_helper, left, right);
-        /* This returns 0 to indicate error, 1 to indicate OK */
-        BRANCH_IF(tmp, do_exc_match, IR_LIKELY);
-        STORE(restmp, CONSTANT_PYOBJ(NULL));
-        BRANCH(after_exc_match);
+        RTCALL_NZ(jd->sig_ioo, _compare_op_exc_match_helper, left, right);
 
         /* Finally, run PyErr_GivenExceptionMatches */
         LABEL(do_exc_match);
         JVALUE exc_matches = CALL_NATIVE(jd->sig_ioo, PyErr_GivenExceptionMatches, left, right);
-        STORE(restmp, TERNARY(exc_matches, CONSTANT_PYOBJ(Py_True), CONSTANT_PYOBJ(Py_False)));
-        INCREF(LOAD(restmp));
-
-        LABEL(after_exc_match);
-        res = LOAD(restmp);
+        res = TERNARY(exc_matches, CONSTANT_PYOBJ(Py_True), CONSTANT_PYOBJ(Py_False));
+        INCREF(res);
         break;
     }
     default: {
         JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_int);
-        res = CALL_NATIVE(sig, PyObject_RichCompare, left, right, CONSTANT_INT(oparg));
+        res = RTCALL_NZ(sig, PyObject_RichCompare, left, right, CONSTANT_INT(oparg));
         break;
     }
     }
 
+    STACKADJ(-2);
     DECREF(left);
     DECREF(right);
-    SET_TOP(res);
-    GOTO_ERROR_IF_NOT(res);
+    PUSH(res);
     SOFT_EVAL_BREAK_CHECK();
 }
 
@@ -2522,7 +2504,9 @@ EMITTER_FOR(GET_ITER) {
     JVALUE iterable = POP();
     JVALUE iter = CALL_NATIVE(jd->sig_oo, PyObject_GetIter, iterable);
     DECREF(iterable);
-    GOTO_ERROR_IF_NOT(iter);
+    if (!Py_JITNoExc) {
+        GOTO_ERROR_IF_NOT(iter);
+    }
     PUSH(iter);
     SOFT_EVAL_BREAK_CHECK();
 }
@@ -2573,7 +2557,9 @@ EMITTER_FOR(FOR_ITER) {
     LABEL(handle_null);
     BRANCH_IF_NOT(IR_PyErr_Occurred(), cleanup, IR_LIKELY);
     JVALUE ret = CALL_NATIVE(jd->sig_io, PyErr_ExceptionMatches, CONSTANT_PYOBJ(PyExc_StopIteration));
-    GOTO_ERROR_IF_NOT(ret); /* This may actually be likely? */
+    if (!Py_JITNoExc) {
+        GOTO_ERROR_IF_NOT(ret); /* This may actually be likely? */
+    }
     CALL_PyErr_Clear();
 
     LABEL(cleanup);
@@ -2811,51 +2797,12 @@ EMITTER_FOR(CALL_METHOD) {
     }
     XDECREF(POP());
     XDECREF(POP());
-    GOTO_ERROR_IF_NOT(LOAD(res));
+    if (!Py_JITNoExc) {
+        GOTO_ERROR_IF_NOT(LOAD(res));
+    }
     PUSH(LOAD(res));
     HARD_EVAL_BREAK_CHECK();
 }
-
-#if 0
-/* Emit a call to a function from the stack. The stack is expected to be arranged like so:
-
-    callable, arg1, ..., argN, kwarg1, ..., kwargM
-
-    where nargs = N, and M = (kwnames ? PyTuple_GET_SIZE(kwnames) : 0)
-
-    Returns the return value (ir_value) of the function.
-    Does not modify the stack. Does not check for NULL return.
-
- */
-static ir_value
-_call_function(JITData *jd, size_t nargs, PyObject *kwnames) {
-    _pyjit_callsite *cs = _pyjit_new_fastcall(nargs, kwnames);
-    assert(cs);
-
-    /* Invoke the trampoline */
-    ir_value entrypoint = _pyjit_load_entrypoint(jd->func, cs);
-
-    /* Invoke the entry point: entrypoint(callable, args..., kwargs...) */
-    size_t nkwargs = kwnames ? PyTuple_GET_SIZE(kwnames) : 0;
-    size_t total_args = 1 + nargs + nkwargs;
-    ir_value *args = (ir_value*)PyMem_RawMalloc(total_args * sizeof(ir_value));
-    size_t j = 0;
-    int k = nargs + nkwargs + 1;
-    args[j++] = PEEK(k--); /* Callable */
-    size_t stack_base = nargs + nkwargs;
-    for (size_t i = 0; i < nargs; i++) {
-        args[j++] = PEEK(k--);
-    }
-    for (size_t i = 0; i < nkwargs; i++) {
-        args[j++] = PEEK(k--);
-    }
-    assert(j == total_args);
-    assert(k == 0);
-    ir_value ret = ir_call(jd->func, entrypoint, args);
-    PyMem_RawFree(args);
-    return ret;
-}
-#endif
 
 EMITTER_FOR(CALL_FUNCTION) {
     JVALUE res = _emit_call_function(jd, PEEK(oparg+1), oparg, NULL);
@@ -2863,7 +2810,9 @@ EMITTER_FOR(CALL_FUNCTION) {
         DECREF(POP());
     }
     DECREF(POP()); /* callable */
-    GOTO_ERROR_IF_NOT(res);
+    if (!Py_JITNoExc) {
+        GOTO_ERROR_IF_NOT(res);
+    }
     PUSH(res);
     HARD_EVAL_BREAK_CHECK();
 }
