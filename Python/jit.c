@@ -126,6 +126,11 @@ static int jf_clear(PyJITFunctionObject *op) {
 
     _jeval_cleanup(op);
 
+    if (op->trampoline) {
+        PyJIT_CallTrampoline_Free(op->trampoline);
+        op->trampoline = NULL;
+    }
+
     Py_CLEAR(op->code);
     Py_CLEAR(op->globals);
     Py_CLEAR(op->builtins);
@@ -143,6 +148,9 @@ static void jf_dealloc(PyJITFunctionObject *op) {
 
     /* This must be done first, since it may use code/globals/builtins. */
     _jeval_cleanup(op);
+
+    if (op->trampoline)
+        PyJIT_CallTrampoline_Free(op->trampoline);
 
     Py_XDECREF(op->code);
     Py_XDECREF(op->globals);

@@ -2793,9 +2793,9 @@ EMITTER_FOR(LOAD_METHOD) {
 static
 ir_type _create_call_signature(JITData *jd, int oparg) {
     ir_type ret;
-    /* PyObject* (PyFunctionObject*, PyJIT_CallSiteSig*, pyarg1, ..., pyargN) */
+    /* PyObject* (PyObject* callable, PyJIT_CallSiteSig*, pyarg1, ..., pyargN) */
     ir_type *argtypes = (ir_type*)malloc((2 + oparg) * sizeof(ir_type));
-    argtypes[0] = ir_type_pyfunctionobject_ptr;
+    argtypes[0] = ir_type_pyobject_ptr;
     argtypes[1] = ir_type_pyjitcallsitesig_ptr;
     for (int i = 0; i < oparg; i++) {
         argtypes[2 + i] = ir_type_pyobject_ptr;
@@ -2805,37 +2805,31 @@ ir_type _create_call_signature(JITData *jd, int oparg) {
     return ret;
 }
 
-/* From ceval */
-PyObject *call_function_extern(PyObject **, Py_ssize_t,
-                               PyObject *);
-
 ir_value _emit_call_function(JITData *jd, ir_value callable, int oparg, PyObject *kwnames) {
-    JVALUE res = ALLOCA(ir_type_pyobject_ptr);
+    JTYPE sig = _create_call_signature(jd, oparg);
+    JVALUE trampoline = ALLOCA(sig);
     IF_ELSE(IR_PyFunction_Check(callable), IR_SEMILIKELY, {
-        PyJITCallSiteSig* css = PyJIT_CallSiteSig_GetOrCreate(oparg, kwnames);
-        JTYPE sig = _create_call_signature(jd, oparg);
         JVALUE callable_casted = CAST(ir_type_pyfunctionobject_ptr, callable);
-        JVALUE trampoline = LOAD_FIELD(callable_casted, PyFunctionObject, func_jit_call, sig);
-        ir_value *args = (ir_value*)malloc((2 + oparg) * sizeof(ir_value));
-        args[0] = callable_casted;
-        args[1] = CONSTANT_PTR(ir_type_pyjitcallsitesig_ptr, css);
-        for (int i = 0; i < oparg; i++) {
-            args[2 + i] = PEEK(oparg - i);
-        }
-        STORE(res, ir_call(jd->func, trampoline, 2 + oparg, args));
-        free(args);
+        STORE(trampoline, LOAD_FIELD(callable_casted, PyFunctionObject, func_jit_call, sig));
     }, {
-        /* This assumes the arguments are at the top of the "stack" */
-        assert(jd->tmpstack_size >= (size_t)oparg + 1);
-        STORE_AT_INDEX(jd->tmpstack, CONSTANT_INT(0), callable);
-        for (int i = 0; i < oparg; i++) {
-            STORE_AT_INDEX(jd->tmpstack, CONSTANT_INT(i+1), PEEK(oparg-i));
-        }
-        JVALUE endptr = ir_get_index_ptr(jd->func, jd->tmpstack, CONSTANT_INT(oparg+1));
-        JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr_ptr, ir_type_pyssizet, ir_type_pyobject_ptr);
-        STORE(res, CALL_NATIVE(sig, call_function_extern, endptr, CONSTANT_PYSSIZET(oparg), CONSTANT_PYOBJ(kwnames)));
+        IF_ELSE(IR_PyCFunction_Check(callable), IR_SEMILIKELY, {
+            JVALUE callable_casted = CAST(ir_type_pycfunctionobject_ptr, callable);
+            STORE(trampoline, LOAD_FIELD(callable_casted, PyCFunctionObject, m_jit_call, sig));
+        }, {
+            STORE(trampoline, CONSTANT_PTR(sig, _PyJIT_GenericTrampoline));
+        });
     });
-    return LOAD(res);
+
+    PyJITCallSiteSig* css = PyJIT_CallSiteSig_GetOrCreate(oparg, kwnames);
+    ir_value *args = (ir_value*)malloc((2 + oparg) * sizeof(ir_value));
+    args[0] = callable;
+    args[1] = CONSTANT_PTR(ir_type_pyjitcallsitesig_ptr, css);
+    for (int i = 0; i < oparg; i++) {
+        args[2 + i] = PEEK(oparg - i);
+    }
+    JVALUE res = ir_call(jd->func, LOAD(trampoline), 2 + oparg, args);
+    free(args);
+    return res;
 }
 
 EMITTER_FOR(CALL_METHOD) {

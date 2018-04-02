@@ -59,6 +59,16 @@ struct PyMethodDef {
     int         ml_flags;   /* Combination of METH_xxx flags, which mostly
                                describe the args expected by the C func */
     const char  *ml_doc;    /* The __doc__ attribute, or NULL */
+
+    /* PYJIT WARNING:
+       This structure is exposed by the C API, and most often initialized
+       using an initializer list. This extra field must be at the end of this
+       struct so as to not interfere with the initializer ordering.
+       It will be zero-initialized by the compiler, and later initialized
+       for bootstraping when the first PyCFunctionObject is called.
+       TODO: Maybe just use an adt_hashmap for storing this, to be safe?
+     */
+    void *ml_trampoline;    /* JIT trampoline */
 };
 typedef struct PyMethodDef PyMethodDef;
 
@@ -101,6 +111,7 @@ PyAPI_FUNC(PyObject *) PyCFunction_NewEx(PyMethodDef *, PyObject *,
 #ifndef Py_LIMITED_API
 typedef struct {
     PyObject_HEAD
+    void *m_jit_call; /* JIT trampoline entrypoint */
     PyMethodDef *m_ml; /* Description of the C function to call */
     PyObject    *m_self; /* Passed as 'self' arg to the C func, can be NULL */
     PyObject    *m_module; /* The __module__ attribute, can be anything */

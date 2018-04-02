@@ -26,6 +26,10 @@ typedef struct _PyJIT_CallTrampoline {
 } PyJIT_CallTrampoline;
 
 void* PyJIT_CallTrampoline_GetBootstrap(void);
+void* PyJIT_CallTrampoline_GetEntryPoint(PyJIT_CallTrampoline *t);
+void PyJIT_CallTrampoline_Free(PyJIT_CallTrampoline *t);
+
+PyObject* _PyJIT_GenericTrampoline(PyObject *callable, PyJITCallSiteSig *css, ...);
 
 #ifdef __cplusplus
 }

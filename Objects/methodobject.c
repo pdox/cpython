@@ -45,6 +45,7 @@ PyCFunction_NewEx(PyMethodDef *ml, PyObject *self, PyObject *module)
     op->m_self = self;
     Py_XINCREF(module);
     op->m_module = module;
+    op->m_jit_call = PyJIT_CallTrampoline_GetEntryPoint((PyJIT_CallTrampoline*)ml->ml_trampoline);
     _PyObject_GC_TRACK(op);
     return (PyObject *)op;
 }
