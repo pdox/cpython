@@ -22,11 +22,11 @@ typedef void (*PyJITEmitHandlerFunction)(JITData *jd, int opcode);
 typedef void (*PyJITEmitterFunction)(JITData *jd, int next_instr_index, int opcode, int oparg);
 typedef void (*PyJITSpecialEmitterFunction)(JITData *jd);
 
-/* Because trampolines need their first two arguments (%rdi and %rsi)
-   for the callable and callsitesig, it makes sense to ignore the first two arguments
-   of the direct entrypoint, to match the alignment of the trampoline, so that we
-   don't have to shift the arguments around for the most common kind of call. */
-#define DEAD_ARGS 2
+/* Because trampolines need to have the callable and callsite signature as their first
+   two arguments, it makes sense to ignore the first two arguments of the direct
+   entrypoint to match the signature the trampoline. By doing this, we can avoid
+   shifting arguments around for the most common calls. */
+#define ARG_SHIFT 2
 
 typedef struct resume_entry {
     int f_lasti;
@@ -46,13 +46,32 @@ typedef struct {
 
 typedef struct _JITData {
     PyJITFunctionObject *jit_function;
+    _JITState *jstate;
     PyObject *globals;
     PyObject *builtins;
     PyCodeObject *co; /* Borrowed reference */
-    ir_context context;
-    ir_func func;
+    Py_ssize_t inst_count;
 
-    _JITState *jstate;
+    /* Code info */
+    int is_generator;
+    int has_vararg;
+    int has_kwdict;
+    int has_closure;
+    int has_locals;
+    Py_ssize_t total_pyargs;
+    Py_ssize_t total_direct_args;
+
+    /* CodeGen settings */
+    int use_frame_object;
+    int use_virtual_locals;
+    int update_blockstack; /* Keep f_blockstack in the state ceval expects.
+                              Needed for generators, where execution can switch between
+                              the JIT and the interpreter (e.g. if tracing is enabled
+                              while yielding) */
+
+    ir_context context;
+    ir_type func_sig;
+    ir_func func;
 
     /* Some common function signature types:
 
@@ -87,46 +106,28 @@ typedef struct _JITData {
     /* CONSTANT_PYOBJ(NULL) */
     ir_value null;
 
-    Py_ssize_t inst_count;
-    int is_gen;
-    int use_virtual_locals;
-    int use_frame_object;
-    Py_ssize_t total_pyargs;
-    Py_ssize_t total_direct_args;
-    int has_vararg;
-    int has_kwdict;
-    int has_closure;
-    int has_locals;
-
-    int update_blockstack; /* Keep f_blockstack in the state ceval expects.
-                              Needed for generators, where execution can switch between
-                              the JIT and the interpreter (e.g. if tracing is enabled
-                              while yielding) */
-
     ir_label body_start;
-
-    ir_label jump;
-    ir_label jump_int;
-    ir_label error;
-    ir_label error_int;
-    ir_label fast_block_end;
-    ir_label fast_block_end_int;
     ir_label error_exit;
     ir_label exit;
     ir_label unknown_handler;
 
-    resume_entry *resume_entry_list;
-
-    ir_value tstate;
-    ir_value f;
-    ir_value rf;
-    ir_value throwflag;
-    ir_value fastlocals;
-    ir_value retval;
-
     /* Temporary stack is used for call_function */
     ir_value tmpstack;
     size_t tmpstack_size;
+
+    /* Bytecode instruction boundary labels */
+    ir_label *jmptab;
+
+    ir_value f;
+    ir_value throwflag;
+    ir_value retval;
+
+    ir_value tstate;
+    ir_value rf;
+    ir_value fastlocals;
+
+    /* Used to keep track of generator resumes */
+    resume_entry *resume_entry_list;
 
     /* Used during stack lowering pass */
     int stack_size;
@@ -135,8 +136,6 @@ typedef struct _JITData {
     /* Virtual locals allocations */
     size_t fastlocals_size;
     ir_value *fastlocals_values;
-
-    ir_label jmptab[1];
 } JITData;
 
 #define ADD_RESUME_ENTRY(_f_lasti, _resume_point) do { \
@@ -210,6 +209,42 @@ int _label_to_instr_index(JITData *jd, ir_label target) {
     assert(i < jd->inst_count);
     return i;
 }
+
+/* Scan bytecode in order, automatically resolving EXTENDED_ARG.
+
+   Usage:
+       SCAN_BYTECODE(co, {
+           ... code here ...
+       });
+
+   Inside the loop, the following variables are available:
+       opcode - the opcode (never EXTENDED_ARG)
+       oparg - the argument to the opcode
+       opfirst - the index of the first code unit for this instruction
+       oplast - the index of the last code unit for this instruction
+ */
+
+#define SCAN_BYTECODE(co, loop_body) do { \
+    _Py_CODEUNIT *_code = (_Py_CODEUNIT*)PyBytes_AS_STRING((co)->co_code); \
+    Py_ssize_t _inst_count = PyBytes_GET_SIZE((co)->co_code)/sizeof(_Py_CODEUNIT); \
+    Py_ssize_t _inst_index; \
+    for (_inst_index = 0; _inst_index < _inst_count; _inst_index++) { \
+        int opcode = _Py_OPCODE(_code[_inst_index]); \
+        int oparg = _Py_OPARG(_code[_inst_index]); \
+        int opfirst = _inst_index; \
+        int oplast; \
+        (void)opfirst; \
+        (void)oplast; \
+        while (opcode == EXTENDED_ARG) { \
+            ++_inst_index; \
+            opcode = _Py_OPCODE(_code[_inst_index]); \
+            oparg = (oparg << 8) | _Py_OPARG(_code[_inst_index]); \
+        } \
+        oplast = _inst_index; \
+        { loop_body } \
+    } \
+} while (0)
+
 
 /* Fetch the previous instruction.
    Places the values in 'opcode_ptr' and 'oparg_ptr' respectively. (both int*)
@@ -2791,22 +2826,28 @@ EMITTER_FOR(LOAD_METHOD) {
 }
 
 static
-ir_type _create_call_signature(JITData *jd, int oparg) {
+ir_type _create_direct_signature(ir_context context, int argcount) {
     ir_type ret;
     /* PyObject* (PyObject* callable, PyJIT_CallSiteSig*, pyarg1, ..., pyargN) */
-    ir_type *argtypes = (ir_type*)malloc((2 + oparg) * sizeof(ir_type));
+    ir_type *argtypes = (ir_type*)malloc((2 + argcount) * sizeof(ir_type));
     argtypes[0] = ir_type_pyobject_ptr;
     argtypes[1] = ir_type_pyjitcallsitesig_ptr;
-    for (int i = 0; i < oparg; i++) {
+    for (int i = 0; i < argcount; i++) {
         argtypes[2 + i] = ir_type_pyobject_ptr;
     }
-    ret = ir_create_function_type(jd->context, ir_type_pyobject_ptr, 2 + oparg, argtypes);
+    ret = ir_create_function_type(context, ir_type_pyobject_ptr, 2 + argcount, argtypes);
     free(argtypes);
     return ret;
 }
 
+static ir_type _create_eval_signature(ir_context context) {
+    /* Signature: PyObject* func(f, throwflag); */
+    ir_type argtypes[] = { ir_type_pyframeobject_ptr, ir_type_int };
+    return ir_create_function_type(context, ir_type_pyobject_ptr, sizeof(argtypes)/sizeof(argtypes[0]), argtypes);
+}
+
 ir_value _emit_call_function(JITData *jd, ir_value callable, int oparg, PyObject *kwnames) {
-    JTYPE sig = _create_call_signature(jd, oparg);
+    JTYPE sig = _create_direct_signature(jd->context, oparg);
     JVALUE trampoline = ALLOCA(sig);
     IF_ELSE(IR_PyFunction_Check(callable), IR_SEMILIKELY, {
         JVALUE callable_casted = CAST(ir_type_pyfunctionobject_ptr, callable);
@@ -3091,7 +3132,7 @@ EMITTER_FOR(EXTENDED_ARG) {
 static void
 _initialize_virtual_locals(JITData *jd)
 {
-    assert(!jd->is_gen);
+    assert(!jd->is_generator);
     PyCodeObject *co = jd->co;
 
     /* Precompute which slots are copied from args, which are copied into cells,
@@ -3131,7 +3172,7 @@ _initialize_virtual_locals(JITData *jd)
         if (slotmap[i] == -1) {
             ir_dellocal(jd->func, i);
         } else {
-            ir_value value = ir_func_get_argument(jd->func, DEAD_ARGS + slotmap[i]);
+            ir_value value = ir_func_get_argument(jd->func, ARG_SHIFT + slotmap[i]);
             INCREF(value);
             ir_setlocal(jd->func, i, value);
         }
@@ -3145,7 +3186,7 @@ _initialize_virtual_locals(JITData *jd)
         if (src == -1) {
             value = jd->null;
         } else {
-            value = ir_func_get_argument(jd->func, DEAD_ARGS + slotmap[i]);
+            value = ir_func_get_argument(jd->func, ARG_SHIFT + slotmap[i]);
         }
         ir_value cell = CALL_PyCell_New(value);
         STORE(jd->fastlocals_values[i], cell);
@@ -3154,7 +3195,7 @@ _initialize_virtual_locals(JITData *jd)
 
     /* Copy closure cells */
     if (jd->has_closure) {
-        ir_value closure = ir_func_get_argument(jd->func, DEAD_ARGS + jd->total_pyargs);
+        ir_value closure = ir_func_get_argument(jd->func, ARG_SHIFT + jd->total_pyargs);
         ir_value ob_item = IR_PyTuple_OB_ITEM(closure);
         i = co->co_nlocals + ncellvars;
         for (int j = 0; j < nfreevars; j++, i++) {
@@ -3170,58 +3211,92 @@ _initialize_virtual_locals(JITData *jd)
 
 static void
 _clear_virtual_locals(JITData *jd) {
-    assert(!jd->is_gen);
+    assert(!jd->is_generator);
     for (size_t i = 0; i < jd->fastlocals_size; i++) {
         XDECREF(LOAD(jd->fastlocals_values[i]));
     }
 }
 
-static void
-translate_bytecode(JITData *jd, PyCodeObject *co)
-{
-    assert(PyBytes_Check(co->co_code));
-    assert(PyBytes_GET_SIZE(co->co_code) <= INT_MAX);
-    assert(PyBytes_GET_SIZE(co->co_code) % sizeof(_Py_CODEUNIT) == 0);
-    assert(_Py_IS_ALIGNED(PyBytes_AS_STRING(co->co_code), sizeof(_Py_CODEUNIT)));
-    _Py_CODEUNIT *code = (_Py_CODEUNIT*)PyBytes_AS_STRING(co->co_code);
-    Py_ssize_t i;
-    Py_ssize_t inst_count = PyBytes_GET_SIZE(co->co_code)/sizeof(_Py_CODEUNIT);
+static int _uint64_cmp(const void *ap, const void *bp) {
+    uint64_t a = *((const uint64_t*)ap);
+    uint64_t b = *((const uint64_t*)bp);
+    if (a < b) return -1;
+    if (a > b) return 1;
+    return 0;
+}
 
-    jd->inst_count = inst_count;
+uint64_t djb2_hash(const unsigned char *in, Py_ssize_t inlen) {
+    uint64_t hash = 5381;
+    for (Py_ssize_t i = 0; i < inlen; i++) {
+        hash = ((hash << 5) + hash) + in[i];
+    }
+    return hash;
+}
 
-    jd->error_exit = NULL;
-    jd->exit = ir_label_new(jd->func, "exit");
-    jd->unknown_handler = ir_label_new(jd->func, "unknown_handler");
-    jd->body_start = ir_label_new(jd->func, "body_start");
-
-    char namebuf[64];
-    for (i = 0; i < inst_count; i++) {
-        sprintf(namebuf, "inst_%ld", (long)i);
-        jd->jmptab[i] = ir_label_new(jd->func, namebuf);
+static int _needs_frame_introspection(PyCodeObject *co) {
+    /* If the function's hash is in jit_locals_hack, force real locals. */
+    if (Py_JITSuper) {
+        uint64_t hash = djb2_hash((unsigned char*)PyBytes_AS_STRING(co->co_code), PyBytes_GET_SIZE(co->co_code));
+        void *match = bsearch(&hash, jit_locals_hack, sizeof(jit_locals_hack)/sizeof(uint64_t), sizeof(uint64_t), _uint64_cmp);
+        if (match)
+            return 1;
     }
 
-    /* Setup temporary stack */
-    jd->tmpstack_size = 6; /* 6 needed by fast_block_unwind */
-    for (i = 0; i < inst_count; i++) {
-        int opcode = _Py_OPCODE(code[i]);
-        int oparg = _Py_OPARG(code[i]);
-        while (opcode == EXTENDED_ARG) {
-            ++i;
-            opcode = _Py_OPCODE(code[i]);
-            oparg = (oparg << 8) | _Py_OPARG(code[i]);
-        }
-        if (opcode == CALL_FUNCTION || opcode == CALL_METHOD || opcode == CALL_FUNCTION_KW) {
-            jd->tmpstack_size = Py_MAX(jd->tmpstack_size, (size_t)oparg + 2);
-        }
-        if (opcode == WITH_CLEANUP_START) {
-            jd->tmpstack_size = Py_MAX(jd->tmpstack_size, 5);
-        }
+    /* IMPORT_STAR uses PyFrame_FastToLocals */
+    SCAN_BYTECODE(co, {
+        if (opcode == IMPORT_STAR)
+            return 1;
+    });
+    return 0;
+}
+
+static void _init_jitdata(JITData *jd, PyCodeObject *co, PyObject *globals, PyObject *builtins) {
+    jd->jit_function = (PyJITFunctionObject*)PyJITFunction_New((PyObject*)co, globals, builtins);
+    jd->jstate = calloc(sizeof(_JITState), 1);
+    jd->globals = globals;
+    jd->builtins = builtins;
+    jd->co = co;
+    jd->inst_count = PyBytes_GET_SIZE(co->co_code)/sizeof(_Py_CODEUNIT);
+
+    jd->is_generator = (co->co_flags & (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR)) ? 1 : 0;
+    jd->has_vararg = (co->co_flags & CO_VARARGS) ? 1 : 0;
+    jd->has_kwdict = (co->co_flags & CO_VARKEYWORDS) ? 1 : 0;
+    jd->has_closure = (PyTuple_GET_SIZE(co->co_freevars) > 0) ? 1 : 0;
+    jd->has_locals = !(co->co_flags & CO_NEWLOCALS);
+    jd->total_pyargs = co->co_argcount + co->co_kwonlyargcount + jd->has_vararg + jd->has_kwdict;
+    jd->total_direct_args = jd->total_pyargs + jd->has_closure + jd->has_locals;
+
+    /* CodeGen settings */
+    jd->use_frame_object =
+        globals == NULL ||
+        builtins == NULL ||
+        jd->is_generator ||
+        jd->has_locals ||
+        _needs_frame_introspection(co);
+    jd->use_virtual_locals = !jd->use_frame_object;
+    jd->update_blockstack = jd->use_frame_object;
+
+    if (Py_JITDebugFlag > 1) {
+        fprintf(stderr, "    code = %p\n", jd->co);
+        fprintf(stderr, "    globals = %p\n", jd->globals);
+        fprintf(stderr, "    builtins = %p\n", jd->builtins);
+        fprintf(stderr, "    is_generator = %d\n", jd->is_generator);
+        fprintf(stderr, "    has_vararg = %d\n", jd->has_vararg);
+        fprintf(stderr, "    has_kwdict = %d\n", jd->has_kwdict);
+        fprintf(stderr, "    has_closure = %d\n", jd->has_closure);
+        fprintf(stderr, "    has_locals = %d\n", jd->has_locals);
+        fprintf(stderr, "    total_pyargs = %ld\n", (long)jd->total_pyargs);
+        fprintf(stderr, "    use_frame_object = %d\n", jd->use_frame_object);
+        fprintf(stderr, "    use_virtual_locals = %d\n", jd->use_virtual_locals);
+        fprintf(stderr, "    update_blockstack = %d\n", jd->update_blockstack);
     }
-    if (jd->tmpstack_size > 0) {
-        jd->tmpstack = ir_alloca(jd->func, ir_type_pyobject_ptr, jd->tmpstack_size);
-    } else {
-        jd->tmpstack = NULL;
-    }
+
+    /* Initialize IR */
+    jd->context = ir_context_new();
+    jd->func_sig = jd->use_frame_object ?
+        _create_eval_signature(jd->context) :
+        _create_direct_signature(jd->context, jd->total_direct_args);
+    jd->func = ir_func_new(jd->context, PyUnicode_AsUTF8(co->co_name), jd->func_sig);
 
     /* Common function signatures (TODO: make these shared and static) */
     jd->sig_o = CREATE_SIGNATURE(ir_type_pyobject_ptr);
@@ -3232,17 +3307,34 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
     jd->sig_ooooooo = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
     jd->sig_vp = CREATE_SIGNATURE(ir_type_void, ir_type_void_ptr);
     jd->sig_i = CREATE_SIGNATURE(ir_type_int);
-    jd->sig_ioi = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr, ir_type_int);
-    jd->sig_if = CREATE_SIGNATURE(ir_type_int, ir_type_pyframeobject_ptr);
     jd->sig_io = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr);
     jd->sig_ioo = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
     jd->sig_iooo = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
+    jd->sig_ioi = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr, ir_type_int);
+    jd->sig_if = CREATE_SIGNATURE(ir_type_int, ir_type_pyframeobject_ptr);
     jd->sig_ol = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_long);
     jd->dealloc_sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr);
     jd->blocksetup_sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyframeobject_ptr, ir_type_int, ir_type_int, ir_type_int);
     jd->blockpop_sig = CREATE_SIGNATURE(ir_type_pytryblock_ptr, ir_type_pyframeobject_ptr);
     jd->exc_triple_sig = CREATE_SIGNATURE(ir_type_void, ir_type_pyobject_ptr_ptr, ir_type_pyobject_ptr_ptr, ir_type_pyobject_ptr_ptr);
+
     jd->null = CONSTANT_PYOBJ(NULL);
+
+    jd->body_start = ir_label_new(jd->func, "body_start");
+    jd->error_exit = NULL;
+    jd->exit = ir_label_new(jd->func, "exit");
+    jd->unknown_handler = ir_label_new(jd->func, "unknown_handler");
+
+    jd->tmpstack_size = 6;
+    jd->tmpstack = ir_alloca(jd->func, ir_type_pyobject_ptr, jd->tmpstack_size);
+
+    /* TODO: Only create labels at instruction starts */
+    jd->jmptab = (ir_label*)malloc(sizeof(ir_label) * jd->inst_count);
+    for (Py_ssize_t i = 0; i < jd->inst_count; i++) {
+        char namebuf[64];
+        sprintf(namebuf, "inst_%ld", (long)i);
+        jd->jmptab[i] = ir_label_new(jd->func, namebuf);
+    }
 
     if (jd->use_frame_object) {
         /* Arguments: f, throwflag */
@@ -3253,8 +3345,13 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
         jd->f = NULL;
         jd->throwflag = NULL;
     }
-
     jd->retval = ALLOCA(ir_type_pyobject_ptr);
+}
+
+static void
+_emit_function_body(JITData *jd)
+{
+    PyCodeObject *co = jd->co;
 
     /* Initialization sequence */
     jd->tstate = IR_PyThreadState_GET();
@@ -3278,7 +3375,7 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
             rflocals = RTCALL_PyDict_New();
         } else {
             assert(jd->has_locals);
-            rflocals = ir_func_get_argument(jd->func, DEAD_ARGS + jd->total_direct_args - 1);
+            rflocals = ir_func_get_argument(jd->func, ARG_SHIFT + jd->total_direct_args - 1);
             INCREF(rflocals);
         }
         IR_PyRunFrame_PushNoFrame(jd->rf, jd->tstate, jf, rflocals);
@@ -3299,7 +3396,7 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
         jd->fastlocals_values = NULL;
     }
 
-    /* Setup retval and why */
+    /* Setup retval */
     SET_RETVAL(CONSTANT_PYOBJ(NULL));
 
     if (jd->use_frame_object) {
@@ -3310,7 +3407,7 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
         IR_ASSERT(CMP_GE(LOAD_F_LASTI(), CONSTANT_INT(-1)));
     }
 
-    if (jd->is_gen) {
+    if (jd->is_generator) {
         /* To be filled in by ir_lower() */
         ir_yield_dispatch(jd->func, jd->body_start);
     }
@@ -3331,7 +3428,7 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
         STORE_FIELD(FRAMEPTR(), PyFrameObject, f_stacktop, ir_type_pyobject_ptr_ptr, CONSTANT_PTR(ir_type_pyobject_ptr_ptr, NULL));
     }
 
-    if (jd->is_gen) {
+    if (jd->is_generator) {
         GOTO_ERROR_IF(jd->throwflag);
     }
 
@@ -3344,29 +3441,20 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
 
     HARD_EVAL_BREAK_CHECK_EX(0);
 
-    for (i = 0; i < inst_count; i++) {
-        int opcode = _Py_OPCODE(code[i]);
-        int oparg = _Py_OPARG(code[i]);
-        LABEL(jd->jmptab[i]);
-
-        while (opcode == EXTENDED_ARG) {
-            ++i;
-            opcode = _Py_OPCODE(code[i]);
-            oparg = (oparg << 8) | _Py_OPARG(code[i]);
-            LABEL(jd->jmptab[i]);
-        }
+    SCAN_BYTECODE(co, {
+        LABEL(jd->jmptab[opfirst]);
 
         char namebuf[64];
-        sprintf(namebuf, "inst_%ld.%s", (long)i, opcode_names[opcode]);
+        sprintf(namebuf, "inst_%ld.%s", (long)opfirst, opcode_names[opcode]);
         ir_label_push_prefix(jd->func, namebuf);
 
         // Emit instruction
         // Set f->f_lasti
-        STORE_F_LASTI(CONSTANT_INT(i * sizeof(_Py_CODEUNIT)));
-        opcode_emitter_table[opcode](jd, i + 1, opcode, oparg);
+        STORE_F_LASTI(CONSTANT_INT(oplast * sizeof(_Py_CODEUNIT)));
+        opcode_emitter_table[opcode](jd, oplast + 1, opcode, oparg);
 
         ir_label_pop_prefix(jd->func);
-    }
+    });
 
     /* Shouldn't ever fall through to this area */
     CRASH();
@@ -3400,150 +3488,34 @@ translate_bytecode(JITData *jd, PyCodeObject *co)
 
 static void ir_lower(JITData *jd);
 
-static int _uint64_cmp(const void *ap, const void *bp) {
-    uint64_t a = *((const uint64_t*)ap);
-    uint64_t b = *((const uint64_t*)bp);
-    if (a < b) return -1;
-    if (a > b) return 1;
-    return 0;
-}
-
-uint64_t djb2_hash(const unsigned char *in, Py_ssize_t inlen) {
-    uint64_t hash = 5381;
-    for (Py_ssize_t i = 0; i < inlen; i++) {
-        hash = ((hash << 5) + hash) + in[i];
-    }
-    return hash;
-}
-
-int _should_force_real_locals(PyCodeObject *co) {
-    /* IMPORT_STAR uses PyFrame_FastToLocals */
-    Py_ssize_t inst_count = PyBytes_GET_SIZE(co->co_code)/sizeof(_Py_CODEUNIT);
-    _Py_CODEUNIT *code = (_Py_CODEUNIT*)PyBytes_AS_STRING(co->co_code);
-    for (Py_ssize_t i = 0; i < inst_count; i++) {
-        if (_Py_OPCODE(code[i]) == IMPORT_STAR) return 1;
-    }
-
-    /* If the function's hash is in jit_locals_hack, force real locals. */
-    if (Py_JITSuper) {
-        uint64_t hash = djb2_hash((unsigned char*)code, inst_count * sizeof(_Py_CODEUNIT));
-        void *match = bsearch(&hash, jit_locals_hack, sizeof(jit_locals_hack)/sizeof(uint64_t), sizeof(uint64_t), _uint64_cmp);
-        if (match)
-            return 1;
-    }
-    return 0;
-}
-
-void _jeval_cleanup(PyJITFunctionObject *jf) {
-    if (jf->object != NULL) {
-        ir_object_free((ir_object)jf->object);
-        jf->object = NULL;
-    }
-    if (jf->eval_entrypoint_object != NULL) {
-        ir_object_free((ir_object)jf->eval_entrypoint_object);
-        jf->eval_entrypoint_object = NULL;
-    }
-    if (jf->jstate != NULL) {
-        _JITState *js = (_JITState*)jf->jstate;
-        if (js->globals_dl)
-            _PyDict_DeleteListener((PyDictObject*)jf->globals, js->globals_dl);
-        if (js->builtins_dl)
-            _PyDict_DeleteListener((PyDictObject*)jf->builtins, js->builtins_dl);
-        if (js->load_global_cache != NULL)
-            free(js->load_global_cache);
-        PyMem_RawFree(js);
-        jf->jstate = NULL;
-    }
-}
-
 PyJITFunctionObject*
 _PyJIT_CodeGen(PyCodeObject *co, PyObject *globals, PyObject *builtins) {
     assert(PyCode_Check(co));
+    assert(PyBytes_Check(co->co_code));
+    assert(PyBytes_GET_SIZE(co->co_code) <= INT_MAX);
+    assert(PyBytes_GET_SIZE(co->co_code) % sizeof(_Py_CODEUNIT) == 0);
+    assert(_Py_IS_ALIGNED(PyBytes_AS_STRING(co->co_code), sizeof(_Py_CODEUNIT)));
+
     if (globals == NULL || !PyDict_CheckExact(globals) ||
         builtins == NULL || !PyDict_CheckExact(builtins)) {
         /* Force generic code */
         globals = NULL;
         builtins = NULL;
     }
-    Py_ssize_t inst_count = PyBytes_GET_SIZE(co->co_code)/sizeof(_Py_CODEUNIT);
-    size_t total_size = sizeof(JITData) + inst_count * sizeof(ir_label);
-    JITData *jd = PyMem_RawMalloc(total_size);
-    if (jd == NULL) {
-        PyErr_NoMemory();
-        return NULL;
-    }
-    memset(jd, 0, total_size);
-    jd->jstate = PyMem_RawCalloc(sizeof(_JITState), 1);
-    assert(jd->jstate);
-    jd->jit_function = (PyJITFunctionObject*)PyJITFunction_New((PyObject*)co, globals, builtins);
-    jd->globals = globals;
-    jd->builtins = builtins;
-    jd->co = co;
-    jd->context = ir_context_new();
-    jd->is_gen = (co->co_flags & (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR)) ? 1 : 0;
-    jd->update_blockstack = jd->is_gen;
-    jd->use_virtual_locals = !jd->is_gen && !_should_force_real_locals(co);
-    jd->has_vararg = (co->co_flags & CO_VARARGS) ? 1 : 0;
-    jd->has_kwdict = (co->co_flags & CO_VARKEYWORDS) ? 1 : 0;
-    jd->total_pyargs = co->co_argcount + co->co_kwonlyargcount + jd->has_vararg + jd->has_kwdict;
-    jd->has_closure = (PyTuple_GET_SIZE(co->co_freevars) > 0) ? 1 : 0;
-    jd->has_locals = !(co->co_flags & CO_NEWLOCALS);
-    jd->use_frame_object = (
-        globals == NULL ||
-        builtins == NULL ||
-        jd->is_gen ||
-        !jd->use_virtual_locals ||
-        jd->update_blockstack ||
-        jd->has_locals);
-
-    /* Force non-virtual locals if we're using a frame object */
-    if (jd->use_frame_object) {
-        jd->use_virtual_locals = 0;
-    }
-
     if (Py_JITDebugFlag > 0) {
         fprintf(stderr, "Entering CodeGen for %s:%s\n",
             PyUnicode_AsUTF8(co->co_filename),
             PyUnicode_AsUTF8(co->co_name));
-        if (Py_JITDebugFlag > 1) {
-            fprintf(stderr, "    code = %p\n", jd->co);
-            fprintf(stderr, "    globals = %p\n", jd->globals);
-            fprintf(stderr, "    builtins = %p\n", jd->builtins);
-            fprintf(stderr, "    is_gen = %d\n", jd->is_gen);
-            fprintf(stderr, "    update_blockstack = %d\n", jd->update_blockstack);
-            fprintf(stderr, "    use_virtual_locals = %d\n", jd->use_virtual_locals);
-            fprintf(stderr, "    has_vararg = %d\n", jd->has_vararg);
-            fprintf(stderr, "    has_kwdict = %d\n", jd->has_kwdict);
-            fprintf(stderr, "    has_closure = %d\n", jd->has_closure);
-            fprintf(stderr, "    has_locals = %d\n", jd->has_locals);
-            fprintf(stderr, "    use_frame_object = %d\n", jd->use_frame_object);
-            fprintf(stderr, "    total_pyargs = %ld\n", (long)jd->total_pyargs);
-        }
     }
 
-
-    ir_type sig;
-    if (jd->use_frame_object) {
-        /* Signature: func(f, throwflag); */
-        jd->total_direct_args = 0;
-        ir_type argtypes[] = { ir_type_pyframeobject_ptr, ir_type_int };
-        sig = ir_create_function_type(jd->context, ir_type_pyobject_ptr, sizeof(argtypes)/sizeof(argtypes[0]), argtypes);
-    } else {
-        /* Signature: func(...pyargs..., closure?, locals?); */
-        jd->total_direct_args = jd->total_pyargs + jd->has_closure + jd->has_locals;
-        ir_type *argtypes = (ir_type*)malloc((DEAD_ARGS + jd->total_direct_args) * sizeof(ir_type));
-        for (Py_ssize_t i = 0; i < DEAD_ARGS; i++) {
-            argtypes[i] = ir_type_void_ptr;
-        }
-        for (Py_ssize_t i = 0; i < jd->total_direct_args; i++) {
-            argtypes[DEAD_ARGS + i] = ir_type_pyobject_ptr;
-        }
-        sig = ir_create_function_type(jd->context, ir_type_pyobject_ptr, DEAD_ARGS + jd->total_direct_args, argtypes);
-        free(argtypes);
+    JITData *jd = PyMem_RawMalloc(sizeof(JITData));
+    if (jd == NULL) {
+        PyErr_NoMemory();
+        return NULL;
     }
-    jd->func = ir_func_new(jd->context, PyUnicode_AsUTF8(co->co_name), sig);
-
-    translate_bytecode(jd, co);
+    memset(jd, 0, sizeof(JITData));
+    _init_jitdata(jd, co, globals, builtins);
+    _emit_function_body(jd);
 
     IR_DEBUG_DUMP("/tmp/00-initial.ir");
     if (Py_JITDebugFlag > 0)
@@ -3580,8 +3552,31 @@ _PyJIT_CodeGen(PyCodeObject *co, PyObject *globals, PyObject *builtins) {
     if (jd->fastlocals_values) {
         free(jd->fastlocals_values);
     }
+    free(jd->jmptab);
     PyMem_RawFree(jd);
     return jf;
+}
+
+void _jeval_cleanup(PyJITFunctionObject *jf) {
+    if (jf->object != NULL) {
+        ir_object_free((ir_object)jf->object);
+        jf->object = NULL;
+    }
+    if (jf->eval_entrypoint_object != NULL) {
+        ir_object_free((ir_object)jf->eval_entrypoint_object);
+        jf->eval_entrypoint_object = NULL;
+    }
+    if (jf->jstate != NULL) {
+        _JITState *js = (_JITState*)jf->jstate;
+        if (js->globals_dl)
+            _PyDict_DeleteListener((PyDictObject*)jf->globals, js->globals_dl);
+        if (js->builtins_dl)
+            _PyDict_DeleteListener((PyDictObject*)jf->builtins, js->builtins_dl);
+        if (js->load_global_cache != NULL)
+            free(js->load_global_cache);
+        free(js);
+        jf->jstate = NULL;
+    }
 }
 
 static inline
@@ -4318,7 +4313,7 @@ static void lower_control_flow_pass(JITData *jd) {
 }
 
 static void lower_yield_dispatch(JITData *jd) {
-    if (jd->is_gen) {
+    if (jd->is_generator) {
         _lower_pass(jd, _ir_lower_yield_dispatch);
     }
 }
