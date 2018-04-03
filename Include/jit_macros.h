@@ -159,18 +159,14 @@
     BRANCH(crashpoint); \
 } while (0)
 
-#ifdef Py_DEBUG
-
 void _jit_macros_assert(int expr, const char *expr_str);
 
 #  define IR_ASSERT(expr) do { \
-    JTYPE _sig = CREATE_SIGNATURE(ir_type_void, ir_type_int, ir_type_char_ptr); \
-    CALL_NATIVE(_sig, _jit_macros_assert, BOOL(expr), CONSTANT_CHAR_PTR(#expr)); \
+    if (Py_JITAsserts) { \
+        JTYPE _sig = CREATE_SIGNATURE(ir_type_void, ir_type_int, ir_type_char_ptr); \
+        CALL_NATIVE(_sig, _jit_macros_assert, BOOL(expr), CONSTANT_CHAR_PTR(#expr)); \
+    } \
 } while (0)
-
-#else
-#  define IR_ASSERT(expr)
-#endif
 
 /* High-level Python macros */
 

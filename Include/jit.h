@@ -15,6 +15,7 @@ extern int Py_JITSuper;
 extern int Py_JITEvalBreaks;
 extern int Py_JITPatchpoint;
 extern int Py_JITNoExc;
+extern int Py_JITAsserts;
 
 /* Forward declaration */
 struct _frame;

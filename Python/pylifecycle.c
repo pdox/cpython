@@ -116,6 +116,13 @@ int Py_JITSuper = 1;
 int Py_JITEvalBreaks;
 int Py_JITPatchpoint;
 int Py_JITNoExc;
+
+#ifdef NDEBUG
+int Py_JITAsserts = 0;
+#else
+int Py_JITAsserts = 1;
+#endif
+
 int Py_DebugFlag; /* Needed by parser.c */
 int Py_VerboseFlag; /* Needed by import.c */
 int Py_QuietFlag; /* Needed by sysmodule.c */
@@ -649,6 +656,8 @@ void _Py_InitializeCore(const _PyCoreConfig *config)
         Py_JITPatchpoint = atoi(p);
     if ((p = Py_GETENV("PYJITNOEXC")) && *p != '\0')
         Py_JITNoExc = atoi(p);
+    if ((p = Py_GETENV("PYJITASSERTS")) && *p != '\0')
+        Py_JITAsserts = atoi(p);
     if ((p = Py_GETENV("PYTHONDEBUG")) && *p != '\0')
         set_flag(&Py_DebugFlag, p);
     if ((p = Py_GETENV("PYTHONVERBOSE")) && *p != '\0')
