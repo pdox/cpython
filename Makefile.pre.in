@@ -215,7 +215,7 @@ INSTSONAME=	@INSTSONAME@
 
 
 ASMJIT_LIBS=	$(srcdir)/../asmjit-install/lib/libasmjit.a
-LIBJIT_LIBS=	$(srcdir)/../libjit-install/lib64/libjit.a
+LIBJIT_LIBS=	$(srcdir)/../libjit-install/lib*/libjit.a
 LLVM_LIBS=	$(shell $(srcdir)/../llvm-install/bin/llvm-config --libs --system-libs)
 LIBS=		@LIBS@ $(LIBJIT_LIBS) $(LLVM_LIBS) $(ASMJIT_LIBS)
 LIBM=		@LIBM@

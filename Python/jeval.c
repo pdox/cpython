@@ -1,5 +1,5 @@
 /* This is required to get MAP_ANONYMOUS with std=c99 */
-#define _BSD_SOURCE
+#define _DEFAULT_SOURCE
 #include <sys/mman.h>
 #include <stddef.h>
 

@@ -1,13 +1,16 @@
 #pragma once
 
 #include <llvm/ExecutionEngine/ExecutionEngine.h>
+#include <llvm/ExecutionEngine/JITSymbol.h>
+#include "llvm/ExecutionEngine/RTDyldMemoryManager.h"
+#include "llvm/ExecutionEngine/SectionMemoryManager.h"
+
 #include <llvm/ExecutionEngine/Orc/CompileUtils.h>
 #include <llvm/ExecutionEngine/Orc/IRCompileLayer.h>
 #include <llvm/ExecutionEngine/Orc/IRTransformLayer.h>
 #include <llvm/ExecutionEngine/Orc/LambdaResolver.h>
 #include <llvm/ExecutionEngine/Orc/OrcError.h>
 #include <llvm/ExecutionEngine/Orc/RTDyldObjectLinkingLayer.h>
-#include <llvm/ExecutionEngine/SectionMemoryManager.h>
 #include <llvm/IR/Mangler.h>
 #include <llvm/Support/Debug.h>
 #include <llvm/Support/DynamicLibrary.h>
@@ -21,6 +24,13 @@
 #define DEBUG_TYPE "jitfromscratch"
 
 extern int Py_JITDebugFlag;
+
+using llvm::Mangler;
+using llvm::raw_string_ostream;
+using llvm::RTDyldMemoryManager;
+using llvm::orc::RTDyldObjectLinkingLayer;
+using llvm::Error;
+using llvm::orc::createLegacyLookupResolver;
 
 static inline
 void llvm_module_to_file(const llvm::Module& module, const char* filename) {
@@ -62,26 +72,45 @@ class SimpleOrcJit {
   using ModulePtr_t = std::unique_ptr<llvm::Module>;
   using IRCompiler_t = llvm::orc::SimpleCompiler;
 
-  using ModuleSharedPtr_t = std::shared_ptr<llvm::Module>;
-  using Optimize_f = std::function<ModuleSharedPtr_t(ModuleSharedPtr_t)>;
+  using Optimize_f = std::function<ModulePtr_t(ModulePtr_t)>;
 
   using ObjectLayer_t = llvm::orc::RTDyldObjectLinkingLayer;
   using CompileLayer_t = llvm::orc::IRCompileLayer<ObjectLayer_t, IRCompiler_t>;
   using OptimizeLayer_t =
       llvm::orc::IRTransformLayer<CompileLayer_t, Optimize_f>;
 
+  void *stackmap_section_address_;
+  llvm::orc::ExecutionSession ES;
+  std::shared_ptr<llvm::orc::SymbolResolver> Resolver;
+  llvm::DataLayout DL;
+  ObjectLayer_t ObjectLayer;
+  CompileLayer_t CompileLayer;
+  OptimizeLayer_t OptimizeLayer;
+
 public:
   SimpleOrcJit(llvm::TargetMachine &targetMachine)
       : stackmap_section_address_(nullptr),
         DL(targetMachine.createDataLayout()),
-        MemoryManagerPtr(std::make_shared<CustomMemoryManager>(
-            [&](void *addr) { stackmap_section_address_ = addr; })),
-        SymbolResolverPtr(llvm::orc::createLambdaResolver(
-            [&](std::string name) { return findSymbolInJITedCode(name); },
-            [&](std::string name) { return findSymbolInHostProcess(name); })),
-        ObjectLayer([this]() { return MemoryManagerPtr; }),
+        Resolver(createLegacyLookupResolver(
+            [this](const std::string &Name) -> llvm::JITSymbol {
+              if (auto Sym = CompileLayer.findSymbol(Name, false))
+                return Sym;
+              else if (auto Err = Sym.takeError())
+                return std::move(Err);
+              if (auto SymAddr =
+                      RTDyldMemoryManager::getSymbolAddressInProcess(Name))
+                return llvm::JITSymbol(SymAddr, llvm::JITSymbolFlags::Exported);
+              return nullptr;
+            },
+            [](Error Err) { cantFail(std::move(Err), "lookupFlags failed"); })),
+        ObjectLayer(ES,
+                    [this](llvm::orc::VModuleKey) {
+                      return RTDyldObjectLinkingLayer::Resources{
+                          std::make_shared<CustomMemoryManager>([&](void *addr) { stackmap_section_address_ = addr; }),
+                          Resolver};
+                    }),
         CompileLayer(ObjectLayer, IRCompiler_t(targetMachine)),
-        OptimizeLayer(CompileLayer, [this](ModuleSharedPtr_t module) {
+        OptimizeLayer(CompileLayer, [this](ModulePtr_t module) {
           return optimizeModule(std::move(module));
         }) {
     // Load own executable as dynamic library.
@@ -89,17 +118,15 @@ public:
     llvm::sys::DynamicLibrary::LoadLibraryPermanently(nullptr);
   }
 
-  void submitModule(ModulePtr_t module) {
+  llvm::orc::VModuleKey addModule(ModulePtr_t module) {
     DEBUG({
       llvm::dbgs() << "Submit LLVM module:\n\n";
       llvm::dbgs() << *module.get() << "\n\n";
     });
 
-    // Commit module for compilation to machine code. Actual compilation
-    // happens on demand as soon as one of it's symbols is accessed. None of
-    // the layers used here issue Errors from this call.
-    llvm::cantFail(
-        OptimizeLayer.addModule(std::move(module), SymbolResolverPtr));
+    auto K = ES.allocateVModule();
+    cantFail(OptimizeLayer.addModule(K, std::move(module)));
+    return K;
   }
 
   void *getStackmapSectionAddress() {
@@ -108,37 +135,8 @@ public:
       return ret;
   }
 
-  template <class Signature_t>
-  llvm::Expected<std::function<Signature_t>> getFunction(std::string name) {
-    using namespace llvm;
-
-    // Find symbol name in committed modules.
-    std::string mangledName = mangle(std::move(name));
-    JITSymbol sym = findSymbolInJITedCode(mangledName);
-    if (!sym)
-      return make_error<orc::JITSymbolNotFound>(mangledName);
-
-    // Access symbol address.
-    // Invokes compilation for the respective module if not compiled yet.
-    Expected<JITTargetAddress> addr = sym.getAddress();
-    if (!addr)
-      return addr.takeError();
-
-    auto typedFunctionPtr = reinterpret_cast<Signature_t *>(*addr);
-    return std::function<Signature_t>(typedFunctionPtr);
-  }
-
 private:
-  void *stackmap_section_address_;
-  llvm::DataLayout DL;
-  std::shared_ptr<llvm::RTDyldMemoryManager> MemoryManagerPtr;
-  std::shared_ptr<llvm::JITSymbolResolver> SymbolResolverPtr;
-
-  ObjectLayer_t ObjectLayer;
-  CompileLayer_t CompileLayer;
-  OptimizeLayer_t OptimizeLayer;
-
-  ModuleSharedPtr_t optimizeModule(ModuleSharedPtr_t module) {
+  ModulePtr_t optimizeModule(ModulePtr_t module) {
     using namespace llvm;
 
     if (Py_JITDebugFlag > 2) {
@@ -180,25 +178,26 @@ private:
   }
 
 public:
-  llvm::JITSymbol findSymbolInJITedCode(std::string mangledName) {
-    constexpr bool exportedSymbolsOnly = false;
-    return CompileLayer.findSymbol(mangledName, exportedSymbolsOnly);
+
+  llvm::JITSymbol findSymbolInJITedCode(const std::string Name) {
+    std::string MangledName;
+    raw_string_ostream MangledNameStream(MangledName);
+    Mangler::getNameWithPrefix(MangledNameStream, Name, DL);
+    return CompileLayer.findSymbol(MangledNameStream.str(), /*exported only*/ false);
   }
 
-  llvm::JITSymbol findSymbolInHostProcess(std::string mangledName) {
-    // Lookup function address in the host symbol table.
-    if (llvm::JITTargetAddress addr =
-            llvm::RTDyldMemoryManager::getSymbolAddressInProcess(mangledName))
-      return llvm::JITSymbol(addr, llvm::JITSymbolFlags::Exported);
-
-    return nullptr;
+  llvm::JITSymbol findSymbol(const std::string Name) {
+    std::string MangledName;
+    raw_string_ostream MangledNameStream(MangledName);
+    Mangler::getNameWithPrefix(MangledNameStream, Name, DL);
+    return CompileLayer.findSymbol(MangledNameStream.str(), true);
   }
 
-  // System name mangler: may prepend '_' on OSX or '\x1' on Windows
-  std::string mangle(std::string name) {
-    std::string buffer;
-    llvm::raw_string_ostream ostream(buffer);
-    llvm::Mangler::getNameWithPrefix(ostream, std::move(name), DL);
-    return ostream.str();
+  llvm::JITTargetAddress getSymbolAddress(const std::string Name) {
+    return cantFail(findSymbol(Name).getAddress());
+  }
+
+  void removeModule(llvm::orc::VModuleKey K) {
+    cantFail(CompileLayer.removeModule(K));
   }
 };

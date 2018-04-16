@@ -44,7 +44,6 @@ except ImportError:
 try:
     import grp
     groups = [g.gr_gid for g in grp.getgrall() if getpass.getuser() in g.gr_mem]
-    groups = [gid for gid in groups if gid <= 65535]  # Facebook has high GIDs that don't act like local GIDs
     if hasattr(os, 'getgid'):
         process_gid = os.getgid()
         if process_gid not in groups:

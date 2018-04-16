@@ -1599,7 +1599,7 @@ static inline void ir_cursor_close(ir_func func) {
         while (_instr->next != NULL) {
             _ir_remove_instr(b, _instr->next);
         }
-        assert(b->last_instr = _instr);
+        assert(b->last_instr == _instr);
     } else if (IR_INSTR_OPCODE(_instr) != ir_opcode_label_here &&
                _instr->next != NULL &&
                ir_opcode_needs_to_be_at_front(IR_INSTR_OPCODE(_instr->next))) {

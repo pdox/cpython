@@ -666,8 +666,8 @@ ir_llvm_compile(ir_func func) {
     }
 #endif
 
-    state->jit->submitModule(std::move(module_up));
-    llvm::JITSymbol sym = state->jit->findSymbolInJITedCode(state->jit->mangle(llvm_func_name));
+    state->jit->addModule(std::move(module_up));
+    llvm::JITSymbol sym = state->jit->findSymbolInJITedCode(llvm_func_name);
     if (!sym) {
         std::cout << "Unable to find symbol in LLVM JIT" << std::endl;
         return nullptr;

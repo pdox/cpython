@@ -31,6 +31,16 @@ static inline X86Gp _ccarg(int i) {
 
 extern "C" PyObject *call_function_extern(PyObject **, Py_ssize_t, PyObject *);
 
+class PrintErrorHandler : public asmjit::ErrorHandler {
+public:
+  // Return `true` to set last error to `err`, return `false` to do nothing.
+  bool handleError(asmjit::Error err, const char* message, asmjit::CodeEmitter* origin) override {
+    fprintf(stderr, "ASMJIT ERROR: %s\n", message);
+    abort();
+    return true;
+  }
+};
+
 extern "C"
 PyObject* _PyJIT_GenericTrampoline(PyObject *callable, PyJITCallSiteSig *css, ...) {
     if (Py_JITDebugFlag > 0) {
@@ -87,17 +97,27 @@ PyJIT_CallTrampoline*
 _PyJIT_CallTrampoline_Create(PyJITFunctionObject *jf) {
     PyCodeObject *co = (PyCodeObject*)jf->code;
     int argcount = co->co_argcount;
+    PrintErrorHandler eh;
     CodeHolder code;
     code.init(jrt.getCodeInfo());
+    code.setErrorHandler(&eh);
+
     X86Assembler a(&code);
+    Label generic_case = a.newLabel();
 
     /* If call signature matches, jump to actual entrypoint */
     PyJITCallSiteSig *fastsig = PyJIT_CallSiteSig_GetOrCreate(argcount, NULL);
-    a.cmp(x86::rsi, (uintptr_t)fastsig);
-    a.je((uintptr_t)jf->direct_entrypoint);
+    a.mov(x86::r10, (uintptr_t)fastsig);
+    a.cmp(x86::rsi, x86::r10);
+    a.jne(generic_case);
+
+    a.mov(x86::r10, (uintptr_t)jf->direct_entrypoint);
+    a.jmp(x86::r10);
 
     /* Generic case */
-    a.jmp((uintptr_t)_PyJIT_GenericTrampoline);
+    a.bind(generic_case);
+    a.mov(x86::r10, (uintptr_t)_PyJIT_GenericTrampoline);
+    a.jmp(x86::r10);
 
     void *fn;
     jrt.add(&fn, &code);
@@ -126,26 +146,32 @@ _emit_check_function_result_and_return(X86Assembler &a) {
     a.test(x86::rax, x86::rax);
     a.je(slowpath);
 
+    /* Store return value into temporary register, since we need to use RAX below */
+    X86Gp tmp = x86::r10;
+    a.mov(tmp, x86::rax);
+
     /* Get the tstate and then tstate->cur_exctype */
-    X86Gp tmp = x86::rsi;
-    a.mov(tmp, x86::ptr((uintptr_t)&_PyRuntime.gilstate.tstate_current._value));
-    a.mov(tmp, x86::ptr(tmp, offsetof(PyThreadState, curexc_type)));
+    a.mov(x86::rax, x86::ptr((uintptr_t)&_PyRuntime.gilstate.tstate_current._value));
+    a.mov(x86::rax, x86::ptr(x86::rax, offsetof(PyThreadState, curexc_type)));
 
     /* If cur_exctype != NULL, jump to slowpath */
-    a.test(tmp, tmp);
+    a.test(x86::rax, x86::rax);
+    a.mov(x86::rax, tmp);
     a.jne(slowpath);
 
     /* All done */
+    a.mov(x86::rax, tmp);
     a.ret();
 
     a.bind(slowpath);
     /* Py_CheckFunctionResult(callable, result, where) */
     /* %rdi already has the callable. */
     a.mov(CCARG1, x86::rax);
-    a.mov(CCARG2, (uintptr_t)0);
+    a.xor_(CCARG2, CCARG2);
     a.xor_(x86::rax, x86::rax);
     /* Tail call */
-    a.jmp((uintptr_t)_Py_CheckFunctionResult);
+    a.mov(x86::r10, (uintptr_t)_Py_CheckFunctionResult);
+    a.jmp(x86::r10);
 }
 
 /* TODO:
@@ -156,8 +182,10 @@ static
 PyJIT_CallTrampoline*
 _PyJIT_CallTrampoline_CreateForMethod(PyMethodDef *method, PyJITCallSiteSig *cursite) {
     int flags = method->ml_flags & ~(METH_CLASS | METH_STATIC | METH_COEXIST);
+    PrintErrorHandler eh;
     CodeHolder code;
     code.init(jrt.getCodeInfo());
+    code.setErrorHandler(&eh);
     X86Assembler a(&code);
     Label generic_case = a.newLabel();
 
@@ -172,16 +200,18 @@ _PyJIT_CallTrampoline_CreateForMethod(PyMethodDef *method, PyJITCallSiteSig *cur
     switch (flags) {
     case METH_NOARGS: {
         PyJITCallSiteSig *sig = PyJIT_CallSiteSig_GetOrCreate(0, NULL);
-        a.cmp(CCARG1, (uintptr_t)sig);
+        a.mov(x86::r10, (uintptr_t)sig);
+        a.cmp(CCARG1, x86::r10);
         a.jne(generic_case);
         SET_SELF();
-        a.mov(CCARG1, (uintptr_t)NULL);
+        a.xor_(CCARG1, CCARG1);
         a.call((uintptr_t)method->ml_meth);
         break;
     }
     case METH_O: {
         PyJITCallSiteSig *sig = PyJIT_CallSiteSig_GetOrCreate(1, NULL);
-        a.cmp(CCARG1, (uintptr_t)sig);
+        a.mov(x86::r10, (uintptr_t)sig);
+        a.cmp(CCARG1, x86::r10);
         a.jne(generic_case);
         SET_SELF();
         a.mov(CCARG1, CCARG2);
@@ -198,7 +228,8 @@ _PyJIT_CallTrampoline_CreateForMethod(PyMethodDef *method, PyJITCallSiteSig *cur
         /* Specialize to 'cursite' */
         PyJITCallSiteSig *sig = cursite;
         Py_ssize_t nkwargs = (sig->kwnames == NULL) ? 0 : PyTuple_GET_SIZE(sig->kwnames);
-        a.cmp(CCARG1, (uintptr_t)sig);
+        a.mov(x86::r10, (uintptr_t)sig);
+        a.cmp(CCARG1, x86::r10);
         a.jne(generic_case);
 
         /* Allocate space on the stack. Careful to stay 16-byte aligned. */
@@ -211,7 +242,8 @@ _PyJIT_CallTrampoline_CreateForMethod(PyMethodDef *method, PyJITCallSiteSig *cur
         a.mov(CCARG1, x86::rsp);
         a.mov(CCARG2, (uintptr_t)(sig->argcount - nkwargs));
         a.mov(CCARG3, (uintptr_t)sig->kwnames);
-        a.call((uintptr_t)method->ml_meth);
+        a.mov(x86::r10, (uintptr_t)method->ml_meth);
+        a.call(x86::r10);
         a.add(x86::rsp, (sig->argcount + alignment_extra) * sizeof(void*));
         break;
     }
@@ -230,7 +262,8 @@ _PyJIT_CallTrampoline_CreateForMethod(PyMethodDef *method, PyJITCallSiteSig *cur
     /* Generic case */
     a.bind(generic_case);
     a.pop(x86::rdi); /* Pop callable */
-    a.jmp((uintptr_t)_PyJIT_GenericTrampoline);
+    a.mov(x86::r10, (uintptr_t)_PyJIT_GenericTrampoline);
+    a.jmp(x86::r10);
 
     void *fn;
     jrt.add(&fn, &code);
@@ -294,8 +327,10 @@ _PyJIT_set_trampoline(PyObject *callable, PyJITCallSiteSig *css) {
 
 static void*
 _PyJIT_CallTrampoline_MakeBootstrap(void) {
+    PrintErrorHandler eh;
     CodeHolder code;
     code.init(jrt.getCodeInfo());
+    code.setErrorHandler(&eh);
     X86Assembler a(&code);
 
     /* Save argument registers */
@@ -306,7 +341,8 @@ _PyJIT_CallTrampoline_MakeBootstrap(void) {
 
     /* Prepare the function for JIT (returns the new trampoline in %rax) */
     a.sub(x86::rsp, 8); /* Align stack for call */
-    a.call((uintptr_t)_PyJIT_set_trampoline);
+    a.mov(x86::r10, (uintptr_t)_PyJIT_set_trampoline);
+    a.call(x86::r10);
     a.add(x86::rsp, 8);
 
     /* Restore original argument registers */
