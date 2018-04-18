@@ -4,6 +4,8 @@
 extern "C" {
 #endif
 
+#ifndef Py_LIMITED_API
+
 #include "jitcall.h"
 
 /* Interface exposed to the rest of cPython */
@@ -204,6 +206,8 @@ static inline PyObject* PyJIT_ForFrame(PyObject *hint, PyCodeObject *co, PyObjec
 }
 
 void _jeval_cleanup(PyJITFunctionObject *jf);
+
+#endif /* !Py_LIMITED_API */
 
 #ifdef __cplusplus
 }

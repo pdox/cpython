@@ -129,7 +129,9 @@ adt_hashmap_get(adt_hashmap m, void *key_in, void *value_out)
 
 static inline void
 adt_hashmap_resize(adt_hashmap m, size_t nbuckets) {
+#ifndef NDEBUG
     size_t old_nentries = m->nentries;
+#endif
     size_t old_nbuckets = m->nbuckets;
     adt_hashmap_entry *old_buckets = m->buckets;
     m->nentries = 0;

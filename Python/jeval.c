@@ -3591,8 +3591,6 @@ int _pyblock_type_to_b_type(ir_pyblock_type type) {
     abort(); /* Unexpected case */
 }
 
-
-#ifndef NDEBUG
 static int _compute_pyblock_depth(ir_pyblock pb) {
     int count = 0;
     ir_pyblock cur = pb;
@@ -3602,7 +3600,6 @@ static int _compute_pyblock_depth(ir_pyblock pb) {
     }
     return count;
 }
-#endif
 
 static void _push_except_handler_to_blockstack(JITData *jd, int b_level) {
     if (!jd->update_blockstack) return;
@@ -3952,7 +3949,9 @@ int _ir_lower_control_flow(JITData *jd, ir_instr _instr) {
         ir_why why = instr->why;
         ir_pyblock cur = instr->pb;
         int curlevel = instr->entry_stack_level;
+#ifndef NDEBUG
         ir_label expected_handler = IR_INSTR_OPERAND(_instr, 0);
+#endif
         while (why != IR_WHY_NOT && cur) {
             if (cur->b_type == IR_PYBLOCK_LOOP && why == IR_WHY_CONTINUE) {
                 /* Unwind stack without popping block. 'iter' remains on TOS */

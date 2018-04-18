@@ -39,7 +39,9 @@ PyCodeObject* PyRunFrame_GetCode(PyRunFrame *rf) {
 PyFrameObject*
 _PyRunFrame_MaterializeOne(PyRunFrame *rf, PyFrameObject *next)
 {
+#ifndef NDEBUG
     uintptr_t entry_ref = rf->ref;
+#endif
     PyJITFunctionObject *jf = PyRunFrame_JITFunctionRef(rf);
     assert(jf->globals);
     assert(jf->builtins);
