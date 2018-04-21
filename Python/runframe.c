@@ -135,3 +135,25 @@ PyRunFrame_WipeThread(PyThreadState *tstate) {
     }
     tstate->runframe = NULL;
 }
+
+uint64_t djb2_code_hash(PyCodeObject *co);
+
+void PyRunFrame_NeedSuper(PyRunFrame *rf) {
+    PyCodeObject *co = NULL;
+    if (!PyRunFrame_IsMaterialized(rf)) {
+        co = (PyCodeObject*)PyRunFrame_JITFunctionRef(rf)->code;
+    } else {
+        PyFrameObject *f = PyRunFrame_FrameRef(rf);
+        if (f->f_partial) {
+            co = f->f_code;
+        }
+    }
+    if (co != NULL) {
+        uint64_t hash = djb2_code_hash(co);
+        fprintf(stderr, "SUPER FAILURE    %s:%s   new hash = %"PRIu64"\n",
+            PyUnicode_AsUTF8(co->co_filename),
+            PyUnicode_AsUTF8(co->co_name),
+            hash);
+        abort();
+    }
+}

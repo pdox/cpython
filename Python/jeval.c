@@ -914,69 +914,6 @@ EMITTER_FOR(STORE_SUBSCR) {
     SOFT_EVAL_BREAK_CHECK();
 }
 
-/* This is most of the work of STORE_ANNOTATION, taken from ceval,
-   but modified so that it:
-   i) returns 1 on error, 0 on success
-   ii) doesn't decref "ann".
-   */
-int _store_annotation_helper(PyObject *locals, PyObject *name, PyObject *ann) {
-    _Py_IDENTIFIER(__annotations__);
-    PyObject *ann_dict;
-    int err;
-    if (locals == NULL) {
-        PyErr_Format(PyExc_SystemError,
-                     "no locals found when storing annotation");
-        return 1;
-    }
-    /* first try to get __annotations__ from locals... */
-    if (PyDict_CheckExact(locals)) {
-        ann_dict = _PyDict_GetItemId(locals,
-                                     &PyId___annotations__);
-        if (ann_dict == NULL) {
-            PyErr_SetString(PyExc_NameError,
-                            "__annotations__ not found");
-            return 1;
-        }
-        Py_INCREF(ann_dict);
-    }
-    else {
-        PyObject *ann_str = _PyUnicode_FromId(&PyId___annotations__);
-        if (ann_str == NULL) {
-            return 1;
-        }
-        ann_dict = PyObject_GetItem(locals, ann_str);
-        if (ann_dict == NULL) {
-            if (PyErr_ExceptionMatches(PyExc_KeyError)) {
-                PyErr_SetString(PyExc_NameError,
-                                "__annotations__ not found");
-            }
-            return 1;
-        }
-    }
-    /* ...if succeeded, __annotations__[name] = ann */
-    if (PyDict_CheckExact(ann_dict)) {
-        err = PyDict_SetItem(ann_dict, name, ann);
-    }
-    else {
-        err = PyObject_SetItem(ann_dict, name, ann);
-    }
-    Py_DECREF(ann_dict);
-    if (err != 0) {
-        return 1;
-    }
-    return 0;
-}
-
-EMITTER_FOR(STORE_ANNOTATION) {
-    PyObject *name = GETNAME(oparg);
-    JVALUE ann = TOP();
-    JVALUE locals = LOAD_F_LOCALS();
-    RTCALL_Z(jd->sig_iooo, _store_annotation_helper, locals, CONSTANT_PYOBJ(name), ann);
-    STACKADJ(-1);
-    DECREF(ann);
-    SOFT_EVAL_BREAK_CHECK();
-}
-
 EMITTER_FOR(DELETE_SUBSCR) {
     JVALUE sub = TOP();
     JVALUE container = SECOND();
@@ -3233,10 +3170,29 @@ uint64_t djb2_hash(const unsigned char *in, Py_ssize_t inlen) {
     return hash;
 }
 
+uint64_t djb2_code_hash(PyCodeObject *co) {
+    return djb2_hash((unsigned char*)PyBytes_AS_STRING(co->co_code), PyBytes_GET_SIZE(co->co_code));
+}
+
+#ifndef NDEBUG
+/* Verify that jit_locals_hack is sorted in ascending order for bsearch */
+static int _verified_jit_locals = 0;
+static void _verify_jit_locals(void) {
+    if (_verified_jit_locals) return;
+    _verified_jit_locals = 1;
+    for (size_t i = 0; i+1 < sizeof(jit_locals_hack)/sizeof(uint64_t); i++) {
+        assert(jit_locals_hack[i] < jit_locals_hack[i+1]);
+    }
+}
+#endif
+
 static int _needs_frame_introspection(PyCodeObject *co) {
+#ifndef NDEBUG
+    _verify_jit_locals();
+#endif
     /* If the function's hash is in jit_locals_hack, force real locals. */
-    if (Py_JITSuper) {
-        uint64_t hash = djb2_hash((unsigned char*)PyBytes_AS_STRING(co->co_code), PyBytes_GET_SIZE(co->co_code));
+    if (!Py_JITNoSuper) {
+        uint64_t hash = djb2_code_hash(co);
         void *match = bsearch(&hash, jit_locals_hack, sizeof(jit_locals_hack)/sizeof(uint64_t), sizeof(uint64_t), _uint64_cmp);
         if (match)
             return 1;

@@ -4,6 +4,107 @@
 #include "ir.h"
 #include "jit_eval_entrypoint.h"
 
+char *Py_JITConfigStr;
+int Py_JITFlag;
+int Py_JITDebugFlag;
+char *Py_JITDebugFunc;
+char *Py_JITDebugFile;
+int Py_JITEvalBreaks;
+int Py_JITPatchpoint;
+int Py_JITNoExc;
+int Py_JITNoSuper;
+
+#ifdef NDEBUG
+int Py_JITAsserts = 0;
+#else
+int Py_JITAsserts = 1;
+#endif
+
+static char *_load_default_config(void) {
+    FILE *fp = fopen("/tmp/PYTHONJIT_DEFAULT", "r");
+    if (!fp)
+        return strdup("");
+    fseek(fp, 0, SEEK_END);
+    long sz = ftell(fp);
+    if (sz < 0) {
+        Py_FatalError("Error reading /tmp/PYTHONJIT_DEFAULT");
+    }
+    fseek(fp, 0, SEEK_SET);
+    char *ret = (char*)malloc(sz + 1);
+    size_t rc = fread(ret, 1, (size_t)sz, fp);
+    if (rc != (size_t)sz) {
+        Py_FatalError("Unexpected short count reading /tmp/PYTHONJIT_DEFAULT");
+    }
+    /* Strip trailing newlines/spaces */
+    while (sz > 0 && isspace(ret[sz-1])) sz--;
+    ret[sz] = 0;
+    fclose(fp);
+    return ret;
+}
+
+void _PyJIT_Initialize(const char *config) {
+    if (config == NULL) {
+        Py_JITConfigStr = _load_default_config();
+        config = Py_JITConfigStr;
+    } else {
+        Py_JITConfigStr = strdup(config);
+    }
+    /* 'config' is a comma-separated list of configuration options */
+    const char *p = config;
+    while (p[0]) {
+       char *option;
+       const char *end;
+       end = strchr(p, ',');
+       if (end != NULL) {
+           option = strndup(p, end - p);
+           p = end + 1;
+       } else {
+           option = strdup(p);
+           p += strlen(p);
+       }
+#define OPTION(s) \
+        (strcmp(option, s) == 0)
+#define OPTION_WITH_VALUE(s) \
+        (value = option + strlen(s) + 1, strncmp(option, s "=", strlen(s) + 1) == 0)
+
+        const char *value;
+        if (OPTION("on")) {
+            Py_JITFlag = 1;
+        } else if (OPTION("off")) {
+            Py_JITFlag = 0;
+        } else if (OPTION("llvm")) {
+            Py_JITFlag = 2;
+        } else if (OPTION("debug")) {
+            Py_JITDebugFlag = 1;
+        } else if (OPTION_WITH_VALUE("debug")) {
+            Py_JITDebugFlag = atoi(value);
+        } else if (OPTION_WITH_VALUE("func")) {
+            Py_JITDebugFunc = strdup(value);
+        } else if (OPTION_WITH_VALUE("file")) {
+            Py_JITDebugFile = strdup(value);
+        } else if (OPTION("evalbreaks")) {
+            Py_JITEvalBreaks = 1;
+        } else if (OPTION("patchpoint")) {
+            Py_JITPatchpoint = 1;
+        } else if (OPTION("noexc")) {
+            Py_JITNoExc = 1;
+        } else if (OPTION("nosuper")) {
+            Py_JITNoSuper = 1;
+        } else if (OPTION("asserts")) {
+            Py_JITAsserts = 1;
+        } else if (OPTION("noasserts")) {
+            Py_JITAsserts = 0;
+        } else {
+            char err[256];
+            sprintf(err, "Unrecognized PYTHONJIT option: %s", option);
+            Py_FatalError(err);
+        }
+#undef OPTION
+#undef OPTION_WITH_VALUE
+        free(option);
+    }
+}
+
 /* CallSiteSig map */
 static adt_hashmap csmap;
 

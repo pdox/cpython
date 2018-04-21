@@ -126,7 +126,7 @@ static const char *opcode_names[256] = {
     "LOAD_FAST",
     "STORE_FAST",
     "DELETE_FAST",
-    "STORE_ANNOTATION",
+    "unknown_opcode_127",
     "unknown_opcode_128",
     "unknown_opcode_129",
     "RAISE_VARARGS",

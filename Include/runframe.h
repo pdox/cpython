@@ -102,6 +102,8 @@ int PyRunFrame_GetLasti(PyRunFrame *rf);
 int PyRunFrame_GetLineNumber(PyRunFrame *rf);
 PyCodeObject* PyRunFrame_GetCode(PyRunFrame *rf);
 
+void PyRunFrame_NeedSuper(PyRunFrame *rf);
+
 #ifdef __cplusplus
 }
 #endif

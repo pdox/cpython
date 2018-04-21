@@ -4,20 +4,23 @@
 extern "C" {
 #endif
 
+/* JIT interface exposed to the rest of cPython */
+
 #ifndef Py_LIMITED_API
 
 #include "jitcall.h"
 
-/* Interface exposed to the rest of cPython */
 extern int Py_JITFlag;
 extern int Py_JITDebugFlag;
 extern char *Py_JITDebugFunc;
 extern char *Py_JITDebugFile;
-extern int Py_JITSuper;
 extern int Py_JITEvalBreaks;
 extern int Py_JITPatchpoint;
 extern int Py_JITNoExc;
+extern int Py_JITNoSuper;
 extern int Py_JITAsserts;
+
+void _PyJIT_Initialize(const char *config);
 
 /* Forward declaration */
 struct _frame;

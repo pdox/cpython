@@ -15,7 +15,6 @@ PyAPI_DATA(int) Py_InspectFlag;
 PyAPI_DATA(int) Py_OptimizeFlag;
 PyAPI_DATA(int) Py_NoSiteFlag;
 PyAPI_DATA(int) Py_BytesWarningFlag;
-PyAPI_DATA(int) Py_UseClassExceptionsFlag;
 PyAPI_DATA(int) Py_FrozenFlag;
 PyAPI_DATA(int) Py_IgnoreEnvironmentFlag;
 PyAPI_DATA(int) Py_DontWriteBytecodeFlag;
@@ -26,6 +25,7 @@ PyAPI_DATA(int) Py_IsolatedFlag;
 PyAPI_DATA(int) Py_JITFlag;
 
 #ifdef MS_WINDOWS
+PyAPI_DATA(int) Py_LegacyWindowsFSEncodingFlag;
 PyAPI_DATA(int) Py_LegacyWindowsStdioFlag;
 #endif
 

@@ -1,23 +1,23 @@
 #!/bin/bash -eu
 
-PYJIT=${PYJIT:-0}
+PYTHONJIT=${PYTHONJIT:-}
 
 # Python's test suite has no reliable way to propagate environmental variables.
 # There is an existing interpreter flag propagation mechanism, but even that
 # fails to propagate to subprocesses in dozens of tests. This ugly hack ensures
-# that the desired PYJIT flag will be followed.
-PYJIT_DEFAULT_PATH="/tmp/PYJIT_DEFAULT"
-if [ -f "$PYJIT_DEFAULT_PATH" ]; then
-    echo "Error: $PYJIT_DEFAULT_PATH exists."
+# that the desired PYTHONJIT flag will be followed.
+PYTHONJIT_DEFAULT_PATH="/tmp/PYTHONJIT_DEFAULT"
+if [ -f "$PYTHONJIT_DEFAULT_PATH" ]; then
+    echo "Error: $PYTHONJIT_DEFAULT_PATH exists."
     echo 'This may indicate that another instance of runtests.sh is active.'
     echo 'It is not currently safe to run multiple instances of runtests.sh'
     echo 'simultaneously on the same machine. If no other tests are running, '
     echo 'then the file is stale and safe to delete.'
     exit 1
 fi
-echo $PYJIT > "$PYJIT_DEFAULT_PATH"
+echo $PYTHONJIT > "$PYTHONJIT_DEFAULT_PATH"
 function cleanup() {
-    rm -f "$PYJIT_DEFAULT_PATH"
+    rm -f "$PYTHONJIT_DEFAULT_PATH"
 }
 trap cleanup EXIT
 

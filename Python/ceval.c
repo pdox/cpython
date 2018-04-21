@@ -257,8 +257,8 @@ PyEval_SaveThread(void)
     PyThreadState *tstate = PyThreadState_Swap(NULL);
     if (tstate == NULL)
         Py_FatalError("PyEval_SaveThread: NULL tstate");
-    if (gil_created())
-        drop_gil(tstate);
+    assert(gil_created());
+    drop_gil(tstate);
     return tstate;
 }
 
@@ -267,17 +267,18 @@ PyEval_RestoreThread(PyThreadState *tstate)
 {
     if (tstate == NULL)
         Py_FatalError("PyEval_RestoreThread: NULL tstate");
-    if (gil_created()) {
-        int err = errno;
-        take_gil(tstate);
-        /* _Py_Finalizing is protected by the GIL */
-        if (_Py_IsFinalizing() && !_Py_CURRENTLY_FINALIZING(tstate)) {
-            drop_gil(tstate);
-            PyThread_exit_thread();
-            Py_UNREACHABLE();
-        }
-        errno = err;
+    assert(gil_created());
+
+    int err = errno;
+    take_gil(tstate);
+    /* _Py_Finalizing is protected by the GIL */
+    if (_Py_IsFinalizing() && !_Py_CURRENTLY_FINALIZING(tstate)) {
+        drop_gil(tstate);
+        PyThread_exit_thread();
+        Py_UNREACHABLE();
     }
+    errno = err;
+
     PyThreadState_Swap(tstate);
 }
 
@@ -1618,61 +1619,6 @@ _PyEval_EvalFrameDefault(PyFrameObject *f, int throwflag)
             Py_DECREF(sub);
             if (err != 0)
                 goto error;
-            DISPATCH();
-        }
-
-        TARGET(STORE_ANNOTATION) {
-            _Py_IDENTIFIER(__annotations__);
-            PyObject *ann_dict;
-            PyObject *ann = POP();
-            PyObject *name = GETITEM(names, oparg);
-            int err;
-            if (f->f_locals == NULL) {
-                PyErr_Format(PyExc_SystemError,
-                             "no locals found when storing annotation");
-                Py_DECREF(ann);
-                goto error;
-            }
-            /* first try to get __annotations__ from locals... */
-            if (PyDict_CheckExact(f->f_locals)) {
-                ann_dict = _PyDict_GetItemId(f->f_locals,
-                                             &PyId___annotations__);
-                if (ann_dict == NULL) {
-                    PyErr_SetString(PyExc_NameError,
-                                    "__annotations__ not found");
-                    Py_DECREF(ann);
-                    goto error;
-                }
-                Py_INCREF(ann_dict);
-            }
-            else {
-                PyObject *ann_str = _PyUnicode_FromId(&PyId___annotations__);
-                if (ann_str == NULL) {
-                    Py_DECREF(ann);
-                    goto error;
-                }
-                ann_dict = PyObject_GetItem(f->f_locals, ann_str);
-                if (ann_dict == NULL) {
-                    if (PyErr_ExceptionMatches(PyExc_KeyError)) {
-                        PyErr_SetString(PyExc_NameError,
-                                        "__annotations__ not found");
-                    }
-                    Py_DECREF(ann);
-                    goto error;
-                }
-            }
-            /* ...if succeeded, __annotations__[name] = ann */
-            if (PyDict_CheckExact(ann_dict)) {
-                err = PyDict_SetItem(ann_dict, name, ann);
-            }
-            else {
-                err = PyObject_SetItem(ann_dict, name, ann);
-            }
-            Py_DECREF(ann_dict);
-            Py_DECREF(ann);
-            if (err != 0) {
-                goto error;
-            }
             DISPATCH();
         }
 
@@ -3567,7 +3513,7 @@ fast_yield:
                                 tstate, f,
                                 PyTrace_RETURN, retval)) {
                 Py_CLEAR(retval);
-                /* why = WHY_EXCEPTION; */
+                /* why = WHY_EXCEPTION; useless yet but cause compiler warnings */
             }
         }
     }
@@ -3744,10 +3690,10 @@ too_many_positional(PyCodeObject *co, Py_ssize_t given, Py_ssize_t defcount,
 
 PyObject *
 _PyEval_EvalCodeWithName(PyObject *_co, PyObject *globals, PyObject *locals,
-           PyObject **args, Py_ssize_t argcount,
-           PyObject **kwnames, PyObject **kwargs,
+           PyObject *const *args, Py_ssize_t argcount,
+           PyObject *const *kwnames, PyObject *const *kwargs,
            Py_ssize_t kwcount, int kwstep,
-           PyObject **defs, Py_ssize_t defcount,
+           PyObject *const *defs, Py_ssize_t defcount,
            PyObject *kwdefs, PyObject *closure,
            PyObject *name, PyObject *qualname, PyObject *jit_hint)
 {
@@ -4034,8 +3980,10 @@ fail: /* Jump here from prelude on failure */
 
 PyObject *
 PyEval_EvalCodeEx(PyObject *_co, PyObject *globals, PyObject *locals,
-           PyObject **args, int argcount, PyObject **kws, int kwcount,
-           PyObject **defs, int defcount, PyObject *kwdefs, PyObject *closure)
+                  PyObject *const *args, int argcount,
+                  PyObject *const *kws, int kwcount,
+                  PyObject *const *defs, int defcount,
+                  PyObject *kwdefs, PyObject *closure)
 {
     return _PyEval_EvalCodeWithName(_co, globals, locals,
                                     args, argcount,
@@ -4177,8 +4125,16 @@ unpack_iterable(PyObject *v, int argcnt, int argcntafter, PyObject **sp)
     assert(v != NULL);
 
     it = PyObject_GetIter(v);
-    if (it == NULL)
-        goto Error;
+    if (it == NULL) {
+        if (PyErr_ExceptionMatches(PyExc_TypeError) &&
+            v->ob_type->tp_iter == NULL && !PySequence_Check(v))
+        {
+            PyErr_Format(PyExc_TypeError,
+                         "cannot unpack non-iterable %.200s object",
+                         v->ob_type->tp_name);
+        }
+        return 0;
+    }
 
     for (; i < argcnt; i++) {
         w = PyIter_Next(it);
@@ -4417,6 +4373,21 @@ PyEval_SetTrace(Py_tracefunc func, PyObject *arg)
     /* Flag that tracing or profiling is turned on */
     tstate->use_tracing = ((func != NULL)
                            || (tstate->c_profilefunc != NULL));
+}
+
+void
+_PyEval_SetCoroutineOriginTrackingDepth(int new_depth)
+{
+    assert(new_depth >= 0);
+    PyThreadState *tstate = PyThreadState_GET();
+    tstate->coroutine_origin_tracking_depth = new_depth;
+}
+
+int
+_PyEval_GetCoroutineOriginTrackingDepth(void)
+{
+    PyThreadState *tstate = PyThreadState_GET();
+    return tstate->coroutine_origin_tracking_depth;
 }
 
 void
@@ -4832,13 +4803,12 @@ import_from(PyObject *v, PyObject *name)
     _Py_IDENTIFIER(__name__);
     PyObject *fullmodname, *pkgname, *pkgpath, *pkgname_or_unknown, *errmsg;
 
-    x = PyObject_GetAttr(v, name);
-    if (x != NULL || !PyErr_ExceptionMatches(PyExc_AttributeError))
+    if (_PyObject_LookupAttr(v, name, &x) != 0) {
         return x;
+    }
     /* Issue #17636: in case this failed because of a circular relative
        import, try to fallback on reading the module directly from
        sys.modules. */
-    PyErr_Clear();
     pkgname = _PyObject_GetAttrId(v, &PyId___name__);
     if (pkgname == NULL) {
         goto error;
@@ -4900,21 +4870,20 @@ import_all_from(PyObject *locals, PyObject *v)
 {
     _Py_IDENTIFIER(__all__);
     _Py_IDENTIFIER(__dict__);
-    PyObject *all = _PyObject_GetAttrId(v, &PyId___all__);
-    PyObject *dict, *name, *value;
+    PyObject *all, *dict, *name, *value;
     int skip_leading_underscores = 0;
     int pos, err;
 
+    if (_PyObject_LookupAttrId(v, &PyId___all__, &all) < 0) {
+        return -1; /* Unexpected error */
+    }
     if (all == NULL) {
-        if (!PyErr_ExceptionMatches(PyExc_AttributeError))
-            return -1; /* Unexpected error */
-        PyErr_Clear();
-        dict = _PyObject_GetAttrId(v, &PyId___dict__);
+        if (_PyObject_LookupAttrId(v, &PyId___dict__, &dict) < 0) {
+            return -1;
+        }
         if (dict == NULL) {
-            if (!PyErr_ExceptionMatches(PyExc_AttributeError))
-                return -1;
             PyErr_SetString(PyExc_ImportError,
-            "from-import-* object has no __dict__ and no __all__");
+                    "from-import-* object has no __dict__ and no __all__");
             return -1;
         }
         all = PyMapping_Keys(dict);
