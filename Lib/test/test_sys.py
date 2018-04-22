@@ -531,6 +531,8 @@ class SysModuleTest(unittest.TestCase):
         for attr in attrs:
             self.assertTrue(hasattr(sys.flags, attr), attr)
             attr_type = bool if attr == "dev_mode" else int
+            if attr == "jit":
+                attr_type = str
             self.assertEqual(type(getattr(sys.flags, attr)), attr_type, attr)
         self.assertTrue(repr(sys.flags))
         self.assertEqual(len(sys.flags), len(attrs))
@@ -1130,7 +1132,7 @@ class SizeofTest(unittest.TestCase):
         # Separate block for PyDictKeysObject with 8 keys and 5 entries
         check(newstyleclass, s + calcsize("2nP2n0P") + 8 + 5*calcsize("n2P"))
         # dict with shared keys
-        check(newstyleclass().__dict__, size('nQ2P') + 5*self.P)
+        check(newstyleclass().__dict__, size('nQ3P') + 5*self.P)
         o = newstyleclass()
         o.a = o.b = o.c = o.d = o.e = o.f = o.g = o.h = 1
         # Separate block for PyDictKeysObject with 16 keys and 10 entries

@@ -42,6 +42,24 @@ int PyFrame_GetLasti(PyFrameObject *f)
     return f->f_lasti_ceval;
 }
 
+uint64_t djb2_code_hash(PyCodeObject *co);
+
+int PyFrame_CanIntrospect(PyFrameObject *f)
+{
+    if (f->f_partial) {
+        PyCodeObject *co = (PyCodeObject*)f->f_code;
+        uint64_t hash = djb2_code_hash(co);
+        fprintf(stderr, "INTROSPECTION FAILURE    %s:%s   new hash = %"PRIu64"\n",
+            PyUnicode_AsUTF8(co->co_filename),
+            PyUnicode_AsUTF8(co->co_name),
+            hash);
+        PyErr_SetString(PyExc_ValueError, "Introspection failure");
+        return 0;
+    }
+    return 1;
+}
+
+
 int
 PyFrame_GetLineNumber(PyFrameObject *f)
 {
@@ -988,7 +1006,9 @@ dict_to_map(PyObject *map, Py_ssize_t nmap, PyObject *dict, PyObject **values,
 int
 PyFrame_FastToLocalsWithError(PyFrameObject *f)
 {
-    assert(!f->f_partial);
+    if (!PyFrame_CanIntrospect(f)) {
+        return -1;
+    }
     /* Merge fast locals into f->f_locals */
     PyObject *locals, *map;
     PyObject **fast;
@@ -1061,7 +1081,8 @@ PyFrame_FastToLocals(PyFrameObject *f)
 void
 PyFrame_LocalsToFast(PyFrameObject *f, int clear)
 {
-    assert(!f->f_partial);
+    if (!PyFrame_CanIntrospect(f))
+        Py_FatalError("Introspection error");
     /* Merge f->f_locals into fast locals */
     PyObject *locals, *map;
     PyObject **fast;

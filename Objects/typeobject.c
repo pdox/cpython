@@ -7662,7 +7662,8 @@ super_init(PyObject *self, PyObject *args, PyObject *kwds)
 
         /* TODO: Deal with super() by inspecting the JIT stack frames directly */
         PyRunFrame *rf = PyThreadState_GET()->runframe;
-        PyRunFrame_NeedSuper(rf);
+        if (!PyRunFrame_CanIntrospect(rf))
+            return -1;
         f = PyRunFrame_FrameRef(rf);
 
         if (f == NULL) {

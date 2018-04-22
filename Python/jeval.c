@@ -1305,6 +1305,22 @@ EMITTER_FOR(DELETE_NAME) {
     SOFT_EVAL_BREAK_CHECK();
 }
 
+/* Rewrite exception in the same manner as unpack_iterable() from ceval.c */
+static PyObject* _getiter_wrapped(PyObject *v) {
+    PyObject *it = PyObject_GetIter(v);
+    if (it == NULL) {
+        if (PyErr_ExceptionMatches(PyExc_TypeError) &&
+            v->ob_type->tp_iter == NULL && !PySequence_Check(v))
+        {
+            PyErr_Format(PyExc_TypeError,
+                         "cannot unpack non-iterable %.200s object",
+                         v->ob_type->tp_name);
+        }
+        return NULL;
+    }
+    return it;
+}
+
 EMITTER_FOR(UNPACK_SEQUENCE) {
     JVALUE seq = POP();
     JVALUE type = IR_Py_TYPE(seq);
@@ -1341,7 +1357,7 @@ EMITTER_FOR(UNPACK_SEQUENCE) {
 
     /* Generic case, iterator protocol. */
     LABEL(generic_case);
-    JVALUE it = CALL_NATIVE(jd->sig_oo, PyObject_GetIter, seq);
+    JVALUE it = CALL_NATIVE(jd->sig_oo, _getiter_wrapped, seq);
     DECREF(seq);
     GOTO_ERROR_IF_NOT(it);
 
@@ -1398,7 +1414,7 @@ EMITTER_FOR(UNPACK_EX) {
     JLABEL dispatch = JLABEL_INIT("dispatch");
 
     /* TODO: This could be specialized for tuple/list. */
-    JVALUE it = CALL_NATIVE(jd->sig_oo, PyObject_GetIter, seq);
+    JVALUE it = CALL_NATIVE(jd->sig_oo, _getiter_wrapped, seq);
     DECREF(seq);
     GOTO_ERROR_IF_NOT(it);
 
@@ -3181,7 +3197,12 @@ static void _verify_jit_locals(void) {
     if (_verified_jit_locals) return;
     _verified_jit_locals = 1;
     for (size_t i = 0; i+1 < sizeof(jit_locals_hack)/sizeof(uint64_t); i++) {
-        assert(jit_locals_hack[i] < jit_locals_hack[i+1]);
+        uint64_t a = jit_locals_hack[i];
+        uint64_t b = jit_locals_hack[i + 1];
+        if (a >= b) {
+            fprintf(stderr, "jit_locals_hack error: %"PRIu64" >= %"PRIu64"\n", a, b);
+            abort();
+        }
     }
 }
 #endif

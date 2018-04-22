@@ -4,7 +4,6 @@
 #include "ir.h"
 #include "jit_eval_entrypoint.h"
 
-char *Py_JITConfigStr;
 int Py_JITFlag;
 int Py_JITDebugFlag;
 char *Py_JITDebugFunc;
@@ -20,35 +19,7 @@ int Py_JITAsserts = 0;
 int Py_JITAsserts = 1;
 #endif
 
-static char *_load_default_config(void) {
-    FILE *fp = fopen("/tmp/PYTHONJIT_DEFAULT", "r");
-    if (!fp)
-        return strdup("");
-    fseek(fp, 0, SEEK_END);
-    long sz = ftell(fp);
-    if (sz < 0) {
-        Py_FatalError("Error reading /tmp/PYTHONJIT_DEFAULT");
-    }
-    fseek(fp, 0, SEEK_SET);
-    char *ret = (char*)malloc(sz + 1);
-    size_t rc = fread(ret, 1, (size_t)sz, fp);
-    if (rc != (size_t)sz) {
-        Py_FatalError("Unexpected short count reading /tmp/PYTHONJIT_DEFAULT");
-    }
-    /* Strip trailing newlines/spaces */
-    while (sz > 0 && isspace(ret[sz-1])) sz--;
-    ret[sz] = 0;
-    fclose(fp);
-    return ret;
-}
-
 void _PyJIT_Initialize(const char *config) {
-    if (config == NULL) {
-        Py_JITConfigStr = _load_default_config();
-        config = Py_JITConfigStr;
-    } else {
-        Py_JITConfigStr = strdup(config);
-    }
     /* 'config' is a comma-separated list of configuration options */
     const char *p = config;
     while (p[0]) {

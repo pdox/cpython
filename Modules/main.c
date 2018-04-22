@@ -67,7 +67,7 @@ static wchar_t **orig_argv = NULL;
 static int orig_argc = 0;
 
 /* command line options */
-#define BASE_OPTS L"bBc:dEhiIJm:OqRsStuvVW:xX:?Z"
+#define BASE_OPTS L"bBc:dEhiIJm:OqRsStuvVW:xX:?"
 
 #define PROGRAM_OPTS BASE_OPTS
 
@@ -884,10 +884,6 @@ pymain_parse_cmdline_impl(_PyMain *pymain, _Py_CommandLineDetails *cmdline)
 
         case 'R':
             config->use_hash_seed = 0;
-            break;
-
-        case 'Z':
-            /* Handled prior to core initialization */
             break;
 
         /* This space reserved for other options */
@@ -1804,12 +1800,43 @@ config_init_utf8_mode(_PyCoreConfig *config)
     return _Py_INIT_OK();
 }
 
+static char *_pythonjit_default_buffer;
+
+static const char *
+_read_pythonjit_default(void) {
+    if (_pythonjit_default_buffer != NULL)
+        return _pythonjit_default_buffer;
+
+    FILE *fp = fopen("/tmp/PYTHONJIT_DEFAULT", "r");
+    if (!fp)
+        return "";
+    fseek(fp, 0, SEEK_END);
+    long sz = ftell(fp);
+    if (sz < 0) {
+        Py_FatalError("Error reading /tmp/PYTHONJIT_DEFAULT");
+    }
+    fseek(fp, 0, SEEK_SET);
+    char *buf = (char*)malloc(sz + 1);
+    size_t rc = fread(buf, 1, (size_t)sz, fp);
+    if (rc != (size_t)sz) {
+        Py_FatalError("Unexpected short count reading /tmp/PYTHONJIT_DEFAULT");
+    }
+    /* Strip trailing newlines/spaces */
+    while (sz > 0 && isspace(buf[sz-1])) sz--;
+    buf[sz] = 0;
+    fclose(fp);
+    _pythonjit_default_buffer = buf;
+    return _pythonjit_default_buffer;
+}
 
 static _PyInitError
 config_read_env_vars(_PyCoreConfig *config)
 {
     config->allocator = config_get_env_var("PYTHONMALLOC");
     config->jit = config_get_env_var("PYTHONJIT");
+    if (config->jit == NULL) {
+        config->jit = _read_pythonjit_default();
+    }
 
     if (config_get_env_var("PYTHONDUMPREFS")) {
         config->dump_refs = 1;
@@ -1873,6 +1900,7 @@ config_read_complex_options(_PyCoreConfig *config)
     }
     return _Py_INIT_OK();
 }
+
 
 /* Parse command line options and environment variables.
    This code must not use Python runtime apart PyMem_Raw memory allocator.

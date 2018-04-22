@@ -35,7 +35,8 @@ trap cleanup EXIT
     -x test_import \
     -x test_json \
     -x test_unpack_ex \
-    -x test_lib2to3
+    -x test_lib2to3 \
+    -x test_poplib
 
 # test_distutils
 # test_ssl

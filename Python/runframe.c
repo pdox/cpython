@@ -138,7 +138,7 @@ PyRunFrame_WipeThread(PyThreadState *tstate) {
 
 uint64_t djb2_code_hash(PyCodeObject *co);
 
-void PyRunFrame_NeedSuper(PyRunFrame *rf) {
+int PyRunFrame_CanIntrospect(PyRunFrame *rf) {
     PyCodeObject *co = NULL;
     if (!PyRunFrame_IsMaterialized(rf)) {
         co = (PyCodeObject*)PyRunFrame_JITFunctionRef(rf)->code;
@@ -150,10 +150,12 @@ void PyRunFrame_NeedSuper(PyRunFrame *rf) {
     }
     if (co != NULL) {
         uint64_t hash = djb2_code_hash(co);
-        fprintf(stderr, "SUPER FAILURE    %s:%s   new hash = %"PRIu64"\n",
+        fprintf(stderr, "INTROSPECTION FAILURE    %s:%s   new hash = %"PRIu64"\n",
             PyUnicode_AsUTF8(co->co_filename),
             PyUnicode_AsUTF8(co->co_name),
             hash);
-        abort();
+        PyErr_SetString(PyExc_ValueError, "Introspection failure");
+        return 0;
     }
+    return 1;
 }

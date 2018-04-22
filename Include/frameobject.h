@@ -112,6 +112,8 @@ PyAPI_FUNC(int) PyFrame_GetLineNumber(PyFrameObject *);
 
 PyAPI_FUNC(int) PyFrame_GetLasti(PyFrameObject *);
 
+PyAPI_FUNC(int) PyFrame_CanIntrospect(PyFrameObject *);
+
 #ifdef __cplusplus
 }
 #endif

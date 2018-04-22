@@ -1936,7 +1936,7 @@ make_flags(void)
     SetFlag(Py_IsolatedFlag);
     PyStructSequence_SET_ITEM(seq, pos++, PyBool_FromLong(core_config->dev_mode));
     SetFlag(Py_UTF8Mode);
-    PyStructSequence_SET_ITEM(seq, pos++, PyUnicode_FromString(core_config->jit ? core_config->jit : ""));
+    PyStructSequence_SET_ITEM(seq, pos++, PyUnicode_FromString(core_config->jit));
 #undef SetFlag
 
     if (PyErr_Occurred()) {

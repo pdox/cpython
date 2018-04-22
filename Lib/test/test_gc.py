@@ -210,7 +210,7 @@ class GCTests(unittest.TestCase):
         exec("def f(): pass\n", d)
         gc.collect()
         del d
-        extra = 1 if sys.flags.jit else 0  # PyJITFunction for f
+        extra = 1 if 'on' in sys.flags.jit.split(',') else 0  # PyJITFunction for f
         self.assertEqual(gc.collect(), 2 + extra)
 
     @refcount_test

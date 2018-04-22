@@ -1370,7 +1370,7 @@ _is_running(PyInterpreterState *interp)
                         "interpreter has more than one thread");
         return -1;
     }
-    PyFrameObject *frame = tstate->frame;
+    PyFrameObject *frame = PyRunFrame_ToFrame(tstate->runframe);
     if (frame == NULL) {
         if (PyErr_Occurred() != NULL) {
             return -1;
