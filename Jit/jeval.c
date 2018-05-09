@@ -6,15 +6,15 @@
 #include "Python.h"
 #include "opcode.h"
 #include "frameobject.h"
-#include "ir.h"
 #include "Include/internal/ceval.h"
 #include "Include/internal/pystate.h"
 
-#include "Include/jit_macros.h"
-#include "Include/jit.h"
-#include "Include/jit_eval_entrypoint.h"
-#include "Include/jit_locals_hack.h"
-#include "Include/jit_attrcache.h"
+#include "Jit/ir.h"
+#include "Jit/jit_macros.h"
+#include "Jit/jit.h"
+#include "Jit/jit_eval_entrypoint.h"
+#include "Jit/jit_locals_hack.h"
+#include "Jit/jit_attrcache.h"
 
 /* JIT data attached to a PyCodeObject */
 struct _JITData;
@@ -355,37 +355,6 @@ static inline JVALUE _materialize_frame(JITData *jd) {
         _Py_atomic_load_relaxed(&_PyRuntime.ceval.pending.calls_to_do) | \
         _PyRuntime.ceval.pending.async_exc)
 
-#define SET_GIL_DROP_REQUEST() \
-    do { \
-        _Py_atomic_store_relaxed(&_PyRuntime.ceval.gil_drop_request, 1); \
-        _Py_atomic_store_relaxed(&_PyRuntime.ceval.eval_breaker, 1); \
-    } while (0)
-
-#define RESET_GIL_DROP_REQUEST() \
-    do { \
-        _Py_atomic_store_relaxed(&_PyRuntime.ceval.gil_drop_request, 0); \
-        COMPUTE_EVAL_BREAKER(); \
-    } while (0)
-
-/* Pending calls are only modified under pending_lock */
-#define SIGNAL_PENDING_CALLS() \
-    do { \
-        _Py_atomic_store_relaxed(&_PyRuntime.ceval.pending.calls_to_do, 1); \
-        _Py_atomic_store_relaxed(&_PyRuntime.ceval.eval_breaker, 1); \
-    } while (0)
-
-#define UNSIGNAL_PENDING_CALLS() \
-    do { \
-        _Py_atomic_store_relaxed(&_PyRuntime.ceval.pending.calls_to_do, 0); \
-        COMPUTE_EVAL_BREAKER(); \
-    } while (0)
-
-#define SIGNAL_ASYNC_EXC() \
-    do { \
-        _PyRuntime.ceval.pending.async_exc = 1; \
-        _Py_atomic_store_relaxed(&_PyRuntime.ceval.eval_breaker, 1); \
-    } while (0)
-
 #define UNSIGNAL_ASYNC_EXC() \
     do { \
         _PyRuntime.ceval.pending.async_exc = 0; \
@@ -396,11 +365,10 @@ static inline JVALUE _materialize_frame(JITData *jd) {
 #include <errno.h>
 #endif
 #include "pythread.h"
-#include "ceval_gil.h"
 /* ---------------------------- End copy from ceval.c ------------------------------- */
 
-/* To make unused error warnings go away */
-void *dummy2[] = {_gil_initialize, gil_created, destroy_gil, recreate_gil};
+void take_gil(PyThreadState *);
+void drop_gil(PyThreadState *);
 
 /* Do eval break. Return 0 on success, -1 on exception. */
 static int _do_eval_break(PyCodeObject *co, int next_instr_index) {
@@ -3087,8 +3055,8 @@ EMITTER_FOR(EXTENDED_ARG) {
 
 /* --- END EMITTERS --- */
 
-#include "opcode_emitter_table.h"
-#include "opcode_names.h"
+#include "Python/opcode_emitter_table.h"
+#include "Python/opcode_names.h"
 
 #define IR_DEBUG_DUMP(filename) do { \
     if (Py_JITDebugFlag > 1) { \

@@ -137,8 +137,8 @@
 #include "fileutils.h"
 #include "pyfpe.h"
 
-#include "jit.h"
-#include "runframe.h"
-#include "jit_attrcache.h"
+#include "Jit/jit.h"
+#include "Jit/runframe.h"
+#include "Jit/jit_attrcache.h"
 
 #endif /* !Py_PYTHON_H */

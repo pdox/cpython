@@ -1,8 +1,8 @@
 #include "Python.h"
 #include "frameobject.h"
 #include "ir.h"
-#include "Include/jit_macros.h"
-#include "Include/jit.h"
+#include "Jit/jit_macros.h"
+#include "Jit/jit.h"
 
 
 typedef struct {

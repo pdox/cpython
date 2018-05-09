@@ -332,26 +332,6 @@ PYTHON_OBJS=	\
 		Python/ast_unparse.o \
 		Python/bltinmodule.o \
 		Python/ceval.o \
-                Python/ir_context.o \
-                Python/ir_func.o \
-                Python/ir_type_system.o \
-                Python/ir_instructions.o \
-                Python/ir_domtree_semi_nca.o \
-                Python/ir_domtree_dataflow.o \
-                Python/ir_domtree_verify.o \
-                Python/ir_analyze.o \
-                Python/ir_libjit.o \
-                Python/ir_llvm.o \
-		Python/jeval.o \
-		Python/jit.o \
-		Python/jitcall.o \
-		Python/jit_attrcache.o \
-		Python/jit_eval_entrypoint.o \
-		Python/jit_macros.o \
-                Python/runframe.o \
-		Python/jeval_error_handler_trampoline.o \
-		Python/ir_stackmaps.o \
-		Python/ir_object.o \
 		Python/compile.o \
 		Python/codecs.o \
 		Python/dynamic_annotations.o \
@@ -401,6 +381,29 @@ PYTHON_OBJS=	\
 		$(MACHDEP_OBJS) \
 		$(DTRACE_OBJS)
 
+##########################################################################
+# JIT
+JIT_OBJS=	\
+		Jit/ir_analyze.o \
+		Jit/ir_context.o \
+		Jit/ir_domtree_dataflow.o \
+		Jit/ir_domtree_semi_nca.o \
+		Jit/ir_domtree_verify.o \
+		Jit/ir_func.o \
+		Jit/ir_instructions.o \
+		Jit/ir_libjit.o \
+		Jit/ir_llvm.o \
+		Jit/ir_object.o \
+		Jit/ir_stackmaps.o \
+		Jit/ir_type_system.o \
+		Jit/jeval.o \
+		Jit/jit_attrcache.o \
+		Jit/jit.o \
+		Jit/jitcall.o \
+		Jit/jit_eval_entrypoint.o \
+		Jit/jit_macros.o \
+		Jit/jeval_error_handler_trampoline.o \
+		Jit/runframe.o
 
 ##########################################################################
 # Objects
@@ -453,6 +456,7 @@ LIBRARY_OBJS_OMIT_FROZEN=	\
 		$(PARSER_OBJS) \
 		$(OBJECT_OBJS) \
 		$(PYTHON_OBJS) \
+		$(JIT_OBJS) \
 		$(MODULE_OBJS) \
 		$(MODOBJS)
 
@@ -765,6 +769,7 @@ regen-all: regen-opcode regen-opcode-targets regen-opcode-emitter-table regen-op
 Modules/getbuildinfo.o: $(PARSER_OBJS) \
 		$(OBJECT_OBJS) \
 		$(PYTHON_OBJS) \
+		$(JIT_OBJS) \
 		$(MODULE_OBJS) \
 		$(MODOBJS) \
 		$(srcdir)/Modules/getbuildinfo.c
@@ -970,6 +975,35 @@ regen-typeslots:
 ############################################################################
 # Header files
 
+JIT_HEADERS=	\
+		$(srcdir)/Jit/adt_bitset.h \
+		$(srcdir)/Jit/adt.h \
+		$(srcdir)/Jit/adt_hashmap.h \
+		$(srcdir)/Jit/adt_macros.h \
+		$(srcdir)/Jit/adt_vector.h \
+		$(srcdir)/Jit/ir_all_types.def \
+		$(srcdir)/Jit/ir_analyze.h \
+		$(srcdir)/Jit/ir_context.h \
+		$(srcdir)/Jit/ir_domtree.h \
+		$(srcdir)/Jit/ir_func.h \
+		$(srcdir)/Jit/ir.h \
+		$(srcdir)/Jit/ir_instructions.h \
+		$(srcdir)/Jit/ir_integral_types.def \
+		$(srcdir)/Jit/ir_libjit.h \
+		$(srcdir)/Jit/ir_llvm.h \
+		$(srcdir)/Jit/ir_macros.h \
+		$(srcdir)/Jit/ir_object.h \
+		$(srcdir)/Jit/ir_stackmaps.h \
+		$(srcdir)/Jit/ir_struct_types.def \
+		$(srcdir)/Jit/ir_type_system.h \
+		$(srcdir)/Jit/jit_attrcache.h \
+		$(srcdir)/Jit/jitcall.h \
+		$(srcdir)/Jit/jit.h \
+		$(srcdir)/Jit/jit_locals_hack.h \
+		$(srcdir)/Jit/jit_macros.h \
+		$(srcdir)/Jit/SimpleOrcJit.h \
+		$(srcdir)/Jit/runframe.h
+
 PYTHON_HEADERS= \
 		$(srcdir)/Include/Python.h \
 		$(srcdir)/Include/abstract.h \
@@ -1059,33 +1093,6 @@ PYTHON_HEADERS= \
 		$(srcdir)/Include/unicodeobject.h \
 		$(srcdir)/Include/warnings.h \
 		$(srcdir)/Include/weakrefobject.h \
-                $(srcdir)/Include/ir_all_types.def \
-                $(srcdir)/Include/ir_domtree.h \
-                $(srcdir)/Include/ir_analyze.h \
-                $(srcdir)/Include/ir_context.h \
-                $(srcdir)/Include/ir_func.h \
-                $(srcdir)/Include/ir.h \
-                $(srcdir)/Include/ir_instructions.h \
-                $(srcdir)/Include/ir_integral_types.def \
-                $(srcdir)/Include/ir_libjit.h \
-                $(srcdir)/Include/ir_llvm.h \
-                $(srcdir)/Include/ir_macros.h \
-                $(srcdir)/Include/ir_object.h \
-                $(srcdir)/Include/ir_stackmaps.h \
-                $(srcdir)/Include/ir_struct_types.def \
-                $(srcdir)/Include/ir_type_system.h \
-                $(srcdir)/Include/jit.h \
-                $(srcdir)/Include/jitcall.h \
-                $(srcdir)/Include/jit_attrcache.h \
-                $(srcdir)/Include/jit_locals_hack.h \
-                $(srcdir)/Include/jit_macros.h \
-                $(srcdir)/Include/SimpleOrcJit.h \
-                $(srcdir)/Include/adt.h \
-                $(srcdir)/Include/adt_macros.h \
-                $(srcdir)/Include/adt_vector.h \
-                $(srcdir)/Include/adt_bitset.h \
-                $(srcdir)/Include/adt_hashmap.h \
-		$(srcdir)/Include/runframe.h \
 		pyconfig.h \
 		$(PARSER_HEADERS) \
 		$(srcdir)/Include/Python-ast.h \
@@ -1096,7 +1103,8 @@ PYTHON_HEADERS= \
 		$(srcdir)/Include/internal/pystate.h \
 		$(srcdir)/Include/internal/context.h \
 		$(srcdir)/Include/internal/warnings.h \
-		$(DTRACE_HEADERS)
+		$(DTRACE_HEADERS) \
+		$(JIT_HEADERS)
 
 $(LIBRARY_OBJS) $(MODOBJS) Programs/python.o: $(PYTHON_HEADERS)
 

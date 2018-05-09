@@ -146,7 +146,7 @@ static void recreate_gil(void)
     create_gil();
 }
 
-static void drop_gil(PyThreadState *tstate)
+void drop_gil(PyThreadState *tstate)
 {
     if (!_Py_atomic_load_relaxed(&_PyRuntime.ceval.gil.locked))
         Py_FatalError("drop_gil: GIL is not locked");
@@ -188,7 +188,7 @@ static void drop_gil(PyThreadState *tstate)
 #endif
 }
 
-static void take_gil(PyThreadState *tstate)
+void take_gil(PyThreadState *tstate)
 {
     int err;
     if (tstate == NULL)
@@ -248,7 +248,6 @@ _ready:
     errno = err;
 }
 
-#ifdef __REAL_CEVAL
 void _PyEval_SetSwitchInterval(unsigned long microseconds)
 {
     _PyRuntime.ceval.gil.interval = microseconds;
@@ -258,4 +257,3 @@ unsigned long _PyEval_GetSwitchInterval()
 {
     return _PyRuntime.ceval.gil.interval;
 }
-#endif /* __REAL_CEVAL */

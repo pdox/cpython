@@ -19,7 +19,7 @@
 #include "pydtrace.h"
 #include "setobject.h"
 #include "structmember.h"
-#include "jit.h"
+#include "Jit/jit.h"
 
 #include <ctype.h>
 
@@ -44,29 +44,29 @@ PyObject * do_call_core(PyObject *, PyObject *, PyObject *);
 static int lltrace;
 static int prtrace(PyObject *, const char *);
 #endif
-int call_trace(Py_tracefunc, PyObject *,
+static int call_trace(Py_tracefunc, PyObject *,
                       PyThreadState *, PyFrameObject *,
                       int, PyObject *);
-int call_trace_protected(Py_tracefunc, PyObject *,
+static int call_trace_protected(Py_tracefunc, PyObject *,
                                 PyThreadState *, PyFrameObject *,
                                 int, PyObject *);
-void call_exc_trace(Py_tracefunc, PyObject *,
+static void call_exc_trace(Py_tracefunc, PyObject *,
                            PyThreadState *, PyFrameObject *);
-int maybe_call_line_trace(Py_tracefunc, PyObject *,
+static int maybe_call_line_trace(Py_tracefunc, PyObject *,
                                  PyThreadState *, PyFrameObject *,
                                  int *, int *, int *);
-void maybe_dtrace_line(PyFrameObject *, int *, int *, int *);
-void dtrace_function_entry(PyFrameObject *);
-void dtrace_function_return(PyFrameObject *);
+static void maybe_dtrace_line(PyFrameObject *, int *, int *, int *);
+static void dtrace_function_entry(PyFrameObject *);
+static void dtrace_function_return(PyFrameObject *);
 
-PyObject * cmp_outcome(int, PyObject *, PyObject *);
+static PyObject * cmp_outcome(int, PyObject *, PyObject *);
 PyObject * import_name(PyFrameObject *, PyObject *, PyObject *,
                               PyObject *);
 PyObject * import_from(PyObject *, PyObject *);
 int import_all_from(PyObject *, PyObject *);
 void format_exc_check_arg(PyObject *, const char *, PyObject *);
 void format_exc_unbound(PyCodeObject *co, int oparg);
-PyObject * unicode_concatenate(PyObject *, PyObject *,
+static PyObject * unicode_concatenate(PyObject *, PyObject *,
                                       PyFrameObject *, const _Py_CODEUNIT *);
 PyObject * special_lookup(PyObject *, _Py_Identifier *);
 int check_args_iterable(PyObject *func, PyObject *vararg);
@@ -144,7 +144,6 @@ static long dxp[256];
 #include <errno.h>
 #endif
 #include "pythread.h"
-#define __REAL_CEVAL
 #include "ceval_gil.h"
 
 int
@@ -515,7 +514,7 @@ enum why_code {
 };
 
 int do_raise(PyObject *, PyObject *);
-int unpack_iterable(PyObject *, int, int, PyObject **);
+static int unpack_iterable(PyObject *, int, int, PyObject **);
 
 #define _Py_TracingPossible _PyRuntime.ceval.tracing_possible
 
@@ -3528,7 +3527,7 @@ exit_eval_frame:
     return _Py_CheckFunctionResult(NULL, retval, "PyEval_EvalFrameEx");
 }
 
-void
+static void
 format_missing(const char *kind, PyCodeObject *co, PyObject *names)
 {
     int err;
@@ -3590,7 +3589,7 @@ format_missing(const char *kind, PyCodeObject *co, PyObject *names)
     Py_DECREF(name_str);
 }
 
-void
+static void
 missing_arguments(PyCodeObject *co, Py_ssize_t missing, Py_ssize_t defcount,
                   PyObject **fastlocals)
 {
@@ -3628,7 +3627,7 @@ missing_arguments(PyCodeObject *co, Py_ssize_t missing, Py_ssize_t defcount,
     Py_DECREF(missing_names);
 }
 
-void
+static void
 too_many_positional(PyCodeObject *co, Py_ssize_t given, Py_ssize_t defcount,
                     PyObject **fastlocals)
 {
@@ -4113,7 +4112,7 @@ raise_error:
    with a variable target.
 */
 
-int
+static int
 unpack_iterable(PyObject *v, int argcnt, int argcntafter, PyObject **sp)
 {
     int i = 0, j = 0;
@@ -4206,7 +4205,7 @@ Error:
 
 
 #ifdef LLTRACE
-int
+static int
 prtrace(PyObject *v, const char *str)
 {
     printf("%s ", str);
@@ -4217,7 +4216,7 @@ prtrace(PyObject *v, const char *str)
 }
 #endif
 
-void
+static void
 call_exc_trace(Py_tracefunc func, PyObject *self,
                PyThreadState *tstate, PyFrameObject *f)
 {
@@ -4246,7 +4245,7 @@ call_exc_trace(Py_tracefunc func, PyObject *self,
     }
 }
 
-int
+static int
 call_trace_protected(Py_tracefunc func, PyObject *obj,
                      PyThreadState *tstate, PyFrameObject *frame,
                      int what, PyObject *arg)
@@ -4268,7 +4267,7 @@ call_trace_protected(Py_tracefunc func, PyObject *obj,
     }
 }
 
-int
+static int
 call_trace(Py_tracefunc func, PyObject *obj,
            PyThreadState *tstate, PyFrameObject *frame,
            int what, PyObject *arg)
@@ -4303,7 +4302,7 @@ _PyEval_CallTracing(PyObject *func, PyObject *args)
 }
 
 /* See Objects/lnotab_notes.txt for a description of how tracing works. */
-int
+static int
 maybe_call_line_trace(Py_tracefunc func, PyObject *obj,
                       PyThreadState *tstate, PyFrameObject *frame,
                       int *instr_lb, int *instr_ub, int *instr_prev)
@@ -4704,7 +4703,7 @@ _PyEval_SliceIndexNotNone(PyObject *v, Py_ssize_t *pi)
 #define CANNOT_CATCH_MSG "catching classes that do not inherit from "\
                          "BaseException is not allowed"
 
-PyObject *
+static PyObject *
 cmp_outcome(int op, PyObject *v, PyObject *w)
 {
     int res = 0;
@@ -4992,7 +4991,7 @@ format_exc_unbound(PyCodeObject *co, int oparg)
     }
 }
 
-PyObject *
+static PyObject *
 unicode_concatenate(PyObject *v, PyObject *w,
                     PyFrameObject *f, const _Py_CODEUNIT *next_instr)
 {
@@ -5047,7 +5046,7 @@ unicode_concatenate(PyObject *v, PyObject *w,
 
 #ifdef DYNAMIC_EXECUTION_PROFILE
 
-PyObject *
+static PyObject *
 getarray(long a[256])
 {
     int i;
@@ -5103,7 +5102,7 @@ _PyEval_RequestCodeExtraIndex(freefunc free)
     return new_index;
 }
 
-void
+static void
 dtrace_function_entry(PyFrameObject *f)
 {
     const char *filename;
@@ -5117,7 +5116,7 @@ dtrace_function_entry(PyFrameObject *f)
     PyDTrace_FUNCTION_ENTRY(filename, funcname, lineno);
 }
 
-void
+static void
 dtrace_function_return(PyFrameObject *f)
 {
     const char *filename;
@@ -5132,7 +5131,7 @@ dtrace_function_return(PyFrameObject *f)
 }
 
 /* DTrace equivalent of maybe_call_line_trace. */
-void
+static void
 maybe_dtrace_line(PyFrameObject *frame,
                   int *instr_lb, int *instr_ub, int *instr_prev)
 {
