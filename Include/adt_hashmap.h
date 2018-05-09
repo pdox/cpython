@@ -16,7 +16,10 @@
 #define ADT_HASHMAP_ALIGNMENT  8
 
 
+/* int eqfunc(void *ptr_to_key1, void *ptr_to_key2); */
 typedef int (*adt_hashmap_eqfunc)(void*,void*);
+
+/* size_t hashfunc(void *ptr_to_key); */
 typedef size_t (*adt_hashmap_hashfunc)(void*);
 
 struct adt_hashmap_entry_t;
@@ -64,6 +67,19 @@ _adt_hashmap_entry_new(adt_hashmap m) {
     return (adt_hashmap_entry)malloc(m->value_offset + m->value_size);
 }
 
+static inline void
+_adt_hashmap_entry_delete(adt_hashmap_entry e) {
+    free(e);
+}
+
+struct adt_hashmap_cursor_t {
+    adt_hashmap m;
+    size_t next_bucket_index;
+    adt_hashmap_entry next_entry;
+};
+typedef struct adt_hashmap_cursor_t adt_hashmap_cursor_t;
+typedef adt_hashmap_cursor_t* adt_hashmap_cursor;
+
 static inline adt_hashmap
 adt_hashmap_new(
         size_t key_size,
@@ -90,20 +106,25 @@ adt_hashmap_delete(adt_hashmap m) {
     free(m);
 }
 
-static inline adt_hashmap_entry
-_adt_hashmap_find_entry(adt_hashmap m, void *key)
+static inline void
+_adt_hashmap_find_entry(adt_hashmap m, void *key, adt_hashmap_entry *entry, adt_hashmap_entry *prev, size_t *bucket_index)
 {
     size_t hash = m->keyhash(key);
     size_t index = hash % m->nbuckets;
     adt_hashmap_entry cursor = m->buckets[index];
+    adt_hashmap_entry last = NULL;
     while (cursor != NULL) {
         void *entry_key = _adt_hashmap_entry_key(m, cursor);
         if (m->keyeq(key, entry_key)) {
-            return cursor;
+            *entry = cursor;
+            if (prev) *prev = last;
+            if (bucket_index) *bucket_index = index;
+            return;
         }
+        last = cursor;
         cursor = cursor->next;
     }
-    return NULL;
+    *entry = NULL;
 }
 
 static inline void
@@ -118,7 +139,8 @@ _adt_hashmap_insert_entry(adt_hashmap m, adt_hashmap_entry entry) {
 static inline int
 adt_hashmap_get(adt_hashmap m, void *key_in, void *value_out)
 {
-    adt_hashmap_entry entry = _adt_hashmap_find_entry(m, key_in);
+    adt_hashmap_entry entry;
+    _adt_hashmap_find_entry(m, key_in, &entry, NULL, NULL);
     if (entry) {
         void *entry_value = _adt_hashmap_entry_value(m, entry);
         memcpy(value_out, entry_value, m->value_size);
@@ -163,7 +185,8 @@ adt_hashmap_insert(adt_hashmap m, void *key, void *value)
     if (load_factor > ADT_HASHMAP_MAX_LOAD_FACTOR)
         adt_hashmap_resize(m, m->nbuckets * 2);
 
-    adt_hashmap_entry entry = _adt_hashmap_find_entry(m, key);
+    adt_hashmap_entry entry;
+    _adt_hashmap_find_entry(m, key, &entry, NULL, NULL);
     if (entry != NULL)
         return 0;
 
@@ -171,5 +194,60 @@ adt_hashmap_insert(adt_hashmap m, void *key, void *value)
     memcpy(_adt_hashmap_entry_key(m, entry), key, m->key_size);
     memcpy(_adt_hashmap_entry_value(m, entry), value, m->value_size);
     _adt_hashmap_insert_entry(m, entry);
+    return 1;
+}
+
+/* Remove element from map.
+   Returns 1 if element was removed. 0 otherwise.
+   If value_out != NULL and an element was removed,
+   the value is placed at *value_out.
+ */
+static inline int
+adt_hashmap_remove(adt_hashmap m, void *key_in, void *value_out)
+{
+    adt_hashmap_entry entry;
+    adt_hashmap_entry prev;
+    size_t bucket_index;
+    _adt_hashmap_find_entry(m, key_in, &entry, &prev, &bucket_index);
+    if (entry) {
+        if (value_out) {
+            void *entry_value = _adt_hashmap_entry_value(m, entry);
+            memcpy(value_out, entry_value, m->value_size);
+        }
+        if (prev != NULL) {
+            assert(m->buckets[bucket_index] != entry);
+            prev->next = entry->next;
+        } else {
+            assert(m->buckets[bucket_index] == entry);
+            m->buckets[bucket_index] = entry->next;
+        }
+        _adt_hashmap_entry_delete(entry);
+        m->nentries--;
+        return 1;
+    }
+    return 0;
+}
+
+static inline void
+adt_hashmap_iter_begin(adt_hashmap m, adt_hashmap_cursor cursor) {
+    cursor->m = m;
+    cursor->next_bucket_index = 0;
+    cursor->next_entry = NULL;
+}
+
+static inline int
+adt_hashmap_iter_next(adt_hashmap_cursor cursor, void *key_out, void *value_out) {
+    adt_hashmap m = cursor->m;
+    adt_hashmap_entry entry = cursor->next_entry;
+    while (entry == NULL && cursor->next_bucket_index < m->nbuckets) {
+        entry = m->buckets[cursor->next_bucket_index++];
+    }
+    if (entry == NULL)
+        return 0;
+    cursor->next_entry = entry->next;
+    void *key = _adt_hashmap_entry_key(m, entry);
+    void *value = _adt_hashmap_entry_value(m, entry);
+    memcpy(key_out, key, m->key_size);
+    memcpy(value_out, value, m->value_size);
     return 1;
 }

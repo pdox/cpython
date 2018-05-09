@@ -901,6 +901,37 @@ lookdict_split(PyDictObject *mp, PyObject *key,
     Py_UNREACHABLE();
 }
 
+Py_ssize_t _Py_HOT_FUNCTION
+lookdict_split_for_jit(PyDictKeysObject *dk, PyObject *key,
+                       Py_hash_t hash)
+{
+    /* mp must split table */
+    assert(PyUnicode_CheckExact(key));
+
+    PyDictKeyEntry *ep0 = DK_ENTRIES(dk);
+    size_t mask = DK_MASK(dk);
+    size_t perturb = (size_t)hash;
+    size_t i = (size_t)hash & mask;
+
+    for (;;) {
+        Py_ssize_t ix = dk_get_index(dk, i);
+        assert (ix != DKIX_DUMMY);
+        if (ix == DKIX_EMPTY) {
+            return DKIX_EMPTY;
+        }
+        PyDictKeyEntry *ep = &ep0[ix];
+        assert(ep->me_key != NULL);
+        assert(PyUnicode_CheckExact(ep->me_key));
+        if (ep->me_key == key ||
+            (ep->me_hash == hash && unicode_eq(ep->me_key, key))) {
+            return ix;
+        }
+        perturb >>= PERTURB_SHIFT;
+        i = mask & (i*5 + perturb + 1);
+    }
+    Py_UNREACHABLE();
+}
+
 int
 _PyDict_HasOnlyStringKeys(PyObject *dict)
 {
@@ -1040,6 +1071,8 @@ insertdict(PyDictObject *mp, PyObject *key, Py_hash_t hash, PyObject *value)
         if (mp->ma_values) {
             assert (mp->ma_values[mp->ma_keys->dk_nentries] == NULL);
             mp->ma_values[mp->ma_keys->dk_nentries] = value;
+            /* We're adding a key to ht_cached_keys for a type */
+            _PyJITAttrCache_Notify_AddKey(mp->ma_keys, key, hash);
         }
         else {
             ep->me_value = value;
@@ -4324,7 +4357,12 @@ _PyDict_NewKeysForClass(void)
     return keys;
 }
 
-#define CACHED_KEYS(tp) (((PyHeapTypeObject*)tp)->ht_cached_keys)
+/* Ensure that CACHED_KEYS cannot be assigned to */
+#define CACHED_KEYS(tp) (((PyHeapTypeObject*)tp)->ht_cached_keys + 0)
+#define SET_CACHED_KEYS(tp, new_cached_keys) do { \
+  ((PyHeapTypeObject*)tp)->ht_cached_keys = (new_cached_keys); \
+  _PyJITAttrCache_Notify_SetCachedKeys((tp), (new_cached_keys)); \
+} while (0)
 
 PyObject *
 PyObject_GenericGetDict(PyObject *obj, void *context)
@@ -4374,7 +4412,7 @@ _PyObjectDict_SetItem(PyTypeObject *tp, PyObject **dictptr,
             // Since key sharing dict doesn't allow deletion, PyDict_DelItem()
             // always converts dict to combined form.
             if ((cached = CACHED_KEYS(tp)) != NULL) {
-                CACHED_KEYS(tp) = NULL;
+                SET_CACHED_KEYS(tp, NULL);
                 DK_DECREF(cached);
             }
         }
@@ -4399,10 +4437,10 @@ _PyObjectDict_SetItem(PyTypeObject *tp, PyObject **dictptr,
                  *     a = C()
                  */
                 if (cached->dk_refcnt == 1) {
-                    CACHED_KEYS(tp) = make_keys_shared(dict);
+                    SET_CACHED_KEYS(tp, make_keys_shared(dict));
                 }
                 else {
-                    CACHED_KEYS(tp) = NULL;
+                    SET_CACHED_KEYS(tp, NULL);
                 }
                 DK_DECREF(cached);
                 if (CACHED_KEYS(tp) == NULL && PyErr_Occurred())

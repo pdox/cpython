@@ -190,6 +190,10 @@ PyDictListener* _PyDict_AddListener(PyDictObject *d, PyDictListenerCallback call
 void _PyDict_NotifyListeners(PyDictObject *d);
 void _PyDict_DeleteListener(PyDictObject *d, PyDictListener *dl);
 
+Py_ssize_t
+lookdict_split_for_jit(PyDictKeysObject *dk, PyObject *key,
+                       Py_hash_t hash);
+
 #endif
 
 #ifdef __cplusplus

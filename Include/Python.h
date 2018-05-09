@@ -139,5 +139,6 @@
 
 #include "jit.h"
 #include "runframe.h"
+#include "jit_attrcache.h"
 
 #endif /* !Py_PYTHON_H */

@@ -14,6 +14,7 @@
 #include "Include/jit.h"
 #include "Include/jit_eval_entrypoint.h"
 #include "Include/jit_locals_hack.h"
+#include "Include/jit_attrcache.h"
 
 /* JIT data attached to a PyCodeObject */
 struct _JITData;
@@ -90,6 +91,7 @@ typedef struct _JITData {
     ir_type sig_oooo;
     ir_type sig_ooooo;
     ir_type sig_ooooooo;
+    ir_type sig_oov;
     ir_type sig_vp;
     ir_type sig_i;
     ir_type sig_io;
@@ -334,7 +336,7 @@ static inline JVALUE _materialize_frame(JITData *jd) {
 /* Warning: Swapping stackadj/peek here may break ir_yield value substitution */
 #define POP()          (STACKADJ(-1), PEEK(0))
 
-#define GETNAME(i)   PyTuple_GET_ITEM(jd->co->co_names, (i));
+#define GETNAME(i)   PyTuple_GET_ITEM(jd->co->co_names, (i))
 #define LOAD_FREEVAR(i) \
     (jd->use_virtual_locals ? \
         LOAD(jd->fastlocals_values[jd->co->co_nlocals + (i)]) \
@@ -1476,7 +1478,7 @@ EMITTER_FOR(UNPACK_EX) {
 }
 
 EMITTER_FOR(STORE_ATTR) {
-    PyObject *name = GETNAME(oparg)
+    PyObject *name = GETNAME(oparg);
     JVALUE owner = TOP();
     JVALUE v = SECOND();
     RTCALL_Z(jd->sig_iooo, PyObject_SetAttr, owner, CONSTANT_PYOBJ(name), v);
@@ -2220,9 +2222,19 @@ EMITTER_FOR(MAP_ADD) {
 }
 
 EMITTER_FOR(LOAD_ATTR) {
-    PyObject *name = GETNAME(oparg);
     JVALUE owner = TOP();
-    JVALUE res = RTCALL_NZ(jd->sig_ooo, PyObject_GetAttr, owner, CONSTANT_PYOBJ(name));
+    PyObject *name = GETNAME(oparg);
+    JVALUE res;
+    if (Py_JITAttrCache == 0) {
+        res = RTCALL_NZ(jd->sig_ooo, PyObject_GetAttr, owner, CONSTANT_PYOBJ(name));
+    } else {
+        PyJITAttrCache *ic = PyJITAttrCache_New(name);
+        if (!ic) {
+            Py_FatalError("Failed to create attribute inline cache");
+        }
+        JVALUE icvalue = CONSTANT_PTR(ir_type_void_ptr, ic);
+        res = RTCALL_NZ(jd->sig_oov, PyJITAttrCache_GetAttrFunc(), owner, icvalue);
+    }
     STACKADJ(-1);
     DECREF(owner);
     PUSH(res);
@@ -2742,39 +2754,41 @@ EMITTER_FOR(WITH_CLEANUP_FINISH) {
     SOFT_EVAL_BREAK_CHECK();
 }
 
-/* Private API for the LOAD_METHOD opcode. */
 extern int _PyObject_GetMethod(PyObject *, PyObject *, PyObject **);
 
 EMITTER_FOR(LOAD_METHOD) {
-    PyObject *name = GETNAME(oparg);
     JVALUE obj = TOP();
-    /* Use the first tmpstack slot to receive the method */
-    assert(jd->tmpstack_size >= 1);
-    JVALUE methptr = jd->tmpstack;
-    STORE(methptr, CONSTANT_PYOBJ(NULL));
-    JTYPE sig = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr_ptr);
-    JVALUE meth_found = CALL_NATIVE(sig, _PyObject_GetMethod, obj, CONSTANT_PYOBJ(name), methptr);
-    JVALUE meth = LOAD(methptr);
-
-    /* If meth == NULL, most likely attribute wasn't found. */
-    GOTO_ERROR_IF_NOT(meth);
-
-    JLABEL fin = JLABEL_INIT("fin");
-    JLABEL if_meth_found = JLABEL_INIT("if_meth_found");
-    BRANCH_IF(meth_found, if_meth_found, IR_LIKELY);
-
-    /* !meth_found case */
-    SET_TOP(CONSTANT_PYOBJ(NULL));
-    DECREF(obj);
-    PUSH(meth);
-    BRANCH(fin);
-
-    /* meth_found case */
-    LABEL(if_meth_found);
-    SET_TOP(meth);
-    PUSH(obj); // self
-
-    LABEL(fin);
+    PyObject *name = GETNAME(oparg);
+    JVALUE meth;
+    JVALUE meth_found;
+    if (Py_JITAttrCache == 0) {
+        assert(jd->tmpstack_size >= 1);
+        JVALUE meth_ptr = jd->tmpstack;
+        STORE(meth_ptr, CONSTANT_PYOBJ(NULL));
+        JTYPE sig = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr_ptr);
+        meth_found = CALL_NATIVE(sig, _PyObject_GetMethod, obj, CONSTANT_PYOBJ(name), meth_ptr);
+        meth = LOAD(meth_ptr);
+        GOTO_ERROR_IF_NOT(meth);
+    } else {
+        PyJITAttrCache *ic = PyJITAttrCache_New(name);
+        if (!ic) {
+            Py_FatalError("Failed to create attribute inline cache");
+        }
+        JVALUE icvalue = CONSTANT_PTR(ir_type_void_ptr, ic);
+        JVALUE meth_found_ptr = ALLOCA(ir_type_int);
+        STORE(meth_found_ptr, CONSTANT_INT(0));
+        JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_void_ptr, ir_type_int_ptr);
+        meth = RTCALL_NZ(sig, PyJITAttrCache_GetMethodFunc(), obj, icvalue, meth_found_ptr);
+        meth_found = LOAD(meth_found_ptr);
+    }
+    IF_ELSE(meth_found, IR_LIKELY, {
+        SET_TOP(meth);
+        PUSH(obj);
+    }, {
+        SET_TOP(CONSTANT_PYOBJ(NULL));
+        DECREF(obj);
+        PUSH(meth);
+    });
     SOFT_EVAL_BREAK_CHECK();
 }
 
@@ -3282,6 +3296,7 @@ static void _init_jitdata(JITData *jd, PyCodeObject *co, PyObject *globals, PyOb
     jd->sig_oooo = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
     jd->sig_ooooo = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
     jd->sig_ooooooo = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_pyobject_ptr);
+    jd->sig_oov = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_void_ptr);
     jd->sig_vp = CREATE_SIGNATURE(ir_type_void, ir_type_void_ptr);
     jd->sig_i = CREATE_SIGNATURE(ir_type_int);
     jd->sig_io = CREATE_SIGNATURE(ir_type_int, ir_type_pyobject_ptr);

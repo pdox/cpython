@@ -5761,7 +5761,7 @@ LDVERSION="$VERSION"
 $as_echo_n "checking LINKCC... " >&6; }
 if test -z "$LINKCC"
 then
-	LINKCC='$(PURIFY) $(MAINCC)'
+	LINKCC='$(PURIFY) $(CXX)'
 	case $ac_sys_system in
 	AIX*)
 	   exp_extra="\"\""

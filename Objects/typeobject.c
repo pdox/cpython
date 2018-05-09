@@ -270,6 +270,7 @@ PyType_Modified(PyTypeObject *type)
         }
     }
     type->tp_flags &= ~Py_TPFLAGS_VALID_VERSION_TAG;
+    _PyJITAttrCache_Notify_TypeModified(type);
 }
 
 static void
@@ -310,9 +311,10 @@ type_mro_modified(PyTypeObject *type, PyObject *bases) {
     if (clear)
         type->tp_flags &= ~(Py_TPFLAGS_HAVE_VERSION_TAG|
                             Py_TPFLAGS_VALID_VERSION_TAG);
+    _PyJITAttrCache_Notify_TypeModified(type);
 }
 
-static int
+int
 assign_version_tag(PyTypeObject *type)
 {
     /* Ensure that the tp_version_tag is valid and set
@@ -3264,6 +3266,8 @@ type_dealloc(PyTypeObject *type)
 {
     PyHeapTypeObject *et;
     PyObject *tp, *val, *tb;
+
+    _PyJITAttrCache_Notify_TypeDealloc(type);
 
     /* Assert this is a heap-allocated type object */
     assert(type->tp_flags & Py_TPFLAGS_HEAPTYPE);

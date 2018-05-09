@@ -20,6 +20,19 @@ extern int Py_JITNoExc;
 extern int Py_JITNoSuper;
 extern int Py_JITAsserts;
 
+/* Controls the load/store attribute cache.
+    0 - Attribute cache off
+    1 - Attribute cache on
+    2 - Verify mode (slow!)
+ */
+extern int Py_JITAttrCache;
+
+void _always_assert_fail(const char *expr, const char *file, long line);
+
+#define always_assert(x) do { \
+    if (!(x)) _always_assert_fail(#x, __FILE__, __LINE__); \
+} while (0)
+
 void _PyJIT_Initialize(const char *config);
 
 /* Forward declaration */

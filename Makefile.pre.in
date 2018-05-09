@@ -345,6 +345,7 @@ PYTHON_OBJS=	\
 		Python/jeval.o \
 		Python/jit.o \
 		Python/jitcall.o \
+		Python/jit_attrcache.o \
 		Python/jit_eval_entrypoint.o \
 		Python/jit_macros.o \
                 Python/runframe.o \
@@ -1075,6 +1076,7 @@ PYTHON_HEADERS= \
                 $(srcdir)/Include/ir_type_system.h \
                 $(srcdir)/Include/jit.h \
                 $(srcdir)/Include/jitcall.h \
+                $(srcdir)/Include/jit_attrcache.h \
                 $(srcdir)/Include/jit_locals_hack.h \
                 $(srcdir)/Include/jit_macros.h \
                 $(srcdir)/Include/SimpleOrcJit.h \
