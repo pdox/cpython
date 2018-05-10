@@ -4,36 +4,8 @@
 extern "C" {
 #endif
 
-/* JIT interface exposed to the rest of cPython */
-
-#ifndef Py_LIMITED_API
-
+#include "Jit/options.h"
 #include "jitcall.h"
-
-extern int Py_JITFlag;
-extern int Py_JITDebugFlag;
-extern char *Py_JITDebugFunc;
-extern char *Py_JITDebugFile;
-extern int Py_JITEvalBreaks;
-extern int Py_JITPatchpoint;
-extern int Py_JITNoExc;
-extern int Py_JITNoSuper;
-extern int Py_JITAsserts;
-
-/* Controls the load/store attribute cache.
-    0 - Attribute cache off
-    1 - Attribute cache on
-    2 - Verify mode (slow!)
- */
-extern int Py_JITAttrCache;
-
-void _always_assert_fail(const char *expr, const char *file, long line);
-
-#define always_assert(x) do { \
-    if (!(x)) _always_assert_fail(#x, __FILE__, __LINE__); \
-} while (0)
-
-void _PyJIT_Initialize(const char *config);
 
 /* Forward declaration */
 struct _frame;
@@ -222,8 +194,6 @@ static inline PyObject* PyJIT_ForFrame(PyObject *hint, PyCodeObject *co, PyObjec
 }
 
 void _jeval_cleanup(PyJITFunctionObject *jf);
-
-#endif /* !Py_LIMITED_API */
 
 #ifdef __cplusplus
 }

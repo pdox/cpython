@@ -9,12 +9,12 @@
 #include "Include/internal/ceval.h"
 #include "Include/internal/pystate.h"
 
+#include "Jit/attrcache.h"
+#include "Jit/entrypoint.h"
 #include "Jit/ir.h"
 #include "Jit/jit_macros.h"
-#include "Jit/jit.h"
 #include "Jit/jit_eval_entrypoint.h"
 #include "Jit/jit_locals_hack.h"
-#include "Jit/jit_attrcache.h"
 
 /* JIT data attached to a PyCodeObject */
 struct _JITData;

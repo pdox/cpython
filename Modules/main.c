@@ -1800,42 +1800,13 @@ config_init_utf8_mode(_PyCoreConfig *config)
     return _Py_INIT_OK();
 }
 
-static char *_pythonjit_default_buffer;
-
-static const char *
-_read_pythonjit_default(void) {
-    if (_pythonjit_default_buffer != NULL)
-        return _pythonjit_default_buffer;
-
-    FILE *fp = fopen("/tmp/PYTHONJIT_DEFAULT", "r");
-    if (!fp)
-        return "";
-    fseek(fp, 0, SEEK_END);
-    long sz = ftell(fp);
-    if (sz < 0) {
-        Py_FatalError("Error reading /tmp/PYTHONJIT_DEFAULT");
-    }
-    fseek(fp, 0, SEEK_SET);
-    char *buf = (char*)malloc(sz + 1);
-    size_t rc = fread(buf, 1, (size_t)sz, fp);
-    if (rc != (size_t)sz) {
-        Py_FatalError("Unexpected short count reading /tmp/PYTHONJIT_DEFAULT");
-    }
-    /* Strip trailing newlines/spaces */
-    while (sz > 0 && isspace(buf[sz-1])) sz--;
-    buf[sz] = 0;
-    fclose(fp);
-    _pythonjit_default_buffer = buf;
-    return _pythonjit_default_buffer;
-}
-
 static _PyInitError
 config_read_env_vars(_PyCoreConfig *config)
 {
     config->allocator = config_get_env_var("PYTHONMALLOC");
     config->jit = config_get_env_var("PYTHONJIT");
     if (config->jit == NULL) {
-        config->jit = _read_pythonjit_default();
+        config->jit = PyJIT_ReadDefaultOptions();
     }
 
     if (config_get_env_var("PYTHONDUMPREFS")) {

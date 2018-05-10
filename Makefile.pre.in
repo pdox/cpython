@@ -384,6 +384,8 @@ PYTHON_OBJS=	\
 ##########################################################################
 # JIT
 JIT_OBJS=	\
+		Jit/attrcache.o \
+		Jit/entrypoint.o \
 		Jit/ir_analyze.o \
 		Jit/ir_context.o \
 		Jit/ir_domtree_dataflow.o \
@@ -397,12 +399,12 @@ JIT_OBJS=	\
 		Jit/ir_stackmaps.o \
 		Jit/ir_type_system.o \
 		Jit/jeval.o \
-		Jit/jit_attrcache.o \
-		Jit/jit.o \
 		Jit/jitcall.o \
 		Jit/jit_eval_entrypoint.o \
 		Jit/jit_macros.o \
 		Jit/jeval_error_handler_trampoline.o \
+		Jit/macros.o \
+		Jit/options.o \
 		Jit/runframe.o
 
 ##########################################################################
@@ -981,6 +983,8 @@ JIT_HEADERS=	\
 		$(srcdir)/Jit/adt_hashmap.h \
 		$(srcdir)/Jit/adt_macros.h \
 		$(srcdir)/Jit/adt_vector.h \
+		$(srcdir)/Jit/attrcache.h \
+		$(srcdir)/Jit/entrypoint.h \
 		$(srcdir)/Jit/ir_all_types.def \
 		$(srcdir)/Jit/ir_analyze.h \
 		$(srcdir)/Jit/ir_context.h \
@@ -996,13 +1000,13 @@ JIT_HEADERS=	\
 		$(srcdir)/Jit/ir_stackmaps.h \
 		$(srcdir)/Jit/ir_struct_types.def \
 		$(srcdir)/Jit/ir_type_system.h \
-		$(srcdir)/Jit/jit_attrcache.h \
 		$(srcdir)/Jit/jitcall.h \
-		$(srcdir)/Jit/jit.h \
 		$(srcdir)/Jit/jit_locals_hack.h \
 		$(srcdir)/Jit/jit_macros.h \
 		$(srcdir)/Jit/SimpleOrcJit.h \
-		$(srcdir)/Jit/runframe.h
+		$(srcdir)/Jit/macros.h \
+		$(srcdir)/Jit/runframe.h \
+		$(srcdir)/Jit/options.h
 
 PYTHON_HEADERS= \
 		$(srcdir)/Include/Python.h \

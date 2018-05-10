@@ -2,8 +2,6 @@
 #include "frameobject.h"
 #include "ir.h"
 #include "Jit/jit_macros.h"
-#include "Jit/jit.h"
-
 
 typedef struct {
     ir_context context;

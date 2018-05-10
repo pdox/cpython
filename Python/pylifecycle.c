@@ -620,7 +620,7 @@ _Py_InitializeCore(const _PyCoreConfig *core_config)
         }
     }
 
-    _PyJIT_Initialize(core_config->jit);
+    PyJIT_InitOptions(core_config->jit);
 
     if (_PyRuntime.initialized) {
         return _Py_INIT_ERR("main interpreter already initialized");

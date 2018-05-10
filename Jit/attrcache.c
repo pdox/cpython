@@ -1,6 +1,7 @@
 #include "Python.h"
 #include "Objects/stringlib/eq.h"
-#include "jit_attrcache.h"
+#include "Jit/macros.h"
+#include "Jit/attrcache.h"
 #include "adt.h"
 
 #if defined(__GNUC__) && (__GNUC__ > 2) && defined(__OPTIMIZE__)

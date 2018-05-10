@@ -19,7 +19,7 @@
 #include "pydtrace.h"
 #include "setobject.h"
 #include "structmember.h"
-#include "Jit/jit.h"
+#include "Jit/entrypoint.h"
 
 #include <ctype.h>
 
