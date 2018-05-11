@@ -1,3 +1,10 @@
+#include <stdio.h>
+#include <assert.h>
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+#include "adt_macros.h"
+
 /* Hash table implementation
 
    Each bucket is an independent linked list of entries.

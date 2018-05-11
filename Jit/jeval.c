@@ -11,6 +11,7 @@
 
 #include "Jit/attrcache.h"
 #include "Jit/entrypoint.h"
+#include "Jit/dcall.h"
 #include "Jit/ir.h"
 #include "Jit/jit_macros.h"
 #include "Jit/jit_eval_entrypoint.h"
@@ -37,7 +38,7 @@ typedef struct resume_entry {
 
 /* These are kept around inside the PyJITFunctionObject,
    so that they can be released when the function is
-   deallocated. (see _jeval_cleanup) */
+   deallocated. (see PyJIT_CodeGenCleanup) */
 typedef struct {
     Py_ssize_t load_global_cache_size;
     PyObject **load_global_cache;
@@ -2766,7 +2767,7 @@ ir_type _create_direct_signature(ir_context context, int argcount) {
     /* PyObject* (PyObject* callable, PyJIT_CallSiteSig*, pyarg1, ..., pyargN) */
     ir_type *argtypes = (ir_type*)malloc((2 + argcount) * sizeof(ir_type));
     argtypes[0] = ir_type_pyobject_ptr;
-    argtypes[1] = ir_type_pyjitcallsitesig_ptr;
+    argtypes[1] = ir_type_void_ptr;
     for (int i = 0; i < argcount; i++) {
         argtypes[2 + i] = ir_type_pyobject_ptr;
     }
@@ -2786,20 +2787,20 @@ ir_value _emit_call_function(JITData *jd, ir_value callable, int oparg, PyObject
     JVALUE trampoline = ALLOCA(sig);
     IF_ELSE(IR_PyFunction_Check(callable), IR_SEMILIKELY, {
         JVALUE callable_casted = CAST(ir_type_pyfunctionobject_ptr, callable);
-        STORE(trampoline, LOAD_FIELD(callable_casted, PyFunctionObject, func_jit_call, sig));
+        STORE(trampoline, LOAD_FIELD(callable_casted, PyFunctionObject, func_dcall, sig));
     }, {
         IF_ELSE(IR_PyCFunction_Check(callable), IR_SEMILIKELY, {
             JVALUE callable_casted = CAST(ir_type_pycfunctionobject_ptr, callable);
-            STORE(trampoline, LOAD_FIELD(callable_casted, PyCFunctionObject, m_jit_call, sig));
+            STORE(trampoline, LOAD_FIELD(callable_casted, PyCFunctionObject, m_dcall, sig));
         }, {
-            STORE(trampoline, CONSTANT_PTR(sig, _PyJIT_GenericTrampoline));
+            STORE(trampoline, CONSTANT_PTR(sig, PyJIT_DCall_GetGenericEntrypoint()));
         });
     });
 
-    PyJITCallSiteSig* css = PyJIT_CallSiteSig_GetOrCreate(oparg, kwnames);
+    PyJIT_DCall_Signature* css = PyJIT_DCall_GetSignature(oparg, kwnames);
     ir_value *args = (ir_value*)malloc((2 + oparg) * sizeof(ir_value));
     args[0] = callable;
-    args[1] = CONSTANT_PTR(ir_type_pyjitcallsitesig_ptr, css);
+    args[1] = CONSTANT_PTR(ir_type_void_ptr, css);
     for (int i = 0; i < oparg; i++) {
         args[2 + i] = PEEK(oparg - i);
     }
@@ -3449,7 +3450,7 @@ _emit_function_body(JITData *jd)
 static void ir_lower(JITData *jd);
 
 PyJITFunctionObject*
-_PyJIT_CodeGen(PyCodeObject *co, PyObject *globals, PyObject *builtins) {
+PyJIT_CodeGen(PyCodeObject *co, PyObject *globals, PyObject *builtins) {
     assert(PyCode_Check(co));
     assert(PyBytes_Check(co->co_code));
     assert(PyBytes_GET_SIZE(co->co_code) <= INT_MAX);
@@ -3517,7 +3518,7 @@ _PyJIT_CodeGen(PyCodeObject *co, PyObject *globals, PyObject *builtins) {
     return jf;
 }
 
-void _jeval_cleanup(PyJITFunctionObject *jf) {
+void PyJIT_CodeGenCleanup(PyJITFunctionObject *jf) {
     if (jf->object != NULL) {
         ir_object_free((ir_object)jf->object);
         jf->object = NULL;

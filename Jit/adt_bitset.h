@@ -1,3 +1,9 @@
+#include <stdio.h>
+#include <assert.h>
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+
 typedef unsigned int adt_bitset_word;
 
 #define ADT_BITSET_WORD_BITS  (sizeof(adt_bitset_word) * 8)

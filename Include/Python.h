@@ -138,6 +138,7 @@
 #include "pyfpe.h"
 
 #include "Jit/entrypoint.h"
+#include "Jit/dcall.h"
 #include "Jit/options.h"
 #include "Jit/runframe.h"
 #include "Jit/attrcache.h"

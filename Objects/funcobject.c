@@ -8,7 +8,7 @@
 #include "structmember.h"
 
 #define RESET_TRAMPOLINE(op) do { \
-    ((PyFunctionObject*)(op))->func_jit_call = PyJIT_CallTrampoline_GetBootstrap(); \
+    ((PyFunctionObject*)(op))->func_dcall = PyJIT_DCall_GetBootstrapEntrypoint(); \
 } while (0)
 
 PyObject *

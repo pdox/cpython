@@ -111,7 +111,7 @@ PyAPI_FUNC(PyObject *) PyCFunction_NewEx(PyMethodDef *, PyObject *,
 #ifndef Py_LIMITED_API
 typedef struct {
     PyObject_HEAD
-    void *m_jit_call; /* JIT trampoline entrypoint */
+    void        *m_dcall; /* JIT direct call entrypoint */
     PyMethodDef *m_ml; /* Description of the C function to call */
     PyObject    *m_self; /* Passed as 'self' arg to the C func, can be NULL */
     PyObject    *m_module; /* The __module__ attribute, can be anything */

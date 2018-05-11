@@ -1,62 +1,10 @@
 #include "Python.h"
 #include "internal/pystate.h"
 #include "frameobject.h"
-#include "ir.h"
-#include "jit_eval_entrypoint.h"
-
-/* CallSiteSig map */
-static adt_hashmap csmap;
-
-int csmap_key_eq(void *pa, void *pb) {
-    PyJITCallSiteSig *a = *(PyJITCallSiteSig**)pa;
-    PyJITCallSiteSig *b = *(PyJITCallSiteSig**)pb;
-    if (a->hash != b->hash) return 0;
-    if (a->argcount != b->argcount) return 0;
-    if (a->kwnames && b->kwnames) {
-        int k = PyObject_RichCompareBool(a->kwnames, b->kwnames, Py_EQ);
-        assert(k >= 0);
-        if (!k) return 0;
-    } else if (a->kwnames || b->kwnames) {
-        return 0;
-    }
-    return 1;
-}
-
-size_t csmap_key_hash(void *pa) {
-    PyJITCallSiteSig *a = *(PyJITCallSiteSig**)pa;
-    return (size_t)a->hash;
-}
-
-PyJITCallSiteSig*
-PyJIT_CallSiteSig_GetOrCreate(int argcount, PyObject *kwnames) {
-    assert(argcount >= 0);
-    if (kwnames != NULL) {
-        assert(PyTuple_CheckExact(kwnames));
-        assert(PyTuple_GET_SIZE(kwnames) > 0);
-        assert(argcount >= PyTuple_GET_SIZE(kwnames));
-    }
-    PyJITCallSiteSig key;
-    key.hash = argcount + (kwnames ? PyObject_Hash(kwnames) : 0);
-    key.argcount = argcount;
-    key.kwnames = kwnames;
-
-    if (csmap == NULL)
-        csmap = adt_hashmap_new(sizeof(PyJITCallSiteSig*), sizeof(PyJITCallSiteSig*),
-                                csmap_key_eq, csmap_key_hash);
-
-    PyJITCallSiteSig *pkey = &key;
-    PyJITCallSiteSig *ret;
-    if (adt_hashmap_get(csmap, &pkey, &ret)) {
-        return ret;
-    }
-    ret = PyMem_RawMalloc(sizeof(PyJITCallSiteSig));
-    if (ret == NULL)
-        return NULL;
-    *ret = key;
-    Py_XINCREF(ret->kwnames);
-    adt_hashmap_insert(csmap, &ret, &ret);
-    return ret;
-}
+#include "Jit/ir.h"
+#include "Jit/jit_eval_entrypoint.h"
+#include "Jit/dcall_function.h"
+#include "Jit/jeval.h"
 
 PyObject *
 PyJITFunction_New(PyObject *code, PyObject *globals, PyObject *builtins) {
@@ -124,10 +72,10 @@ static int jf_clear(PyJITFunctionObject *op) {
         PyJITFunction_SetParent(op->deps_head, NULL);
     }
 
-    _jeval_cleanup(op);
+    PyJIT_CodeGenCleanup(op);
 
     if (op->trampoline) {
-        PyJIT_CallTrampoline_Free(op->trampoline);
+        PyJIT_DCall_ClearFunctionTrampoline(op->trampoline);
         op->trampoline = NULL;
     }
 
@@ -147,10 +95,10 @@ static void jf_dealloc(PyJITFunctionObject *op) {
     }
 
     /* This must be done first, since it may use code/globals/builtins. */
-    _jeval_cleanup(op);
+    PyJIT_CodeGenCleanup(op);
 
     if (op->trampoline)
-        PyJIT_CallTrampoline_Free(op->trampoline);
+        PyJIT_DCall_ClearFunctionTrampoline(op->trampoline);
 
     Py_XDECREF(op->code);
     Py_XDECREF(op->globals);
@@ -227,4 +175,95 @@ PyObject* _PyJIT_Compute_Builtins(PyObject *globals) {
         assert(builtins != NULL);
     }
     return builtins;
+}
+
+static int _should_jit(PyCodeObject *co) {
+    return Py_JITFlag != 0 &&
+           (!Py_JITDebugFunc || strcmp(Py_JITDebugFunc, PyUnicode_AsUTF8(co->co_name)) == 0) &&
+           (!Py_JITDebugFile || strstr(PyUnicode_AsUTF8(co->co_filename), Py_JITDebugFile) != NULL);
+}
+
+/* Returns a new reference to jit function, or NULL. */
+static inline
+PyObject*
+_PyJIT_GetFunction(PyObject *parent, PyCodeObject *co, PyObject *globals, PyObject *builtins) {
+    if (!_should_jit(co))
+        return NULL;
+
+    /* See if the parent is already keeping track of the jit function for us */
+    PyJITFunctionObject *candidate = NULL;
+    if (parent != NULL) {
+        assert(PyJITFunction_Check(parent));
+        PyJITFunctionObject *p = (PyJITFunctionObject*)parent;
+        PyJITFunctionObject *cursor = p->deps_head;
+        while (cursor != NULL) {
+            if (cursor->code == (PyObject*)co)
+                break;
+            cursor = cursor->next;
+        }
+        candidate = cursor;
+    }
+
+    /* Use the candidate if it is a perfect match */
+    PyJITFunctionObject *ret;
+    if (candidate &&
+        candidate->globals == globals &&
+        candidate->builtins == builtins) {
+        ret = candidate;
+        Py_INCREF(ret);
+    } else if (co->co_jit_function_generic) {
+        /* There's already a generic version, use it */
+        ret = co->co_jit_function_generic;
+        Py_INCREF(ret);
+    } else if (candidate) {
+        /* There was a candidate mismatch. Generate generic version. */
+        ret = PyJIT_CodeGen(co, NULL, NULL);
+        Py_INCREF(ret);
+        co->co_jit_function_generic = ret;
+    } else {
+        /* Try to generate non-generic version */
+        ret = PyJIT_CodeGen(co, globals, builtins);
+
+        /* If the output is generic, attach it to the code object.
+           Otherwise, attach it to our parent function. */
+        if (ret->globals == NULL) {
+            Py_INCREF(ret);
+            co->co_jit_function_generic = ret;
+        } else {
+            /* Attach to parent */
+            PyJITFunction_SetParent(ret, (PyJITFunctionObject*)parent);
+        }
+    }
+    return (PyObject*)ret;
+}
+
+PyObject* PyJIT_Prepare(PyObject *func) {
+    assert(PyFunction_Check(func));
+    PyObject *ret = ((PyFunctionObject*)func)->func_jit_function;
+    PyCodeObject *co = (PyCodeObject*)PyFunction_GET_CODE(func);
+    if (ret == NULL && _should_jit(co)) {
+        PyObject *globals = PyFunction_GET_GLOBALS(func);
+        PyObject *builtins = _PyJIT_Compute_Builtins(globals);
+        PyObject *parent = ((PyFunctionObject*)func)->func_jit_parent;
+        ret = _PyJIT_GetFunction(parent, co, globals, builtins);
+        ((PyFunctionObject*)func)->func_jit_function = ret; /* func owns reference */
+    }
+    if (ret == NULL)
+        return NULL;
+    Py_INCREF(ret);
+    return ret;
+}
+
+PyObject* PyJIT_ForFrame(PyObject *hint, PyCodeObject *co, PyObject *globals, PyObject *builtins) {
+    if (hint != NULL) {
+        return hint;
+    } else if (_should_jit(co)) {
+        if (Py_JITDebugFlag > 0) {
+            fprintf(stderr, "JIT_WARNING: One-time code generation for %s:%s\n",
+                    PyUnicode_AsUTF8(co->co_name),
+                    PyUnicode_AsUTF8(co->co_filename));
+        }
+        return (PyObject*)PyJIT_CodeGen(co, globals, builtins);
+    }
+    return NULL;
 }

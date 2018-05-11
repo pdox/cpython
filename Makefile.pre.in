@@ -384,6 +384,7 @@ PYTHON_OBJS=	\
 ##########################################################################
 # JIT
 JIT_OBJS=	\
+		Jit/asmhelper_x86_64.o \
 		Jit/attrcache.o \
 		Jit/entrypoint.o \
 		Jit/ir_analyze.o \
@@ -399,7 +400,14 @@ JIT_OBJS=	\
 		Jit/ir_stackmaps.o \
 		Jit/ir_type_system.o \
 		Jit/jeval.o \
-		Jit/jitcall.o \
+		Jit/dcall_signature.o \
+		Jit/dcall_bootstrap.o \
+		Jit/dcall_bootstrap_x86_64.o \
+		Jit/dcall_function.o \
+		Jit/dcall_function_x86_64.o \
+		Jit/dcall_cfunction.o \
+		Jit/dcall_cfunction_x86_64.o \
+		Jit/dcall_generic.o \
 		Jit/jit_eval_entrypoint.o \
 		Jit/jit_macros.o \
 		Jit/jeval_error_handler_trampoline.o \
@@ -983,6 +991,7 @@ JIT_HEADERS=	\
 		$(srcdir)/Jit/adt_hashmap.h \
 		$(srcdir)/Jit/adt_macros.h \
 		$(srcdir)/Jit/adt_vector.h \
+		$(srcdir)/Jit/asmhelper_x86_64.h \
 		$(srcdir)/Jit/attrcache.h \
 		$(srcdir)/Jit/entrypoint.h \
 		$(srcdir)/Jit/ir_all_types.def \
@@ -1000,7 +1009,12 @@ JIT_HEADERS=	\
 		$(srcdir)/Jit/ir_stackmaps.h \
 		$(srcdir)/Jit/ir_struct_types.def \
 		$(srcdir)/Jit/ir_type_system.h \
-		$(srcdir)/Jit/jitcall.h \
+		$(srcdir)/Jit/dcall.h \
+		$(srcdir)/Jit/dcall_signature.h \
+		$(srcdir)/Jit/dcall_bootstrap.h \
+		$(srcdir)/Jit/dcall_function.h \
+		$(srcdir)/Jit/dcall_cfunction.h \
+		$(srcdir)/Jit/jeval.h \
 		$(srcdir)/Jit/jit_locals_hack.h \
 		$(srcdir)/Jit/jit_macros.h \
 		$(srcdir)/Jit/SimpleOrcJit.h \

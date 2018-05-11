@@ -1,3 +1,8 @@
+#include <assert.h>
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+
 /* An contiguous list of elements which grows as needed. (shrinking not implemented)
    Based on std::vector.
  */
