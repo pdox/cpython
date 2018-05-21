@@ -44,6 +44,9 @@ typedef struct {
     PyObject **load_global_cache;
     PyDictListener *globals_dl;
     PyDictListener *builtins_dl;
+
+    // vector< PyJITAttrCache* >
+    adt_vector attrcaches;
 } _JITState;
 
 typedef struct _JITData {
@@ -2196,6 +2199,11 @@ static JVALUE _emit_load_attr(JITData *jd, PyObject *name, JVALUE receiver, JVAL
     if (!ic) {
         Py_FatalError("Failed to create attribute inline cache");
     }
+    if (jd->jstate->attrcaches == NULL) {
+        jd->jstate->attrcaches = adt_vector_new(3, sizeof(PyJITAttrCache*));
+    }
+    adt_vector_push_back(jd->jstate->attrcaches, &ic);
+
     /*
      * tp = Py_TYPE(owner);
      * if (tp == ic->entry[0].tp) {
@@ -3583,6 +3591,13 @@ void PyJIT_CodeGenCleanup(PyJITFunctionObject *jf) {
             _PyDict_DeleteListener((PyDictObject*)jf->builtins, js->builtins_dl);
         if (js->load_global_cache != NULL)
             free(js->load_global_cache);
+        if (js->attrcaches != NULL) {
+            PyJITAttrCache *ic;
+            while (adt_vector_pop_back(js->attrcaches, &ic)) {
+                PyJITAttrCache_Delete(ic);
+            }
+            adt_vector_delete(js->attrcaches);
+        }
         free(js);
         jf->jstate = NULL;
     }

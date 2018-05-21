@@ -37,6 +37,7 @@ PyJITAttrCacheStub*
 _PyJITAttrCache_GetStub(PyTypeObject *tp, PyObject *name, int is_load_method);
 
 static void _update_stub(PyTypeObject *tp, PyJITAttrCacheStub *stub);
+static void _decref_stub(PyJITAttrCacheStub* stub);
 
 #define TP_VALUE_NULL         0
 #define TP_VALUE_NOT_NULL     1
@@ -211,12 +212,13 @@ DEFINE_AUTO(descr_dict,     TP_VALUE_DESCR,      TP_DICTOFFSET)
 DEFINE_AUTO(method_dict,    TP_VALUE_METHOD,     TP_DICTOFFSET)
 
 DEFINE_HANDLER(getattr) {
+    /* NOTE: Cannot use 'stub', as it may be NULL */
     return PyObject_GetAttr(receiver, ic->attrname);
 }
 DEFINE_HANDLER_WITH_VERIFY_AS_SAME(getattr);
 
 DEFINE_HANDLER(getmethod) {
-    /* NOTE: Cannot dereference 'stub', as it may be NULL */
+    /* NOTE: Cannot use 'stub', as it may be NULL */
     PyObject *meth = NULL;
     *method_found = _PyObject_GetMethod(receiver, ic->attrname, &meth);
     return meth;
@@ -270,6 +272,8 @@ DEFINE_HANDLER(orphaned) {
     size_t i = _find_entry(ic, Py_TYPE(receiver));
     assert(i < ATTRCACHE_ENTRY_COUNT);
     ic->entries[i].tp = NULL;
+    _decref_stub(ic->entries[i].stub);
+    ic->entries[i].stub = NULL;
     stub = NULL;
     return GET_HANDLER(miss)(HANDLER_ARGS);
 }
@@ -328,10 +332,19 @@ static void _update_stub(PyTypeObject *tp, PyJITAttrCacheStub *stub) {
 }
 
 static void
-_PyJITAttrCache_DeleteStub(PyJITAttrCacheStub *stub) {
+_delete_stub(PyJITAttrCacheStub *stub) {
     assert(stub->refcnt == 0);
     Py_DECREF(stub->key.attrname);
     free(stub);
+}
+
+static void
+_decref_stub(PyJITAttrCacheStub* stub) {
+    assert(stub->refcnt > 0);
+    stub->refcnt--;
+    if (stub->refcnt == 0) {
+        _delete_stub(stub);
+    }
 }
 
 /* PyTypeObject* -> TypeInfo* */
@@ -453,10 +466,7 @@ static void release_all_stubs(TypeInfo *ti) {
     adt_hashmap_iter_begin(ti->stub_map, &cursor);
     while (adt_hashmap_iter_next(&cursor, &key, &stub)) {
         stub->handler = GET_HANDLER(orphaned);
-        stub->refcnt--;
-        if (stub->refcnt == 0) {
-            _PyJITAttrCache_DeleteStub(stub);
-        }
+        _decref_stub(stub);
     }
     adt_hashmap_delete(ti->stub_map);
     ti->stub_map = NULL;
@@ -570,4 +580,13 @@ PyJITAttrCache_New(PyObject *attrname, int is_load_method) {
     ic->attrname = attrname;
     ic->is_load_method = is_load_method;
     return ic;
+}
+
+void PyJITAttrCache_Delete(PyJITAttrCache *ic) {
+    for (size_t i = 0; i < ATTRCACHE_ENTRY_COUNT; i++) {
+        if (ic->entries[i].tp != NULL) {
+            PyJITAttrCacheStub *stub = ic->entries[i].stub;
+            _decref_stub(stub);
+        }
+    }
 }

@@ -35,6 +35,7 @@ struct _PyJITAttrCache;
 typedef struct _PyJITAttrCache PyJITAttrCache;
 
 PyJITAttrCache* PyJITAttrCache_New(PyObject *attrname, int is_load_method);
+void PyJITAttrCache_Delete(PyJITAttrCache *ic);
 
 typedef PyObject* (*GetAttrSignature)(PyObject *, PyJITAttrCache *);
 typedef PyObject* (*GetMethodSignature)(PyObject *, PyJITAttrCache *, int*);
