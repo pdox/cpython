@@ -2190,6 +2190,65 @@ EMITTER_FOR(MAP_ADD) {
     SOFT_EVAL_BREAK_CHECK();
 }
 
+static JVALUE _emit_load_attr(JITData *jd, PyObject *name, JVALUE receiver, JVALUE meth_found_ptr) {
+    int is_load_method = meth_found_ptr ? 1 : 0;
+    PyJITAttrCache *ic = PyJITAttrCache_New(name, is_load_method);
+    if (!ic) {
+        Py_FatalError("Failed to create attribute inline cache");
+    }
+    /*
+     * tp = Py_TYPE(owner);
+     * if (tp == ic->entry[0].tp) {
+     *     stub = ic->entry[0].stub;
+     * } else if (tp == ic->entry[1].tp) {
+     *     stub = ic->entry[1].stub;
+     * .
+     * .
+     * } else {
+     *     stub = &PyJITAttrCache_AttrMissStub;
+     * }
+     * res = stub->handler(receiver, stub, ic);
+     */
+    JTYPE sig;
+    if (is_load_method) {
+        sig = CREATE_SIGNATURE(
+          ir_type_pyobject_ptr,
+          ir_type_pyobject_ptr,
+          ir_type_pyjitattrcachestub_ptr,
+          ir_type_pyjitattrcache_ptr,
+          ir_type_int_ptr);
+    } else {
+        sig = CREATE_SIGNATURE(
+          ir_type_pyobject_ptr,
+          ir_type_pyobject_ptr,
+          ir_type_pyjitattrcachestub_ptr,
+          ir_type_pyjitattrcache_ptr);
+    }
+    JVALUE stubres = ALLOCA(ir_type_pyjitattrcachestub_ptr);
+    JVALUE tp = IR_Py_TYPE(receiver);
+    JVALUE icptr = CONSTANT_PTR(ir_type_pyjitattrcache_ptr, ic);
+    JVALUE entries = IR_ATTRCACHE_ENTRIES(icptr);
+    JLABEL havestub = JLABEL_INIT("havestub");
+    for (size_t i = 0; i < ATTRCACHE_ENTRY_COUNT; i++) {
+        JVALUE entryi = (i == 0) ? entries : IR_ATTRCACHE_ENTRIES_INDEX(entries, i);
+        JVALUE tpi = IR_ATTRCACHE_ENTRY_TP(entryi);
+        STORE(stubres, IR_ATTRCACHE_ENTRY_STUB(entryi));
+        BRANCH_IF(CMP_EQ(tpi, tp), havestub, IR_LIKELY);
+    }
+    STORE(stubres, CONSTANT_PTR(ir_type_pyjitattrcachestub_ptr, &PyJITAttrCache_MissStub));
+    LABEL(havestub);
+    JVALUE stub = LOAD(stubres);
+    JVALUE handler = CAST(sig, IR_ATTRCACHE_STUB_HANDLER(stub));
+    JVALUE res;
+    if (is_load_method) {
+        res = CALL_INDIRECT(handler, receiver, stub, icptr, meth_found_ptr);
+    } else {
+        res = CALL_INDIRECT(handler, receiver, stub, icptr);
+    }
+    GOTO_ERROR_IF_NOT(res);
+    return res;
+}
+
 EMITTER_FOR(LOAD_ATTR) {
     JVALUE owner = TOP();
     PyObject *name = GETNAME(oparg);
@@ -2197,12 +2256,7 @@ EMITTER_FOR(LOAD_ATTR) {
     if (Py_JITAttrCache == 0) {
         res = RTCALL_NZ(jd->sig_ooo, PyObject_GetAttr, owner, CONSTANT_PYOBJ(name));
     } else {
-        PyJITAttrCache *ic = PyJITAttrCache_New(name);
-        if (!ic) {
-            Py_FatalError("Failed to create attribute inline cache");
-        }
-        JVALUE icvalue = CONSTANT_PTR(ir_type_void_ptr, ic);
-        res = RTCALL_NZ(jd->sig_oov, PyJITAttrCache_GetAttrFunc(), owner, icvalue);
+        res = _emit_load_attr(jd, name, owner, NULL);
     }
     STACKADJ(-1);
     DECREF(owner);
@@ -2739,15 +2793,9 @@ EMITTER_FOR(LOAD_METHOD) {
         meth = LOAD(meth_ptr);
         GOTO_ERROR_IF_NOT(meth);
     } else {
-        PyJITAttrCache *ic = PyJITAttrCache_New(name);
-        if (!ic) {
-            Py_FatalError("Failed to create attribute inline cache");
-        }
-        JVALUE icvalue = CONSTANT_PTR(ir_type_void_ptr, ic);
         JVALUE meth_found_ptr = ALLOCA(ir_type_int);
         STORE(meth_found_ptr, CONSTANT_INT(0));
-        JTYPE sig = CREATE_SIGNATURE(ir_type_pyobject_ptr, ir_type_pyobject_ptr, ir_type_void_ptr, ir_type_int_ptr);
-        meth = RTCALL_NZ(sig, PyJITAttrCache_GetMethodFunc(), obj, icvalue, meth_found_ptr);
+        meth = _emit_load_attr(jd, name, obj, meth_found_ptr);
         meth_found = LOAD(meth_found_ptr);
     }
     IF_ELSE(meth_found, IR_LIKELY, {

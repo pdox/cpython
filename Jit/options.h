@@ -14,11 +14,9 @@ extern int Py_JITNoExc;
 extern int Py_JITNoSuper;
 extern int Py_JITAsserts;
 
-/* Controls the load/store attribute cache.
-    0 - Attribute cache off
-    1 - Attribute cache on
-    2 - Verify mode (slow!)
- */
+#define JIT_ATTRCACHE_OFF     0
+#define JIT_ATTRCACHE_ON      1
+#define JIT_ATTRCACHE_VERIFY  2
 extern int Py_JITAttrCache;
 
 void PyJIT_InitOptions(const char *config);

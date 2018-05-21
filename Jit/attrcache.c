@@ -1,8 +1,10 @@
+#define ATTRCACHE_SOURCE
 #include "Python.h"
 #include "Objects/stringlib/eq.h"
 #include "Jit/macros.h"
-#include "Jit/attrcache.h"
 #include "adt.h"
+#include "Jit/attrcache.h"
+#include "Jit/options.h"
 
 #if defined(__GNUC__) && (__GNUC__ > 2) && defined(__OPTIMIZE__)
 #  define UNLIKELY(value) __builtin_expect((value), 0)
@@ -14,68 +16,321 @@ extern int _PyObject_GetMethod(PyObject *, PyObject *, PyObject **);
 extern int assign_version_tag(PyTypeObject *);
 
 typedef struct {
+    int is_load_method;
     PyObject *attrname;
     Py_hash_t attrhash;
 } PyJITAttrCacheStubKey;
 
-typedef struct {
-    uint32_t refcnt;
-    uint32_t mode;
+struct _PyJITAttrCacheStub {
+    void *handler;
     PyObject *tp_value;            /* Reference borrowed from PyTypeObject */
+    Py_ssize_t tp_dictoffset;
     PyDictKeysObject *cached_keys; /* Reference borrowed from PyTypeObject */
     Py_ssize_t dk_index;
-    // Key part
-    PyObject *attrname;            /* Strong reference to attrname */
-    Py_hash_t attrhash;
-} PyJITAttrCacheStub;
 
-/* Everything is perfect, use the fast path */
-#define ATTRCACHE_STUB_FAST           0
-/* Should always use fallback mechanism */
-#define ATTRCACHE_STUB_FALLBACK       1
-/* PyTypeObject was deallocated. Stub still exists until refcnt falls to 0. */
-#define ATTRCACHE_STUB_ORPHANED       2
-/* PyTypeObject has been modified, and stub needs to be updated. */
-#define ATTRCACHE_STUB_STALE          3
+    /* This holds a strong reference to 'attrname' */
+    PyJITAttrCacheStubKey key;
+    uint32_t refcnt;
+};
+
+PyJITAttrCacheStub*
+_PyJITAttrCache_GetStub(PyTypeObject *tp, PyObject *name, int is_load_method);
+
+static void _update_stub(PyTypeObject *tp, PyJITAttrCacheStub *stub);
+
+#define TP_VALUE_NULL         0
+#define TP_VALUE_NOT_NULL     1
+#define TP_VALUE_DESCR        2
+#define TP_VALUE_METHOD       3
+
+#define NODICT              0
+#define TP_DICTOFFSET      -1
+
+/* Each automatic handler is a call to _fetch where the first three arguments
+   are known at compile-time. In theory, this will allow the compiler to propagate
+   the constants, inline, and optimize aggressively to produce an optimal version
+   of _fetch() specialized for each stub type.
+
+   If it turns out not all compilers do the right thing here, it may be necessary
+   to generate the stubs directly (e.g. using asmjit).
+ */
+static inline PyObject* _Py_HOT_FUNCTION
+_fetch(
+    int tp_value_mode,
+    Py_ssize_t dictoffset,
+    int *side_effects,
+    PyObject *receiver,
+    PyJITAttrCacheStub *stub,
+    int *method_found)
+{
+    assert(!_PyErr_OCCURRED());
+    PyObject *descr = NULL;
+    descrgetfunc f = NULL;
+    if (tp_value_mode != TP_VALUE_NULL) {
+        /* Need to hold strong reference to descr while calling
+           tp_descr_get or doing PyDict_GetItem */
+        descr = stub->tp_value;
+        Py_INCREF(descr);
+        if (tp_value_mode == TP_VALUE_DESCR) {
+            f = descr->ob_type->tp_descr_get;
+        }
+    }
+    /* Find the dictionary */
+    PyDictObject *dict = NULL;
+    if (dictoffset == TP_DICTOFFSET) {
+        dictoffset = stub->tp_dictoffset;
+    }
+    if (dictoffset != 0) {
+        if (dictoffset < 0) {
+            Py_ssize_t tsize;
+            size_t size;
+
+            tsize = ((PyVarObject *)receiver)->ob_size;
+            if (tsize < 0)
+                tsize = -tsize;
+            size = _PyObject_VAR_SIZE(Py_TYPE(receiver), tsize);
+            assert(size <= PY_SSIZE_T_MAX);
+
+            dictoffset += (Py_ssize_t)size;
+            assert(dictoffset > 0);
+            assert(dictoffset % SIZEOF_VOID_P == 0);
+        }
+        PyDictObject **dictptr;
+        dictptr = (PyDictObject **) ((char *)receiver + dictoffset);
+        dict = *dictptr;
+    }
+    if (dict != NULL) {
+        PyObject *res;
+        if (dict->ma_keys == stub->cached_keys) {
+            res = (stub->dk_index >= 0) ? dict->ma_values[stub->dk_index] : NULL;
+        } else {
+            if (side_effects) *side_effects = 1;
+            res = PyDict_GetItem((PyObject*)dict, stub->key.attrname);
+        }
+        if (res != NULL) {
+            Py_INCREF(res);
+            if (tp_value_mode != TP_VALUE_NULL) Py_DECREF(descr);
+            assert(!_PyErr_OCCURRED());
+            return res;
+        }
+    }
+    if (tp_value_mode == TP_VALUE_METHOD) {
+        *method_found = 1;
+        return descr;
+    }
+    if (tp_value_mode == TP_VALUE_DESCR) {
+        PyObject *res = f(descr, receiver, (PyObject*)Py_TYPE(receiver));
+        if (side_effects) *side_effects = 1;
+        Py_DECREF(descr);
+        return res;
+    }
+    if (tp_value_mode == TP_VALUE_NULL) {
+        PyErr_Format(PyExc_AttributeError,
+                     "'%.50s' object has no attribute '%U'",
+                     Py_TYPE(receiver)->tp_name, stub->key.attrname);
+        if (side_effects) *side_effects = 1;
+        return NULL;
+    }
+    return descr;
+}
+
+#define HANDLER_PARAMS    PyObject *receiver, PyJITAttrCacheStub *stub, PyJITAttrCache *ic, int *method_found
+#define HANDLER_ARGS      receiver, stub, ic, method_found
+
+typedef PyObject* (*handler_t)(HANDLER_PARAMS);
+
+#define _HANDLER(name)              _handler_ ## name
+#define _HANDLER_WITH_VERIFY(name)  _handler_ ## name ## _with_verify
+
+#define DEFINE_HANDLER(name) \
+  static PyObject* _Py_HOT_FUNCTION _HANDLER(name) (HANDLER_PARAMS)
+
+#define DEFINE_HANDLER_WITH_VERIFY(name) \
+  static PyObject* _Py_HOT_FUNCTION _HANDLER_WITH_VERIFY(name) (HANDLER_PARAMS)
+
+#define DEFINE_HANDLER_WITH_VERIFY_AS_SAME(name) \
+    DEFINE_HANDLER_WITH_VERIFY(name) { \
+        return _HANDLER(name)(HANDLER_ARGS); \
+    }
+
+#define GET_HANDLER(name) \
+    (Py_JITAttrCache == JIT_ATTRCACHE_VERIFY ? \
+     _HANDLER_WITH_VERIFY(name) : \
+     _HANDLER(name))
+
+#define DEFINE_AUTO(name, tp_value_mode, dictoffset) \
+  static PyObject* _Py_HOT_FUNCTION _HANDLER(name) (HANDLER_PARAMS) { \
+    return _fetch((tp_value_mode), (dictoffset), NULL, receiver, stub, method_found); \
+  } \
+  static PyObject* _Py_HOT_FUNCTION _HANDLER_WITH_VERIFY(name) (HANDLER_PARAMS) { \
+    always_assert(!_PyErr_OCCURRED()); \
+    int side_effects = 0; \
+    int mfound = 0; \
+    int *mfoundp = ic->is_load_method ? &mfound : NULL; \
+    PyObject* result = _fetch((tp_value_mode), (dictoffset), &side_effects, receiver, stub, mfoundp); \
+    return _verify(result, mfound, side_effects, ic, receiver, method_found); \
+  }
+
+static PyObject* _verify(PyObject *result, int mfound, int side_effects, PyJITAttrCache *ic, PyObject *receiver, int *method_found) {
+    if (result == NULL) {
+        always_assert(_PyErr_OCCURRED());
+    } else {
+        always_assert(!_PyErr_OCCURRED());
+    }
+    if (ic->is_load_method) {
+        *method_found = mfound;
+    } else {
+        always_assert(mfound == 0);
+    }
+    if (!side_effects) {
+        if (ic->is_load_method) {
+            PyObject *meth = NULL;
+            int tmp = _PyObject_GetMethod(receiver, ic->attrname, &meth);
+            always_assert(meth == result);
+            always_assert(tmp == mfound);
+            Py_XDECREF(meth);
+        } else {
+            PyObject *obj = PyObject_GetAttr(receiver, ic->attrname);
+            always_assert(obj == result);
+            Py_XDECREF(obj);
+        }
+    }
+    return result;
+}
+
+/* Handlers automatically generated from _fetch */
+DEFINE_AUTO(null,           TP_VALUE_NULL,       NODICT)
+DEFINE_AUTO(value,          TP_VALUE_NOT_NULL,   NODICT)
+DEFINE_AUTO(descr,          TP_VALUE_DESCR,      NODICT)
+DEFINE_AUTO(method,         TP_VALUE_METHOD,     NODICT)
+
+DEFINE_AUTO(dict,           TP_VALUE_NULL,       TP_DICTOFFSET)
+DEFINE_AUTO(dict_32,        TP_VALUE_NULL,       32)
+DEFINE_AUTO(value_dict,     TP_VALUE_NOT_NULL,   TP_DICTOFFSET)
+DEFINE_AUTO(descr_dict,     TP_VALUE_DESCR,      TP_DICTOFFSET)
+DEFINE_AUTO(method_dict,    TP_VALUE_METHOD,     TP_DICTOFFSET)
+
+DEFINE_HANDLER(getattr) {
+    return PyObject_GetAttr(receiver, ic->attrname);
+}
+DEFINE_HANDLER_WITH_VERIFY_AS_SAME(getattr);
+
+DEFINE_HANDLER(getmethod) {
+    /* NOTE: Cannot dereference 'stub', as it may be NULL */
+    PyObject *meth = NULL;
+    *method_found = _PyObject_GetMethod(receiver, ic->attrname, &meth);
+    return meth;
+}
+DEFINE_HANDLER_WITH_VERIFY_AS_SAME(getmethod);
+
+DEFINE_HANDLER(stale) {
+    _update_stub(Py_TYPE(receiver), stub);
+    return ((handler_t)stub->handler)(HANDLER_ARGS);
+}
+DEFINE_HANDLER_WITH_VERIFY_AS_SAME(stale);
+
+static inline size_t _find_entry(PyJITAttrCache *ic, PyTypeObject *tp) {
+    size_t i = 0;
+    while (i < ATTRCACHE_ENTRY_COUNT && ic->entries[i].tp != tp) i++;
+    return i;
+}
+
+DEFINE_HANDLER(miss) {
+    size_t i = _find_entry(ic, NULL);
+    if (i < ATTRCACHE_ENTRY_COUNT) {
+        PyTypeObject *tp = Py_TYPE(receiver);
+        stub = _PyJITAttrCache_GetStub(tp, ic->attrname, ic->is_load_method);
+        stub->refcnt++;
+        ic->entries[i].tp = tp;
+        ic->entries[i].stub = stub;
+        return ((handler_t)(stub->handler))(HANDLER_ARGS);
+    }
+    stub = NULL;
+    handler_t handler =
+        ic->is_load_method ? GET_HANDLER(getmethod) : GET_HANDLER(getattr);
+    return handler(HANDLER_ARGS);
+}
+DEFINE_HANDLER_WITH_VERIFY_AS_SAME(miss);
+
+PyJITAttrCacheStub PyJITAttrCache_MissStub = { _HANDLER(miss) };
+
+
+DEFINE_HANDLER(orphaned) {
+    /* Wait a minute!! This stub is orphaned, which means that its PyTypeObject
+       was deallocated. So then, how are we being called to do attribute lookup
+       on an object of that type?
+
+       This happens when a new, different PyTypeObject is created, and happens
+       to live at exactly the same address in memory as the old type. This is
+       actually quite common, since types may be created and destroyed quickly.
+
+       We could technically re-use the orphaned stub, but it is easier to just
+       discard it and create a new one.
+     */
+    size_t i = _find_entry(ic, Py_TYPE(receiver));
+    assert(i < ATTRCACHE_ENTRY_COUNT);
+    ic->entries[i].tp = NULL;
+    stub = NULL;
+    return GET_HANDLER(miss)(HANDLER_ARGS);
+}
+DEFINE_HANDLER_WITH_VERIFY_AS_SAME(orphaned);
 
 static void _update_stub(PyTypeObject *tp, PyJITAttrCacheStub *stub) {
     if (!(tp->tp_flags & Py_TPFLAGS_READY) ||
         tp->tp_getattro != PyObject_GenericGetAttr ||
         !assign_version_tag(tp)) {
-        stub->mode = ATTRCACHE_STUB_FALLBACK;
-        stub->tp_value = NULL;
-        stub->cached_keys = NULL;
-        stub->dk_index = -1;
+        stub->handler = stub->key.is_load_method ? GET_HANDLER(getmethod) : GET_HANDLER(getattr);
     } else {
-        stub->mode = ATTRCACHE_STUB_FAST;
-        stub->tp_value = _PyType_Lookup(tp, stub->attrname);
-        PyDictKeysObject *dk = NULL;
-        if (tp->tp_flags & Py_TPFLAGS_HEAPTYPE) {
-            PyHeapTypeObject *et = (PyHeapTypeObject*)tp;
-            dk = et->ht_cached_keys;
+        PyObject *descr = _PyType_Lookup(tp, stub->key.attrname);
+        Py_ssize_t dictoffset = tp->tp_dictoffset;
+        stub->tp_value = descr;
+        if (descr != NULL) {
+            descrgetfunc f = descr->ob_type->tp_descr_get;
+            if (f) {
+                /* tp_value is a descriptor */
+                if (stub->key.is_load_method &&
+                    (PyFunction_Check(descr) ||
+                     Py_TYPE(descr) == &PyMethodDescr_Type)) {
+                    stub->handler = dictoffset ? GET_HANDLER(method_dict) : GET_HANDLER(method);
+                } else if (PyDescr_IsData(descr) || dictoffset == 0) {
+                    stub->handler = GET_HANDLER(descr);
+                    dictoffset = 0; /* data descriptor takes precedence over dictionary */
+                } else {
+                    stub->handler = GET_HANDLER(descr_dict);
+                }
+            } else {
+                /* tp_value is not a descriptor */
+                stub->handler = dictoffset ? GET_HANDLER(value_dict) : GET_HANDLER(value);
+            }
+        } else {
+            /* tp_value is NULL */
+            if (dictoffset == 32) {
+                stub->handler = GET_HANDLER(dict_32);
+            } else if (dictoffset == 0) {
+                stub->handler = GET_HANDLER(null);
+            } else {
+                stub->handler = GET_HANDLER(dict);
+            }
         }
-        stub->cached_keys = dk;
-        stub->dk_index = (dk != NULL) ? lookdict_split_for_jit(dk, stub->attrname, stub->attrhash) : -1;
-    }
-}
 
-static PyJITAttrCacheStub*
-_PyJITAttrCache_MakeStub(PyTypeObject *tp, PyObject *attrname, Py_hash_t attrhash) {
-    PyJITAttrCacheStub *stub;
-    stub = (PyJITAttrCacheStub*)malloc(sizeof(PyJITAttrCacheStub));
-    stub->refcnt = 1;
-    Py_INCREF(attrname);
-    stub->attrname = attrname;
-    stub->attrhash = attrhash;
-    _update_stub(tp, stub);
-    return stub;
+        /* Fill in the dictionary info, if needed */
+        if (dictoffset != 0) {
+            stub->tp_dictoffset = dictoffset;
+            PyDictKeysObject *dk = NULL;
+            if (tp->tp_flags & Py_TPFLAGS_HEAPTYPE) {
+                PyHeapTypeObject *et = (PyHeapTypeObject*)tp;
+                dk = et->ht_cached_keys;
+            }
+            stub->cached_keys = dk;
+            stub->dk_index = (dk != NULL) ? lookdict_split_for_jit(dk, stub->key.attrname, stub->key.attrhash) : -1;
+        }
+    }
 }
 
 static void
 _PyJITAttrCache_DeleteStub(PyJITAttrCacheStub *stub) {
     assert(stub->refcnt == 0);
-    assert(stub->mode == ATTRCACHE_STUB_ORPHANED);
-    Py_DECREF(stub->attrname);
+    Py_DECREF(stub->key.attrname);
     free(stub);
 }
 
@@ -97,12 +352,13 @@ static int stub_key_eq(void *ap, void *bp) {
     PyJITAttrCacheStubKey *a = (PyJITAttrCacheStubKey*)ap;
     PyJITAttrCacheStubKey *b = (PyJITAttrCacheStubKey*)bp;
     if (a->attrhash != b->attrhash) return 0;
+    if (a->is_load_method != b->is_load_method) return 0;
     return unicode_eq(a->attrname, b->attrname);
 }
 
 static size_t stub_key_hash(void *ap) {
     PyJITAttrCacheStubKey *a = (PyJITAttrCacheStubKey*)ap;
-    return (size_t)a->attrhash;
+    return (size_t)a->attrhash + a->is_load_method;
 }
 
 static int ptr_eq(void *ap, void *bp) {
@@ -176,27 +432,34 @@ _PyJITAttrCache_GetTypeInfoFromDictKeys(PyDictKeysObject *dk) {
     return NULL;
 }
 
-static void mark_all_stubs_stale(TypeInfo *ti) {
-    adt_hashmap_cursor_t cursor;
-    adt_hashmap_iter_begin(ti->stub_map, &cursor);
+static void _set_all_handlers(TypeInfo *ti, handler_t handler) {
     PyJITAttrCacheStubKey key;
     PyJITAttrCacheStub *stub;
+    adt_hashmap_cursor_t cursor;
+    adt_hashmap_iter_begin(ti->stub_map, &cursor);
     while (adt_hashmap_iter_next(&cursor, &key, &stub)) {
-        stub->mode = ATTRCACHE_STUB_STALE;
+        stub->handler = handler;
     }
 }
 
-static void mark_all_stubs_orphaned(TypeInfo *ti) {
-    adt_hashmap_cursor_t cursor;
-    adt_hashmap_iter_begin(ti->stub_map, &cursor);
+static void mark_all_stubs_stale(TypeInfo *ti) {
+    _set_all_handlers(ti, GET_HANDLER(stale));
+}
+
+static void release_all_stubs(TypeInfo *ti) {
     PyJITAttrCacheStubKey key;
     PyJITAttrCacheStub *stub;
+    adt_hashmap_cursor_t cursor;
+    adt_hashmap_iter_begin(ti->stub_map, &cursor);
     while (adt_hashmap_iter_next(&cursor, &key, &stub)) {
-        stub->mode = ATTRCACHE_STUB_ORPHANED;
+        stub->handler = GET_HANDLER(orphaned);
+        stub->refcnt--;
         if (stub->refcnt == 0) {
             _PyJITAttrCache_DeleteStub(stub);
         }
     }
+    adt_hashmap_delete(ti->stub_map);
+    ti->stub_map = NULL;
 }
 
 static void
@@ -212,28 +475,28 @@ _PyJITAttrCache_DeleteTypeInfo(TypeInfo *ti) {
     always_assert(adt_hashmap_remove(_tp_to_type_info, &tp, &v));
     always_assert(ti == v);
 
-    /* Mark stubs as being orphaned */
-    mark_all_stubs_orphaned(ti);
-
-    /* Delete stub hashmap */
-    adt_hashmap_delete(ti->stub_map);
-
+    release_all_stubs(ti);
     free(ti);
 }
 
 PyJITAttrCacheStub*
-_PyJITAttrCache_GetStub(PyTypeObject *tp, PyObject *name) {
+_PyJITAttrCache_GetStub(PyTypeObject *tp, PyObject *name, int is_load_method) {
     /* See if there is already a stub for this (tp, name) pair */
     TypeInfo *ti = _PyJITAttrCache_GetTypeInfo(tp, 1);
     PyJITAttrCacheStubKey key;
     PyJITAttrCacheStub *stub;
+    key.is_load_method = is_load_method;
     key.attrname = name;
     key.attrhash = PyObject_Hash(name);
     if (adt_hashmap_get(ti->stub_map, &key, &stub)) {
-        stub->refcnt++;
         return stub;
     }
-    stub = _PyJITAttrCache_MakeStub(tp, key.attrname, key.attrhash);
+    /* Make the stub and insert it into the stub_map */
+    stub = (PyJITAttrCacheStub*)malloc(sizeof(PyJITAttrCacheStub));
+    Py_INCREF(key.attrname);
+    stub->key = key;
+    stub->refcnt = 1; /* Reference owned by stub_map */
+    _update_stub(tp, stub);
     always_assert(adt_hashmap_insert(ti->stub_map, &key, &stub));
     return stub;
 }
@@ -244,7 +507,6 @@ void _PyJITAttrCache_Notify_TypeModified(PyTypeObject *tp) {
         return;
 
     /* Mark all stubs as being stale */
-    //fprintf(stderr, "NOTIFY TypeModified tp=%p\n", tp);
     mark_all_stubs_stale(ti);
 }
 
@@ -252,7 +514,6 @@ void _PyJITAttrCache_Notify_TypeDealloc(PyTypeObject *tp) {
     TypeInfo *ti = _PyJITAttrCache_GetTypeInfo(tp, 0);
     if (ti == NULL)
         return;
-    //fprintf(stderr, "NOTIFY TypeDealloc tp=%p,%s\n", tp, tp->tp_name);
     _PyJITAttrCache_DeleteTypeInfo(ti);
 }
 
@@ -260,7 +521,6 @@ void _PyJITAttrCache_Notify_SetCachedKeys(PyTypeObject *tp, PyDictKeysObject *dk
     TypeInfo *ti = _PyJITAttrCache_GetTypeInfo(tp, 0);
     if (ti == NULL)
         return;
-    //fprintf(stderr, "NOTIFY SetCachedKeys tp=%p\n", tp);
 
     /* Mark all stubs as stale */
     mark_all_stubs_stale(ti);
@@ -289,250 +549,25 @@ void _PyJITAttrCache_Notify_AddKey(PyDictKeysObject *dk, PyObject *attrkey, Py_h
 
     /* There may be an existing stub for this key (with a dk_index of -1)
        which is no longer valid. Mark all stubs with this hash invalid. */
-    adt_hashmap_cursor_t cursor;
-    adt_hashmap_iter_begin(ti->stub_map, &cursor);
     PyJITAttrCacheStubKey key;
     PyJITAttrCacheStub *stub;
+    adt_hashmap_cursor_t cursor;
+    adt_hashmap_iter_begin(ti->stub_map, &cursor);
     while (adt_hashmap_iter_next(&cursor, &key, &stub)) {
         if (key.attrhash == attrhash) {
-            stub->mode = ATTRCACHE_STUB_STALE;
+            stub->handler = GET_HANDLER(stale);
         }
     }
 }
-
-typedef struct {
-    PyTypeObject *tp;
-    PyJITAttrCacheStub *stub;
-} PyJITAttrCacheEntry;
-
-#define MAX_IC_SLOTS 4
-
-typedef struct _PyJITAttrCache {
-    PyJITAttrCacheEntry entries[MAX_IC_SLOTS];
-    uint64_t counts[MAX_IC_SLOTS];
-    PyObject *attrname; /* Borrowed reference */
-} PyJITAttrCache;
 
 PyJITAttrCache*
-PyJITAttrCache_New(PyObject *attrname) {
+PyJITAttrCache_New(PyObject *attrname, int is_load_method) {
     assert(PyUnicode_CheckExact(attrname));
-    PyJITAttrCache *ret = (PyJITAttrCache*)malloc(sizeof(PyJITAttrCache));
-    memset(ret, 0, sizeof(PyJITAttrCache));
-    ret->attrname = attrname;
-    return ret;
-}
-
-static inline size_t
-_ic_lookup(PyTypeObject *tp, PyJITAttrCache *ic) {
-    size_t i = 0;
-    while (i < MAX_IC_SLOTS && ic->entries[i].tp != tp) i++;
-    if (i == MAX_IC_SLOTS) {
-        /* Find an empty slot */
-        i = 0;
-        while (i < MAX_IC_SLOTS && ic->entries[i].tp != NULL) i++;
-        if (i == MAX_IC_SLOTS) return MAX_IC_SLOTS;
-        PyJITAttrCacheStub *stub = _PyJITAttrCache_GetStub(tp, ic->attrname);
-        ic->entries[i].tp = tp;
-        ic->entries[i].stub = stub;
-    }
-    return i;
-}
-
-static inline PyObject*
-_PyJITAttrCache_FetchFallback(
-        PyObject *receiver,
-        PyJITAttrCache *ic,
-        int *method_found,
-        int *side_effects) {
-    assert(!_PyErr_OCCURRED());
-    if (side_effects) *side_effects = 1;
-    if (method_found == NULL) {
-        return PyObject_GetAttr(receiver, ic->attrname);
-    } else {
-        PyObject *meth = NULL;
-        *method_found = _PyObject_GetMethod(receiver, ic->attrname, &meth);
-        return meth;
-    }
-}
-
-static inline PyObject* _Py_HOT_FUNCTION
-_PyJITAttrCache_Fetch(
-        PyObject *receiver,
-        PyJITAttrCache *ic,
-        int *method_found,
-        int *side_effects) {
-    assert(!_PyErr_OCCURRED());
-    PyTypeObject *tp = Py_TYPE(receiver);
-    size_t ic_slot;
-    PyJITAttrCacheStub *stub;
-
- restart1:
-    ic_slot = _ic_lookup(tp, ic);
-    stub = (ic_slot < MAX_IC_SLOTS) ? ic->entries[ic_slot].stub : NULL;
-
- restart2:
-/*
-    fprintf(stderr, "PyJITAttrCache_Fetch: ic=%p, slot=%zu, tp=%s, attr=%s, stub=%p",
-            ic,
-            ic_slot,
-            tp->tp_name,
-            PyUnicode_AsUTF8(ic->attrname),
-            stub);
-    if (stub != NULL) {
-        fprintf(stderr, "[ refcnt=%u, mode=%u, tp_value=%p, cached_keys=%p, dk_index=%zd, attrname=%s, attrhash=%zu ]\n",
-                stub->refcnt,
-                stub->mode,
-                stub->tp_value,
-                stub->cached_keys,
-                stub->dk_index,
-                PyUnicode_AsUTF8(stub->attrname),
-                stub->attrhash);
-    } else {
-        fprintf(stderr, "[]\n");
-    }
-*/
-    if (UNLIKELY(stub == NULL)) {
-        return _PyJITAttrCache_FetchFallback(receiver, ic, method_found, side_effects);
-    }
-    if (UNLIKELY(stub->mode != ATTRCACHE_STUB_FAST)) {
-        assert(!_PyErr_OCCURRED());
-        if (stub->mode == ATTRCACHE_STUB_FALLBACK) {
-            return _PyJITAttrCache_FetchFallback(receiver, ic, method_found, side_effects);
-        } else if (stub->mode == ATTRCACHE_STUB_STALE) {
-            _update_stub(Py_TYPE(receiver), stub);
-            goto restart2;
-        } else if (stub->mode == ATTRCACHE_STUB_ORPHANED) {
-            /* Stub is invalid. Clear it. */
-            ic->entries[ic_slot].tp = NULL;
-            ic->entries[ic_slot].stub = NULL;
-            goto restart1;
-        } else {
-            char buf[256];
-            sprintf(buf, "Invalid stub mode: %d", (int)stub->mode);
-            Py_FatalError(buf);
-        }
-    }
-
-    PyObject* descr = stub->tp_value;
-    descrgetfunc f = NULL;
-    int descr_is_method = 0;
-    if (descr != NULL) {
-        /* Need to hold strong reference to descr while calling
-           tp_descr_get or doing PyDict_GetItem */
-        Py_INCREF(descr);
-        f = descr->ob_type->tp_descr_get;
-        if (f != NULL) {
-            if (method_found &&
-                (PyFunction_Check(descr) ||
-                 Py_TYPE(descr) == &PyMethodDescr_Type)) {
-                descr_is_method = 1;
-            } else if (PyDescr_IsData(descr)) {
-                PyObject* res = f(descr, receiver, (PyObject*)tp);
-                if (side_effects) *side_effects = 1;
-                Py_DECREF(descr);
-                return res;
-            }
-        }
-    }
-    /* Find the dictionary */
-    PyDictObject *dict = NULL;
-    Py_ssize_t dictoffset = tp->tp_dictoffset;
-    if (dictoffset != 0) {
-        if (dictoffset < 0) {
-            Py_ssize_t tsize;
-            size_t size;
-
-            tsize = ((PyVarObject *)receiver)->ob_size;
-            if (tsize < 0)
-                tsize = -tsize;
-            size = _PyObject_VAR_SIZE(tp, tsize);
-            assert(size <= PY_SSIZE_T_MAX);
-
-            dictoffset += (Py_ssize_t)size;
-            assert(dictoffset > 0);
-            assert(dictoffset % SIZEOF_VOID_P == 0);
-        }
-        PyDictObject **dictptr;
-        dictptr = (PyDictObject **) ((char *)receiver + dictoffset);
-        dict = *dictptr;
-    }
-    if (dict != NULL) {
-        PyObject *res;
-        if (dict->ma_keys == stub->cached_keys) {
-            res = (stub->dk_index >= 0) ? dict->ma_values[stub->dk_index] : NULL;
-        } else {
-            if (side_effects) *side_effects = 1;
-            res = PyDict_GetItem((PyObject*)dict, stub->attrname);
-        }
-        if (res != NULL) {
-            Py_INCREF(res);
-            Py_XDECREF(descr);
-            assert(!_PyErr_OCCURRED());
-            return res;
-        }
-    }
-    if (descr_is_method) {
-        *method_found = 1;
-        return descr;
-    }
-    if (f != NULL) {
-        PyObject *res = f(descr, receiver, (PyObject*)tp);
-        if (side_effects) *side_effects = 1;
-        Py_DECREF(descr);
-        return res;
-    }
-    if (UNLIKELY(descr == NULL)) {
-        PyErr_Format(PyExc_AttributeError,
-                     "'%.50s' object has no attribute '%U'",
-                     tp->tp_name, stub->attrname);
-        if (side_effects) *side_effects = 1;
-        return NULL;
-    }
-    return descr;
-}
-
-static inline PyObject*
-_PyJITAttrCache_FetchAndVerify(
-        PyObject *receiver,
-        PyJITAttrCache *ic,
-        int *method_found,
-        int *side_effects_unused) {
-    int side_effects = 0;
-    assert(!_PyErr_OCCURRED());
-    PyObject *ret = _PyJITAttrCache_Fetch(receiver, ic, method_found, &side_effects);
-    if (!side_effects) {
-        assert(!_PyErr_OCCURRED());
-        int tmp = 0;
-        int *verify_method_found = method_found ? &tmp : NULL;
-        PyObject *verify_ret = _PyJITAttrCache_FetchFallback(receiver, ic, verify_method_found, NULL);
-        assert(verify_ret == ret);
-        Py_XDECREF(verify_ret);
-        if (method_found) {
-            assert(*verify_method_found == *method_found);
-        }
-    }
-    return ret;
-}
-
-/* This is the main entrypoint for attribute lookup */
-PyObject* _Py_HOT_FUNCTION
-_PyJITAttrCache_GetAttr(PyObject *receiver, PyJITAttrCache *ic) {
-    return _PyJITAttrCache_Fetch(receiver, ic, NULL, NULL);
-}
-
-PyObject* _Py_HOT_FUNCTION
-_PyJITAttrCache_GetAttrAndVerify(PyObject *receiver, PyJITAttrCache *ic) {
-    return _PyJITAttrCache_FetchAndVerify(receiver, ic, NULL, NULL);
-
-}
-
-/* This is the main entrypoint for attribute lookup */
-PyObject* _Py_HOT_FUNCTION
-_PyJITAttrCache_GetMethod(PyObject *receiver, PyJITAttrCache *ic, int *method_found) {
-    return _PyJITAttrCache_Fetch(receiver, ic, method_found, NULL);
-}
-
-PyObject* _Py_HOT_FUNCTION
-_PyJITAttrCache_GetMethodAndVerify(PyObject *receiver, PyJITAttrCache *ic, int *method_found) {
-    return _PyJITAttrCache_FetchAndVerify(receiver, ic, method_found, NULL);
+    PyJITAttrCache *ic = (PyJITAttrCache*)malloc(sizeof(PyJITAttrCache));
+    /* Zero-out both entries. The first use of this cache will trigger the
+       fallback handler, and fill in the first stub. */
+    memset(ic, 0, sizeof(PyJITAttrCache));
+    ic->attrname = attrname;
+    ic->is_load_method = is_load_method;
+    return ic;
 }

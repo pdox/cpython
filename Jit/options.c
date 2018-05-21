@@ -13,7 +13,7 @@ int Py_JITEvalBreaks;
 int Py_JITPatchpoint;
 int Py_JITNoExc;
 int Py_JITNoSuper;
-int Py_JITAttrCache = 1;
+int Py_JITAttrCache = JIT_ATTRCACHE_ON;
 
 #ifdef NDEBUG
 int Py_JITAsserts = 0;
@@ -65,11 +65,11 @@ void PyJIT_InitOptions(const char *config) {
             Py_JITNoSuper = 1;
         } else if (OPTION_WITH_VALUE("attrcache")) {
             if (strcmp(value, "off") == 0) {
-                Py_JITAttrCache = 0;
+                Py_JITAttrCache = JIT_ATTRCACHE_OFF;
             } else if (strcmp(value, "on") == 0) {
-                Py_JITAttrCache = 1;
+                Py_JITAttrCache = JIT_ATTRCACHE_ON;
             } else if (strcmp(value, "verify") == 0) {
-                Py_JITAttrCache = 2;
+                Py_JITAttrCache = JIT_ATTRCACHE_VERIFY;
             } else {
                 char err[256];
                 sprintf(err, "Unrecognized PYTHONJIT attrcache option: %s", value);

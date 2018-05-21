@@ -5,12 +5,36 @@
 extern "C" {
 #endif
 
-extern int Py_JITAttrCache;
+#ifndef ATTRCACHE_SOURCE
+/* This is just the external view of a stub for jeval.
+   There are actually more fields... see attrcache.c */
+typedef struct _PyJITAttrCacheStub {
+    void *handler;
+} PyJITAttrCacheStub;
+#else
+struct _PyJITAttrCacheStub;
+typedef struct _PyJITAttrCacheStub PyJITAttrCacheStub;
+#endif
+
+extern PyJITAttrCacheStub PyJITAttrCache_MissStub;
+
+typedef struct {
+    PyTypeObject *tp;
+    PyJITAttrCacheStub *stub;
+} PyJITAttrCacheEntry;
+
+#define ATTRCACHE_ENTRY_COUNT  4
+
+typedef struct _PyJITAttrCache {
+    PyJITAttrCacheEntry entries[ATTRCACHE_ENTRY_COUNT];
+    PyObject *attrname; /* Borrowed reference */
+    int is_load_method;
+} PyJITAttrCache;
 
 struct _PyJITAttrCache;
 typedef struct _PyJITAttrCache PyJITAttrCache;
 
-PyJITAttrCache* PyJITAttrCache_New(PyObject *attrname);
+PyJITAttrCache* PyJITAttrCache_New(PyObject *attrname, int is_load_method);
 
 typedef PyObject* (*GetAttrSignature)(PyObject *, PyJITAttrCache *);
 typedef PyObject* (*GetMethodSignature)(PyObject *, PyJITAttrCache *, int*);

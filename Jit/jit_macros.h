@@ -536,3 +536,27 @@ void _jit_macros_xdecref_helper(PyObject *obj);
         XDECREF(IR_PyRunFrame_GET_LOCALS(rf)); \
     }); \
 } while (0)
+
+/* Get &ic->entries[0] */
+#define IR_ATTRCACHE_ENTRIES(icptr) \
+    ir_get_element_ptr( \
+        jd->func, \
+        (icptr), \
+        offsetof(PyJITAttrCache, entries), \
+        ir_type_pyjitattrcacheentry, "entries")
+
+/* Get &ic->entries[i] */
+#define IR_ATTRCACHE_ENTRIES_INDEX(entries, i) \
+    ir_get_index_ptr(jd->func, (entries), CONSTANT_INT(i))
+
+/* Get entry->tp */
+#define IR_ATTRCACHE_ENTRY_TP(entryptr) \
+    LOAD_FIELD((entryptr), PyJITAttrCacheEntry, tp, ir_type_pytypeobject_ptr)
+
+/* Get entry->stub */
+#define IR_ATTRCACHE_ENTRY_STUB(entryptr) \
+    LOAD_FIELD((entryptr), PyJITAttrCacheEntry, stub, ir_type_pyjitattrcachestub_ptr)
+
+/* Get stub->handler */
+#define IR_ATTRCACHE_STUB_HANDLER(stubptr) \
+    LOAD_FIELD((stubptr), PyJITAttrCacheStub, handler, ir_type_void_ptr)
