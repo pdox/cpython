@@ -137,6 +137,7 @@
 #include "fileutils.h"
 #include "pyfpe.h"
 
+#include "Jit/function.h"
 #include "Jit/entrypoint.h"
 #include "Jit/dcall.h"
 #include "Jit/options.h"
